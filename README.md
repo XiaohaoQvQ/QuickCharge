@@ -170,3 +170,9 @@ grep -c thermal_zone /proc/mounts                   # 应为 0
 ```
 
 卸载后重启一次最干净。
+
+## 许可证
+
+GNU General Public License v3.0（`GPL-3.0-only`）。全文见 [LICENSE](LICENSE)。
+
+你可以自由使用、修改、再分发；分发修改版时必须同样以 GPL-3.0 开源，并保留版权声明。本模块按「现状」提供，不附带任何担保——改温控与充电策略存在硬件风险，自行承担。

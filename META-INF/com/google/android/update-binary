@@ -1,0 +1,37 @@
+#!/sbin/sh
+#################
+# Magisk module installer shim
+# KernelSU / APatch 同样兼容这套入口
+#################
+umask 022
+
+OUTFD=$2
+ZIPFILE=$3
+
+ui_print() { echo "$1"; }
+
+mount /data 2>/dev/null
+
+# 这个入口只在 Magisk 下有意义：它依赖 util_functions.sh 的 install_module。
+# KernelSU / APatch 有自己的安装器，会直接解析 zip，不走这里；
+# 如果没有 Magisk 环境就明确拒绝，避免把文件解压到错误位置。
+if [ ! -f /data/adb/magisk/util_functions.sh ]; then
+  ui_print "*******************************"
+  ui_print " 未检测到 Magisk"
+  ui_print " KernelSU / APatch 请用各自的管理器安装本模块"
+  ui_print " 不要在 recovery 里直接刷入"
+  ui_print "*******************************"
+  exit 1
+fi
+
+. /data/adb/magisk/util_functions.sh
+
+if [ "${MAGISK_VER_CODE:-0}" -lt 20400 ]; then
+  ui_print "*******************************"
+  ui_print " 需要 Magisk v20.4+"
+  ui_print "*******************************"
+  exit 1
+fi
+
+install_module
+exit 0
