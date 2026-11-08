@@ -229,7 +229,7 @@
     $("ver").textContent = "v" + (d.version || "—");
     $("dot").className = "dot" + (d.daemon ? " on" : "");
     $("real").textContent = d.real === null ? "—" : d.real + "℃";
-    $("out").textContent = d.mode === "off" ? "原始" : (d.shell_temp + "℃");
+    $("out").textContent = (d.target === null || d.target === 0) ? "原始" : (d.target + "℃");
     $("mounted").textContent = d.mounted;
     $("daemon").textContent = d.daemon ? "运行" : "停止";
     $("safety").style.display = d.safety ? "block" : "none";

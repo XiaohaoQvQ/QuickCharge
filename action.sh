@@ -95,7 +95,7 @@ sd_do_status() {
 # 供 WebUI / 元模块消费。所有数值先过一遍夹紧，不会吐越界值；
 # 无法读到的字段给 null，前端据此显示"—"而不是 0。
 sd_do_json() {
-    local mode c nc wall aggr curmax curtar sz sname real slim bc mt dm bl sl rj blj slj
+    local mode c nc wall aggr curmax curtar sz sname real slim bc mt dm bl sl rj blj slj tgt
     mode=$(sd_state_get temp_mode off)
     [ "$mode" = "dyn" ] && mode=static
     c=$(sd_state_get core_temp off)
@@ -114,13 +114,20 @@ sd_do_json() {
     bc=0; read -r bc 2>/dev/null <"$SD_DATA/boot.count"
     case "$bc" in ''|*[!0-9]*) bc=0 ;; esac
 
+    # 当前决策值：面板显示"上报"必须用真实计算出的目标，不能拿 shell_temp 代替
+    # （渐进让步会让 41℃ 真实温度上报 39℃，与基准 30 相差很远）
+    tgt=0
+    if [ "$mode" = static ]; then
+        sd_shell_target >/dev/null
+        tgt=$_sd_last_out
+    fi
     bl=$(sd_state_get battery_limit 48);  case "$bl" in off) blj='"off"' ;; *) blj=$bl ;; esac
     sl=$(sd_state_get sentinel_limit 85); case "$sl" in off) slj='"off"' ;; *) slj=$sl ;; esac
     case "$real" in ''|*[!0-9]*) rj=null ;; *) rj=$real ;; esac
 
-    printf '{"version":"%s","mode":"%s","shell_temp":%s,"aggr":%s,"gap":%s,' \
+    printf '{"version":"%s","mode":"%s","shell_temp":%s,"target":%s,"aggr":%s,"gap":%s,' \
         "$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)" \
-        "$mode" "$(sd_state_int shell_temp 30 25 60)" "$aggr" "$((2 + aggr))"
+        "$mode" "$(sd_state_int shell_temp 30 25 60)" "$tgt" "$aggr" "$((2 + aggr))"
     printf '"wall":"%s","core":"%s","noncore":"%s",' "$wall" "$c" "$nc"
     printf '"sentinel":"%s","real":%s,"limit":"%s",' "$sname" "$rj" "${slim:-off}"
     printf '"curr_max":%s,"curr_target":%s,"fast_cap":%s,' \

@@ -303,7 +303,12 @@ echo "$J" | grep -q '"gap":12' && ok "json gap=12" || ng "json gap 错误"
 echo "$J" | grep -q '"mode":"off"' && ok "json mode=off" || ng "json mode 错误"
 echo "$J" | grep -q '"mounted":0' && ok "json mounted=0(未挂载)" || ng "json mounted 错误"
 echo "$J" | grep -q '"daemon":false' && ok "json daemon=false" || ng "json daemon 错误"
-echo "$J" | grep -q '"version":"2.1.0"' && ok "json 带版本号" || ng "json 缺版本号"
+echo "$J" | grep -q '"version":"2.1.1"' && ok "json 带版本号" || ng "json 缺版本号"
+echo "$J" | grep -q '"target":0' && ok "json 关闭模式 target=0" || ng "json target 异常"
+printf 'temp_mode=static\nshell_temp=30\nwall=42\naggr=10\n' >"$SDD/state.conf"
+printf '41000\n' >/sys/class/thermal/thermal_zone1/temp
+J2=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh json 2>/dev/null)
+echo "$J2" | grep -q '"target":39' && ok "json 上报值按渐进让步算(41→39)" || ng "json target 未按决策计算: $J2"
 
 SD_NO_DAEMON=1 sh /opt/qc/action.sh base 35 >/dev/null 2>&1
 eq "$?" "0" "base 35 执行成功"

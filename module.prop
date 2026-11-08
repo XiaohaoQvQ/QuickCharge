@@ -1,6 +1,6 @@
 id=quickcharge
 name=Quick Charge
-version=2.1.0
-versioncode=21000
+version=2.1.1
+versioncode=21001
 author=https://github.com/XiaohaoQvQ
 description=QC · 温控与充电策略改写 · 42℃以下满功率 · 全程可回滚 · 支持元模块挂载
