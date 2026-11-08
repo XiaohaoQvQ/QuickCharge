@@ -16,10 +16,11 @@
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   body{
-    margin:0;padding:16px 14px calc(28px + env(safe-area-inset-bottom));
+    margin:0 auto;padding:16px 14px 28px;
+    padding:16px 14px calc(28px + env(safe-area-inset-bottom));
     background:var(--bg);color:var(--fg);
     font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif;
-    max-width:560px;margin-inline:auto;
+    max-width:560px;
   }
   header{display:flex;align-items:baseline;gap:8px;margin:4px 0 16px}
   header h1{font-size:20px;margin:0;letter-spacing:.2px}
@@ -27,7 +28,9 @@
   .dot{width:7px;height:7px;border-radius:50%;background:var(--dim);margin-left:auto;align-self:center}
   .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
   .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:12px}
-  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;text-align:center}
+  .grid{display:flex;flex-wrap:wrap;gap:10px;text-align:center;
+        display:grid;grid-template-columns:repeat(4,1fr)}
+  .grid>div{flex:1 0 20%;min-width:0}
   .grid .k{font-size:11px;color:var(--dim);margin-bottom:3px}
   .grid .v{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
   h2{font-size:13px;color:var(--dim);font-weight:600;margin:0 0 10px;letter-spacing:.3px}
@@ -35,9 +38,7 @@
   .row:first-of-type{margin-top:4px}
   .row label{font-size:14px}
   .row .val{font-size:14px;font-weight:600;color:var(--accent-2);font-variant-numeric:tabular-nums}
-  input[type=range]{
-    width:100%;margin:0;accent-color:var(--accent);height:28px;background:transparent
-  }
+  input[type=range]{width:100%;margin:0;accent-color:var(--accent);height:28px;background:transparent}
   .seg{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:6px}
   .seg4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px}
   .seg button,.seg4 button{
@@ -62,6 +63,7 @@
   .acts button:active{background:var(--line)}
   footer{margin-top:18px;text-align:center;font-size:12px;color:var(--dim);line-height:1.9}
   footer a{color:var(--accent-2);text-decoration:none}
+  footer .lk{color:var(--accent-2);text-decoration:underline}
   #toast{
     position:fixed;left:50%;bottom:36px;transform:translate(-50%,20px);
     background:#000d;color:#fff;padding:10px 16px;border-radius:12px;font-size:13px;
@@ -70,9 +72,25 @@
   #toast.show{opacity:1;transform:translate(-50%,0)}
   #toast.bad{background:#7a1d1dee}
   .banner{display:none;background:rgba(255,92,92,.12);border:1px solid var(--err);color:var(--err);
-    border-radius:12px;padding:10px 12px;font-size:13px;margin-bottom:12px}
+    border-radius:12px;padding:10px 12px;font-size:13px;margin-bottom:12px;line-height:1.6;word-break:break-all}
+  .banner.info{background:rgba(127,127,127,.10);border-color:var(--line);color:var(--dim)}
   .safety{display:none;background:rgba(255,176,32,.12);border:1px solid var(--warn);color:var(--warn);
     border-radius:12px;padding:10px 12px;font-size:13px;margin-bottom:12px}
+  #diagPre{
+    margin:0;font:11px/1.6 ui-monospace,Menlo,Consolas,monospace;color:var(--dim);
+    white-space:pre-wrap;word-break:break-all;max-height:260px;overflow:auto;
+    background:rgba(127,127,127,.08);border-radius:8px;padding:8px
+  }
+  .mask{position:fixed;top:0;left:0;right:0;bottom:0;background:#000a;display:none;
+    align-items:center;justify-content:center;z-index:20;padding:24px}
+  .mask.show{display:flex}
+  .mask .box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;
+    max-width:340px;width:100%}
+  .mask p{margin:0 0 14px;font-size:14px;line-height:1.7}
+  .mask .b{display:flex;gap:8px}
+  .mask .b button{flex:1;padding:11px 0;border-radius:11px;border:1px solid var(--line);
+    background:transparent;color:var(--fg);font-size:14px;font-weight:600}
+  .mask .b button.pri{background:var(--accent);border-color:var(--accent);color:#fff}
 </style>
 </head>
 <body>
@@ -83,7 +101,7 @@
   <span class="dot" id="dot"></span>
 </header>
 
-<div class="banner" id="banner">未检测到 KernelSU WebUI 环境，页面无法执行命令。</div>
+<div class="banner" id="banner"></div>
 <div class="safety" id="safety">⚠ 安全模式：连续多次开机未完成，本次未挂载配置。可在下方“重挂”退出。</div>
 
 <div class="card">
@@ -92,6 +110,16 @@
     <div><div class="k">上报</div><div class="v" id="out">—</div></div>
     <div><div class="k">挂载</div><div class="v" id="mounted">—</div></div>
     <div><div class="k">守护</div><div class="v" id="daemon">—</div></div>
+  </div>
+</div>
+
+<div class="card" id="diagCard" style="display:none">
+  <h2>环境自检 <span class="tag" id="diagTag">自动展开</span></h2>
+  <pre id="diagPre">—</pre>
+  <div class="acts" style="margin-top:10px">
+    <button id="diagRun">重新检测</button>
+    <button id="diagCopy">复制</button>
+    <button id="diagHide">收起</button>
   </div>
 </div>
 
@@ -172,50 +200,230 @@
 <footer>
   作者 <a href="https://github.com/XiaohaoQvQ" target="_blank" rel="noopener">XiaohaoQvQ</a>
   · <a href="https://www.coolapk.com/u/27316679" target="_blank" rel="noopener">酷安</a><br>
-  代码由 AI 辅助完成
+  代码由 AI 辅助完成<br>
+  <span class="lk" id="diagOpen">点不开就点这里 → 环境自检</span>
 </footer>
 
 <div id="toast"></div>
 
+<div class="mask" id="ask">
+  <div class="box">
+    <p id="askMsg"></p>
+    <div class="b">
+      <button id="askNo">取消</button>
+      <button id="askYes" class="pri">确认</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (function () {
   "use strict";
-  var MOD = null, S = null, timer = null, hzHard = false;
-  var pwr = [], pwrTimer = null;
+
+  // 整套前端不依赖 Promise / 箭头函数 / 模板字符串：
+  // 个别机型的 WebUI 用的是系统 WebView，版本被厂商锁在很老的 Chromium，
+  // 一旦某个语法不被支持，整段脚本会在解析阶段就挂掉，表现是"页面能看、点啥都没反应"。
+  // 全部改成回调 + ES5，是这类"整页假死"最省事的根治办法。
+
+  var SH = "/system/bin/sh";
+  var MOD = null;
+  var S = null;
+  var hzHard = false;
+  var timer = null;
+  var pwr = [];
+  var pwrTimer = null;
+  var pwrBusy = false;
+  var lastErr = "";
+  var CAND = ["/data/adb/modules/quickcharge", "/data/adb/modules_update/quickcharge"];
 
   function $(id) { return document.getElementById(id); }
 
-  function exec(cmd) {
-    return new Promise(function (resolve) {
-      var settled = false;
-      function done(code, out, err) {
-        if (settled) return;
-        settled = true;
-        resolve({ code: Number(code) || 0, out: out || "", err: err || "" });
+  function bridgeName() {
+    if (window.ksu && typeof window.ksu.exec === "function") return "ksu";
+    if (window.mmrl && typeof window.mmrl.exec === "function") return "mmrl";
+    if (window.apatch && typeof window.apatch.exec === "function") return "apatch";
+    if (typeof window.exec === "function") return "global";
+    return "";
+  }
+
+  function api() {
+    if (window.ksu && typeof window.ksu.exec === "function") return window.ksu;
+    if (window.apatch && typeof window.apatch.exec === "function") return window.apatch;
+    if (typeof window.exec === "function") return window;
+    return null;
+  }
+
+  // ---- 执行通道 ----
+  // KernelSU 原生签名是 ksu.exec(命令, JSON字符串, 回调函数名)：
+  // 第三个参数是"名字"，原生侧执行 window[名字](errno, stdout, stderr) 回传结果。
+  // 直接塞函数对象进去，window[函数源码] 是 undefined，回调永远不来 ——
+  // 页面就停在"全是 —、点啥都没反应"，看起来像整个 WebUI 坏了。
+  // 不同管理器/版本的形态还不一样（有的收函数、有的返回 Promise、有的同步返回），
+  // 所以启动时用 echo 探一次，选定一种之后全程只用它，避免写命令被执行两遍。
+
+  var CALL = "";        // name | fn | sync | mmrl
+  var SEQ = 0;
+
+  function num(v) { return (v === null || v === undefined || v === "") ? 0 : (Number(v) || 0); }
+  function str(v) { return (v === null || v === undefined) ? "" : String(v); }
+
+  function unpack(v) {
+    if (typeof v === "string") { try { v = JSON.parse(v); } catch (e) {} }
+    if (v && typeof v === "object" && v.errno !== undefined) {
+      return { code: num(v.errno), out: str(v.stdout), err: str(v.stderr) };
+    }
+    return null;
+  }
+
+  function callName(cmd, ms, cb) {
+    var a = api();
+    if (!a) { cb({ code: -1, out: "", err: "没有可用的执行接口" }); return; }
+    var key = "__qc" + (++SEQ) + "x" + ((Math.random() * 1e6) | 0);
+    var done = false, t = null;
+    function fin(code, out, err) {
+      if (done) return;
+      done = true;
+      if (t) { clearTimeout(t); t = null; }
+      try { delete window[key]; } catch (e) { window[key] = null; }
+      cb({ code: num(code), out: str(out), err: str(err) });
+    }
+    window[key] = fin;
+    t = setTimeout(function () {
+      if (done) return;
+      done = true;
+      try { delete window[key]; } catch (e) { window[key] = null; }
+      cb({ code: -2, out: "", err: "回调未触发" });
+    }, ms);
+    try {
+      var r = a.exec(cmd, "{}", key);
+      var u = unpack(r);
+      if (u) { fin(u.code, u.out, u.err); return; }
+      if (r && typeof r.then === "function") {
+        r.then(function (v) { var w = unpack(v); if (w) fin(w.code, w.out, w.err); }, function () {});
       }
-      try {
-        if (window.ksu && typeof window.ksu.exec === "function") {
-          var ret = window.ksu.exec(cmd, "{}", function (c, o, e) { done(c, o, e); });
-          if (ret && typeof ret.then === "function") {
-            ret.then(function (v) {
-              if (typeof v === "string") { try { v = JSON.parse(v); } catch (x) {} }
-              done(v && (v.errno !== undefined ? v.errno : v.code), v && v.stdout, v && v.stderr);
-            }).catch(function () { done(-1, "", "exec rejected"); });
-          } else if (ret && typeof ret === "object") {
-            done(ret.errno, ret.stdout, ret.stderr);
-          }
-        } else if (window.mmrl && typeof window.mmrl.exec === "function") {
-          window.mmrl.exec(cmd).then(function (v) {
-            done(v.errno, v.stdout, v.stderr);
-          }).catch(function () { done(-1, "", "mmrl exec failed"); });
-        } else if (typeof window.exec === "function") {
-          window.exec(cmd, "{}", function (c, o, e) { done(c, o, e); });
-        } else {
-          done(-1, "", "no bridge");
-        }
-      } catch (e) {
-        done(-1, "", String(e));
+    } catch (e) {
+      if (!done) { done = true; if (t) clearTimeout(t); cb({ code: -1, out: "", err: String(e) }); }
+    }
+  }
+
+  function callFn(cmd, ms, cb) {
+    var done = false, t = null;
+    function fin(code, out, err) {
+      if (done) return;
+      done = true;
+      if (t) { clearTimeout(t); t = null; }
+      cb({ code: num(code), out: str(out), err: str(err) });
+    }
+    t = setTimeout(function () {
+      if (done) return;
+      done = true;
+      cb({ code: -2, out: "", err: "回调未触发" });
+    }, ms);
+    try {
+      var a = api();
+      if (!a) { if (!done) { done = true; if (t) clearTimeout(t); cb({ code: -1, out: "", err: "没有可用的执行接口" }); } return; }
+      var r = a.exec(cmd, "{}", fin);
+      var u = unpack(r);
+      if (u) { fin(u.code, u.out, u.err); return; }
+      if (r && typeof r.then === "function") {
+        r.then(function (v) { var w = unpack(v); if (w) fin(w.code, w.out, w.err); }, function () {});
       }
+    } catch (e) {
+      if (!done) { done = true; if (t) clearTimeout(t); cb({ code: -1, out: "", err: String(e) }); }
+    }
+  }
+
+  function callSync(cmd, ms, cb) {
+    var done = false, t = null;
+    function fin(code, out, err) {
+      if (done) return;
+      done = true;
+      if (t) { clearTimeout(t); t = null; }
+      cb({ code: num(code), out: str(out), err: str(err) });
+    }
+    t = setTimeout(function () {
+      if (done) return;
+      done = true;
+      cb({ code: -2, out: "", err: "调用没有返回" });
+    }, ms);
+    try {
+      var a = api();
+      if (!a) { if (!done) { done = true; if (t) clearTimeout(t); cb({ code: -1, out: "", err: "没有可用的执行接口" }); } return; }
+      var r = a.exec(cmd);
+      if (typeof r === "string") { fin(0, r, ""); return; }
+      var u = unpack(r);
+      if (u) { fin(u.code, u.out, u.err); return; }
+      if (r && typeof r.then === "function") {
+        r.then(function (v) {
+          if (typeof v === "string") { fin(0, v, ""); return; }
+          var w = unpack(v); if (w) fin(w.code, w.out, w.err);
+        }, function (e) { fin(-1, "", String(e)); });
+      } else if (!done) {
+        fin(-1, "", "无法识别的返回类型");
+      }
+    } catch (e) {
+      if (!done) { done = true; if (t) clearTimeout(t); cb({ code: -1, out: "", err: String(e) }); }
+    }
+  }
+
+  function callMmrl(cmd, ms, cb) {
+    var done = false, t = null;
+    function fin(code, out, err) {
+      if (done) return;
+      done = true;
+      if (t) { clearTimeout(t); t = null; }
+      cb({ code: num(code), out: str(out), err: str(err) });
+    }
+    t = setTimeout(function () {
+      if (done) return;
+      done = true;
+      cb({ code: -2, out: "", err: "调用没有返回" });
+    }, ms);
+    try {
+      var p = window.mmrl.exec(cmd);
+      if (p && typeof p.then === "function") {
+        p.then(function (v) { var u = unpack(v); if (u) fin(u.code, u.out, u.err); else fin(-1, "", "返回格式未知"); },
+               function (e) { fin(-1, "", String(e)); });
+      } else {
+        var u2 = unpack(p);
+        if (u2) fin(u2.code, u2.out, u2.err); else fin(-1, "", "返回格式未知");
+      }
+    } catch (e) {
+      if (!done) { done = true; if (t) clearTimeout(t); cb({ code: -1, out: "", err: String(e) }); }
+    }
+  }
+
+  function exec(cmd, cb) {
+    if (!CALL) { cb({ code: -1, out: "", err: "执行通道还没就绪" }); return; }
+    if (CALL === "name") callName(cmd, 15000, cb);
+    else if (CALL === "fn") callFn(cmd, 15000, cb);
+    else if (CALL === "sync") callSync(cmd, 15000, cb);
+    else if (CALL === "mmrl") callMmrl(cmd, 15000, cb);
+    else cb({ code: -1, out: "", err: "执行通道还没就绪" });
+  }
+
+  // 探测用 echo + 内容比对。只看退出码不够：有的实现在回调名不对时会静默返回空。
+  function connect(cb) {
+    if (CALL) { cb(true); return; }
+    var b = bridgeName();
+    if (!b) { CALL = ""; cb(false); return; }
+    if (b === "mmrl") {
+      callMmrl("echo qcprobe", 3000, function (r) {
+        var ok = r.code === 0 && r.out.indexOf("qcprobe") >= 0;
+        CALL = ok ? "mmrl" : "";
+        cb(ok);
+      });
+      return;
+    }
+    callName("echo qcprobe1", 1500, function (r1) {
+      if (r1.code === 0 && r1.out.indexOf("qcprobe1") >= 0) { CALL = "name"; cb(true); return; }
+      callFn("echo qcprobe2", 1500, function (r2) {
+        if (r2.code === 0 && r2.out.indexOf("qcprobe2") >= 0) { CALL = "fn"; cb(true); return; }
+        callSync("echo qcprobe3", 1500, function (r3) {
+          if (r3.code === 0 && r3.out.indexOf("qcprobe3") >= 0) { CALL = "sync"; cb(true); return; }
+          CALL = ""; cb(false);
+        });
+      });
     });
   }
 
@@ -224,24 +432,70 @@
     t.textContent = msg;
     t.className = "show" + (bad ? " bad" : "");
     clearTimeout(t._h);
-    t._h = setTimeout(function () { t.className = ""; }, 2200);
+    t._h = setTimeout(function () { t.className = ""; }, 2400);
   }
 
-  function detect() {
-    var probe = 'for d in /data/adb/modules/*/ /data/adb/modules_update/*/; do ' +
-      '[ -f "$d/module.prop" ] && grep -qx "id=quickcharge" "$d/module.prop" 2>/dev/null && ' +
-      '{ echo "${d%/}"; break; }; done';
-    return exec(probe).then(function (r) {
-      var p = (r.out || "").trim().split("\n")[0];
-      if (p) { MOD = p; return true; }
-      return false;
+  function fail(msg) {
+    lastErr = msg;
+    var b = $("banner");
+    b.className = "banner";
+    b.textContent = msg;
+    b.style.display = "block";
+    diag(false);
+  }
+
+  function info(msg) {
+    var b = $("banner");
+    b.className = "banner info";
+    b.textContent = msg;
+    b.style.display = "block";
+  }
+
+  function okBanner() { $("banner").style.display = "none"; }
+
+  // 固定路径优先。旧版是扫 /data/adb/modules/*/ 再 grep，多两次 fork 且依赖 grep 存在；
+  // WebUI 的执行环境 PATH 往往很干净，少依赖一个外部命令就少一种挂法。
+  function detectMod(cb) {
+    var probe = 'for d in ' + CAND.join(" ") + '; do [ -f "$d/action.sh" ] && { echo "$d"; break; }; done';
+    exec(probe, function (r) {
+      var p = pickFirstLine(r.out);
+      if (p) { MOD = p; cb(true); return; }
+      // 目录名被改过（比如装成 quickcharge_dev）时再兜底扫一遍
+      exec('for d in /data/adb/modules/*/; do [ -f "$d/action.sh" ] && [ -f "$d/module.prop" ] && ' +
+           'grep -q "^id=quickcharge" "$d/module.prop" && { echo "${d%/}"; break; }; done', function (r2) {
+        var q = pickFirstLine(r2.out);
+        if (q) { MOD = q; cb(true); return; }
+        cb(false);
+      });
+    });
+  }
+
+  function pickFirstLine(s) {
+    var a = String(s || "").replace(/\r/g, "").split("\n");
+    for (var i = 0; i < a.length; i++) {
+      var v = a[i].replace(/^\s+|\s+$/g, "");
+      if (v) return v;
+    }
+    return "";
+  }
+
+  function run(arg, cb) {
+    if (!MOD) { cb({ code: -1, out: "", err: "模块路径未探测到" }); return; }
+    var q = SH + ' "' + MOD + '/action.sh" ' + arg;
+    exec(q, function (r) {
+      // /system/bin/sh 不存在（极少见）时退回 PATH 里的 sh
+      if (r.code === -1 && /not found|No such file|ENOENT/i.test(r.err)) {
+        exec('sh "' + MOD + '/action.sh" ' + arg, cb);
+      } else {
+        cb(r);
+      }
     });
   }
 
   function parseJSON(out) {
-    var lines = (out || "").trim().split("\n");
+    var lines = String(out || "").replace(/\r/g, "").split("\n");
     for (var i = lines.length - 1; i >= 0; i--) {
-      var s = lines[i].trim();
+      var s = lines[i].replace(/^\s+|\s+$/g, "");
       if (s.charAt(0) === "{") {
         try { return JSON.parse(s); } catch (e) {}
       }
@@ -249,13 +503,21 @@
     return null;
   }
 
-  function load() {
-    if (!MOD) return Promise.resolve();
-    return exec('sh "' + MOD + '/action.sh" json').then(function (r) {
+  function load(cb) {
+    if (!MOD) { if (cb) cb(false); return; }
+    run("json", function (r) {
       var d = parseJSON(r.out);
-      if (!d) { toast("读取状态失败", true); return; }
+      if (!d) {
+        fail("读取状态失败：退出码 " + r.code +
+             (r.err ? "，" + pickFirstLine(r.err) : "") +
+             (r.out ? "，输出 " + r.out.replace(/\s+/g, " ").slice(0, 120) : "，没有输出"));
+        if (cb) cb(false);
+        return;
+      }
+      okBanner();
       S = d;
       render(d);
+      if (cb) cb(true);
     });
   }
 
@@ -294,8 +556,8 @@
     $("daemon").textContent = d.daemon ? "运行" : "停止";
     $("safety").style.display = d.safety ? "block" : "none";
 
-    Array.prototype.forEach.call($("modeSeg").children, function (b) {
-      b.className = b.dataset.mode === d.mode ? "on" : "";
+    eachChild($("modeSeg"), function (b) {
+      b.className = b.getAttribute("data-mode") === d.mode ? "on" : "";
     });
     $("modeHint").textContent = modeText(d);
 
@@ -316,8 +578,8 @@
     $("socV").textContent = d.sentinel_limit === "off" ? "关" : d.sentinel_limit + "℃";
 
     $("hzNow").textContent = "当前 " + (d.hz_now || 0) + "Hz";
-    Array.prototype.forEach.call($("hzSeg").children, function (b) {
-      b.className = b.dataset.hz === (d.hz || "off") ? "on" : "";
+    eachChild($("hzSeg"), function (b) {
+      b.className = b.getAttribute("data-hz") === (d.hz || "off") ? "on" : "";
     });
     hzHard = d.hz_hard === 1;
     $("hzHard").checked = hzHard;
@@ -325,12 +587,66 @@
     $("hzHint").textContent = hzText(d);
   }
 
+  function eachChild(el, fn) {
+    var i, n = el.children;
+    for (i = 0; i < n.length; i++) fn(n[i]);
+  }
+
+  // ---- 环境自检 ----
+  // 手机上没法开控制台，出问题只能靠页面自己说话：
+  // 把桥类型、模块路径、每条命令的退出码和原始报错都摆出来，截图就能定位。
+  var diagSeq = 0;
+  function diag(reset) {
+    var seq = ++diagSeq;
+    $("diagCard").style.display = "block";
+    var lines = [];
+    function push(s) {
+      if (seq !== diagSeq) return;
+      lines.push(s);
+      $("diagPre").textContent = lines.join("\n");
+    }
+    push("页面 v" + ($("ver").textContent || "—") + "  " + new Date().toLocaleString());
+    push("UA      " + navigator.userAgent);
+    push("桥接    " + (bridgeName() || "无（当前不在 KernelSU / APatch / MMRL 的 WebUI 里）"));
+    push("通道    " + (CALL || "未建立"));
+    push("ksu     " + (window.ksu ? "有 exec=" + typeof window.ksu.exec : "无"));
+    push("mmrl    " + (window.mmrl ? "有 exec=" + typeof window.mmrl.exec : "无"));
+    push("模块    " + (MOD || "未探测到"));
+    push("SH      " + SH);
+    if (lastErr) push("最近错误 " + lastErr);
+    if (reset) return;
+
+    exec("echo QC_OK", function (r) {
+      push("echo    code=" + r.code + " out=" + JSON.stringify(r.out) + " err=" + JSON.stringify(r.err));
+      if (!MOD) {
+        detectMod(function (ok) {
+          push("探测    " + (ok ? MOD : "失败"));
+          probeJson(seq, push);
+        });
+      } else {
+        probeJson(seq, push);
+      }
+    });
+  }
+
+  function probeJson(seq, push) {
+    if (!MOD) { return; }
+    run("json", function (r) {
+      if (seq !== diagSeq) return;
+      push("json    code=" + r.code + " len=" + r.out.length);
+      if (r.err) push("        stderr: " + pickFirstLine(r.err));
+      push("        " + (r.out || "(空)").replace(/\s+/g, " ").slice(0, 300));
+      var d = parseJSON(r.out);
+      push("解析    " + (d ? "成功" : "失败"));
+    });
+  }
+
   // ---- 实时功耗 ----
   // 只在页面可见时采样，页面一关就停：不写文件、不留后台进程，
   // 不会为了这根曲线让模块常年多跑一个循环。
   function drawSpark() {
     var c = $("spark");
-    if (!c) return;
+    if (!c || !c.getContext) return;
     var dpr = window.devicePixelRatio || 1;
     var w = c.clientWidth || 320, h = c.clientHeight || 56;
     if (c.width !== Math.round(w * dpr)) {
@@ -350,7 +666,8 @@
       y = h - pad - (h - pad * 2) * (pwr[i] - min) / (max - min);
       if (i) g.lineTo(x, y); else g.moveTo(x, y);
     }
-    var accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#ff6b35";
+    var accent = getComputedStyle(document.documentElement).getPropertyValue("--accent");
+    accent = (accent || "").replace(/^\s+|\s+$/g, "") || "#ff6b35";
     g.strokeStyle = accent;
     g.lineWidth = 2;
     g.lineJoin = "round";
@@ -363,8 +680,10 @@
   }
 
   function samplePower() {
-    if (!MOD || document.hidden) return;
-    exec('sh "' + MOD + '/action.sh" power').then(function (r) {
+    if (!MOD || document.hidden || pwrBusy) return;
+    pwrBusy = true;
+    run("power", function (r) {
+      pwrBusy = false;
       var d = parseJSON(r.out);
       if (!d) return;
       $("psrc").textContent = (d.cells === 2 ? "双电芯 · " : "") + "仅页面打开时采样";
@@ -389,16 +708,51 @@
     if (pwrTimer) { clearInterval(pwrTimer); pwrTimer = null; }
     pwr = [];
     var c = $("spark");
-    if (c) c.getContext("2d").clearRect(0, 0, c.width, c.height);
+    if (c && c.getContext) c.getContext("2d").clearRect(0, 0, c.width, c.height);
   }
 
-  function apply(cmd, okMsg) {
-    if (!MOD) return Promise.resolve();
-    return exec('sh "' + MOD + '/action.sh" ' + cmd).then(function (r) {
-      var msg = (r.out || r.err || "").trim().split("\n").pop();
-      toast(r.code === 0 ? okMsg : (msg || "设置失败"), r.code !== 0);
-      return load();
+  function apply(arg, okMsg) {
+    // 没探测到模块时不要静默 return —— 那正是"点了没反应"的来源
+    if (!MOD) {
+      connect(function (cok) {
+        if (!cok) {
+          toast("执行通道未就绪", true);
+          fail("还没连上模块。点“环境自检”看卡在哪一步。");
+          return;
+        }
+        detectMod(function (ok) {
+          if (ok) { apply(arg, okMsg); return; }
+          toast("模块路径未找到", true);
+          fail("没有找到 Quick Charge 的安装目录，可能是模块未启用或未安装。");
+        });
+      });
+      return;
+    }
+    run(arg, function (r) {
+      var last = "";
+      var raw = r.err && !r.out ? r.err : (r.out || r.err || "");
+      var arr = raw.replace(/\s+$/, "").split("\n");
+      last = arr[arr.length - 1] || "";
+      if (r.code === 0) {
+        toast(okMsg, false);
+      } else {
+        toast(last || ("设置失败（" + r.code + "）"), true);
+        fail("执行 " + arg + " 失败：" + (last || r.err || ("退出码 " + r.code)));
+      }
+      load();
     });
+  }
+
+  // WebView 里 confirm() 经常被直接吞掉（返回 false 且不弹窗），
+  // 用它做二次确认等于让开关失效，所以改成页面内的确认层。
+  function ask(msg, onYes) {
+    $("askMsg").textContent = msg;
+    $("ask").className = "mask show";
+    $("askYes").onclick = function () {
+      $("ask").className = "mask";
+      onYes();
+    };
+    $("askNo").onclick = function () { $("ask").className = "mask"; };
   }
 
   function bindRange(id, labelId, fmt, cmd) {
@@ -411,18 +765,39 @@
     });
   }
 
-  function boot() {
-    detect().then(function (ok) {
-      if (!ok) { $("banner").style.display = "block"; return; }
-      load();
-      timer = setInterval(load, 30000);
-      startPower();
-    });
+  function bindTap(id, fn) {
+    var el = $(id);
+    if (el && el.addEventListener) el.addEventListener("click", fn);
+  }
 
-    $("modeSeg").addEventListener("click", function (e) {
-      var b = e.target.closest("button");
-      if (!b || !MOD) return;
-      var m = b.dataset.mode;
+  function boot() {
+    if (!bridgeName()) {
+      fail("当前环境没有网页控制接口。请在 KernelSU / APatch / MMRL 里打开本模块的 WebUI；" +
+           "如果是 Magisk，请用终端执行：su -c sh /data/adb/modules/quickcharge/action.sh");
+    } else {
+      info("正在连接模块…");
+      connect(function (cok) {
+        if (!cok) {
+          fail("命令通道没能建立（已自动试过三种调用方式）。点下面的“环境自检”可以看到每一步的原始返回，截图反馈即可。");
+          diag(false);
+          return;
+        }
+        detectMod(function (ok) {
+          if (!ok) {
+            fail("命令通道正常，但没找到模块目录。请确认 Quick Charge 已安装并启用后点“重挂”。");
+            return;
+          }
+          load();
+          timer = setInterval(load, 30000);
+          startPower();
+        });
+      });
+    }
+
+    bindTap("modeSeg", function (e) {
+      var b = closest(e.target, "button");
+      if (!b) return;
+      var m = b.getAttribute("data-mode");
       apply(m === "static" ? "temp static" : (m === "charge" ? "temp charge" : "temp off"),
         m === "static" ? "已切到全局运行" : (m === "charge" ? "已切到仅充电" : "已关闭温控改写"));
     });
@@ -452,33 +827,54 @@
       apply(off ? "wall off" : ("wall " + $("wall").value), off ? "温度墙已关闭" : "温度墙已开启");
     });
 
-    $("hzSeg").addEventListener("click", function (e) {
-      var b = e.target.closest("button");
-      if (!b || !MOD) return;
-      var v = b.dataset.hz;
+    bindTap("hzSeg", function (e) {
+      var b = closest(e.target, "button");
+      if (!b) return;
+      var v = b.getAttribute("data-hz");
       if (v === "off") { apply("hz off", "已还原系统刷新率"); return; }
       apply("hz " + v + " " + (hzHard ? "hard" : "soft"),
         hzHard ? "已强制锁定 " + v + "Hz" : "已设置 " + v + "Hz");
     });
 
     $("hzHard").addEventListener("change", function () {
-      var on = this.checked;
-      if (!MOD) return;
-      if (on && !confirm("强制锁定会关闭系统的内容帧率匹配（视频会自动降到 24/30fps 省电）。\n开启后耗电与发热会上升，确认开启？")) {
-        this.checked = false; return;
+      var el = this;
+      var on = el.checked;
+      if (!MOD) { el.checked = !on; fail("还没连上模块，稍等一秒再试"); return; }
+      if (!on) {
+        hzHard = false;
+        apply("hzguard off", "已关闭强制锁定");
+        return;
       }
-      hzHard = on;
-      apply("hzguard " + (on ? "on" : "off"),
-        on ? "已开启强制锁定" : "已关闭强制锁定");
+      el.checked = false;
+      ask("强制锁定会关闭系统的内容帧率匹配（视频会自动降到 24/30fps 省电）。\n开启后耗电与发热会上升，确认开启？", function () {
+        el.checked = true;
+        hzHard = true;
+        apply("hzguard on", "已开启强制锁定");
+      });
     });
 
-    $("refresh").addEventListener("click", function () { load().then(function () { toast("已刷新"); }); });
-    $("rebuild").addEventListener("click", function () {
+    bindTap("refresh", function () {
+      load(function (ok) { toast(ok ? "已刷新" : "刷新失败", !ok); });
+    });
+    bindTap("rebuild", function () {
       toast("正在重挂…");
       apply("rebuild", "已重新挂载");
     });
-    $("restart").addEventListener("click", function () {
+    bindTap("restart", function () {
       apply("restart", "守护已重启");
+    });
+
+    bindTap("diagOpen", function () { diag(false); });
+    bindTap("diagRun", function () { diag(false); });
+    bindTap("diagHide", function () { $("diagCard").style.display = "none"; });
+    bindTap("diagCopy", function () {
+      var t = $("diagPre").textContent;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(t).then(function () { toast("已复制"); },
+          function () { toast("复制失败，请截图", true); });
+      } else {
+        toast("请长按文字手动复制", true);
+      }
     });
 
     document.addEventListener("visibilitychange", function () {
@@ -491,6 +887,16 @@
         startPower();
       }
     });
+  }
+
+  // 老 WebView 没有 Element.closest，自己往上找
+  function closest(el, tag) {
+    tag = tag.toUpperCase();
+    while (el && el.nodeType === 1) {
+      if (el.tagName === tag) return el;
+      el = el.parentNode;
+    }
+    return null;
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);

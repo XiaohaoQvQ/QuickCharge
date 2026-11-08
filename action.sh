@@ -31,10 +31,18 @@
 #   reboot-safe                  退出安全模式并立即重挂
 #   reset                        恢复初始状态（清空全部参数）
 
+# WebUI 的执行环境 PATH 经常是空的或不含 busybox 目录（管理器不同、注入时机不同），
+# 这时 grep / awk / sort / tr 全都找不到，脚本会"跑得通但什么都不输出"。
+# 显式补齐，比在网页里排查一堆空字段省事。
+PATH="/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/system/bin:/system/xbin:${PATH:-/system/bin}"
+export PATH
+
 MODDIR="${SD_MODDIR:-}"
-if [ -z "$MODDIR" ]; then
-    MODDIR=$(cd "${0%/*}" 2>/dev/null && pwd)
-    [ -f "${MODDIR:-/nonexistent}/lib/qc.sh" ] || MODDIR=$(pwd)
+if [ -z "$MODDIR" ] || [ ! -f "$MODDIR/lib/qc.sh" ]; then
+    _d=$(cd "${0%/*}" 2>/dev/null && pwd)
+    [ -n "$_d" ] && [ -f "$_d/lib/qc.sh" ] || _d=$(pwd)
+    [ -f "$_d/lib/qc.sh" ] || _d=/data/adb/modules/quickcharge
+    MODDIR=$_d
 fi
 [ -f "$MODDIR/lib/qc.sh" ] || {
     echo "QC: 找不到 lib/qc.sh" >&2
