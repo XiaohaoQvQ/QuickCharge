@@ -173,6 +173,8 @@ sd_set_temp() {
         off)
             sd_shell_emul 0
             sd_state_set temp_mode off
+            # 标记"用户亲手关的"，升级时不再自动打开
+            sd_state_set off_manual 1
             # 不要清零 shell_temp：temp_mode 已经能表达"关闭"，清零会让
             # 下次开启时 sd_state_int 判定越界、回落 30℃，用户设的温度白丢。
             sd_info cmd "温度模式 → off"
@@ -180,12 +182,14 @@ sd_set_temp() {
         static)
             sd_state_set shell_temp "$t"
             sd_state_set temp_mode static
+            sd_state_set off_manual 0
             _sd_emul_last=""
             sd_shell_emul "$t"
             sd_info cmd "温度模式 → static ${t}℃"
             echo "温度模式 -> static ${t}℃" ;;
         charge)
             sd_state_set temp_mode charge
+            sd_state_set off_manual 0
             # 切到「仅充电」时若没在充电，必须立刻撤掉已经写进去的伪装，
             # 否则要等下一个 tick 才还原（tick 调到 300 秒时就是 5 分钟）
             read -r _bst 2>/dev/null <"$SD_PS/battery/status"

@@ -134,6 +134,7 @@ sd_dump_env() {
 
 _sd_st_loaded=0
 _st_temp_mode=""
+_st_off_manual=""
 _st_shell_temp=""
 _st_core_temp=""
 _st_noncore_temp=""
@@ -157,7 +158,7 @@ _st_power_scale=""
 
 sd_state_load() {
     _sd_st_loaded=1
-    _st_temp_mode=""; _st_shell_temp=""; _st_core_temp=""; _st_noncore_temp=""
+    _st_temp_mode=""; _st_off_manual=""; _st_shell_temp=""; _st_core_temp=""; _st_noncore_temp=""
     _st_horae=""; _st_sentinel_limit=""; _st_battery_limit=""; _st_fast_cap=""
     _st_curve_offset=""; _st_wall=""; _st_aggr=""; _st_curr_max=""
     _st_log_level=""; _st_tick=""; _st_defrev=""
@@ -167,6 +168,7 @@ sd_state_load() {
     while IFS='=' read -r k v; do
         case "$k" in
             temp_mode)      _st_temp_mode=$v ;;
+            off_manual)     _st_off_manual=$v ;;
             shell_temp)     _st_shell_temp=$v ;;
             core_temp)      _st_core_temp=$v ;;
             noncore_temp)   _st_noncore_temp=$v ;;
@@ -200,6 +202,7 @@ sd_state_get() {
     [ "$_sd_st_loaded" = 1 ] || sd_state_load
     case "$1" in
         temp_mode)      printf '%s' "${_st_temp_mode:-${2:-off}}" ;;
+        off_manual)     printf '%s' "${_st_off_manual:-${2:-0}}" ;;
         shell_temp)     printf '%s' "${_st_shell_temp:-${2:-30}}" ;;
         core_temp)      printf '%s' "${_st_core_temp:-${2:-off}}" ;;
         noncore_temp)   printf '%s' "${_st_noncore_temp:-${2:-off}}" ;;
@@ -229,6 +232,7 @@ sd_state_set() {
     [ "$_sd_st_loaded" = 1 ] || sd_state_load
     case "$k" in
         temp_mode)      _st_temp_mode=$v ;;
+        off_manual)     _st_off_manual=$v ;;
         shell_temp)     _st_shell_temp=$v ;;
         core_temp)      _st_core_temp=$v ;;
         noncore_temp)   _st_noncore_temp=$v ;;
@@ -711,6 +715,12 @@ sd_spoof_clear() {
 # _sd_emul_last 记录上次写入值，值没变直接返回 —— 守护每 tick 都在打，避免无谓写入。
 _sd_emul_last=""
 
+# 熔断只暂停，不改用户配置。
+# 旧实现直接 sd_state_set temp_mode off 并落盘，一次过热就把模式永久关掉，
+# 重启后还是 off —— 用户看到的就是「模式始终 off、怎么都不生效」。
+# 现在只置这个内存标记，温度回落 3℃ 后自动恢复，配置一个字节都不动。
+_sd_guard_paused=0
+
 sd_shell_emul() {
     local celsius="$1" ms e z t n=0
     _sd_zones_ready
@@ -767,11 +777,8 @@ sd_guard_one() {
     sd_spoof_clear
     _sd_emul_last=""
     sd_shell_emul 0
-    sd_state_set temp_mode off
-    sd_state_set core_temp off
-    sd_state_set noncore_temp off
-    sd_state_set shell_temp 0
-    sd_warn guard "已撤销全部伪装并置 off，等待温度回落"
+    _sd_guard_paused=1
+    sd_warn guard "已暂停伪装，温度回落后自动恢复（配置未改动）"
     return 0
 }
 
@@ -779,9 +786,54 @@ sd_guard_one() {
 # （电池优先），设备有 battery 节点时 sentinel_limit 永远不会被读到，
 # WebUI 上调 SoC 阈值等于没改。现在电池走 battery_limit，
 # xo-therm 等走 sentinel_limit，任一超限即熔断。
+# 熔断后是否已经凉下来：电池与主板都要低于上限 3℃ 才解除，
+# 留回差是为了避免在阈值上下抖动，每几秒切一次。
+sd_guard_cooled() {
+    local e z t limit cur ok=1
+    _sd_zones_ready
+    for e in $_sd_zones; do
+        z=${e%%|*}; t=${e#*|}
+        sd_zone_is_core "$t" && continue
+        sd_zone_is_shell "$t" && continue
+        [ -r "$z/temp" ] || continue
+        case "$t" in
+            battery|Battery|batt*|xo-therm|xtherm) ;;
+            *) continue ;;
+        esac
+        sd_limit_for_type_v "$t"; limit=$_sd_rv
+        case "$limit" in ''|0|off) continue ;; esac
+        sd_sentinel_temp_v "$z" || continue
+        cur=$_sd_rv
+        [ $((cur + 3)) -le "$limit" ] || ok=0
+    done
+    [ "$ok" = 1 ]
+}
+
+# 熔断时被 sd_spoof_clear 清掉的 core/noncore 持久伪装，恢复时重建。
+sd_spoof_reapply() {
+    local c nc
+    c=$(sd_state_get core_temp off)
+    case "$c" in ''|off) ;; *) sd_valid_temp "$c" && sd_spoof_apply core "$c" ;; esac
+    nc=$(sd_state_get noncore_temp off)
+    case "$nc" in ''|off) ;; *) sd_valid_temp "$nc" && sd_spoof_apply noncore "$nc" ;; esac
+}
+
 sd_sentinel_guard() {
     local e z t fb="" fb_t="" checked=0
     [ "$_sd_st_loaded" = 1 ] || sd_state_load
+
+    if [ "$_sd_guard_paused" = 1 ]; then
+        if sd_guard_cooled; then
+            _sd_guard_paused=0
+            sd_info guard "温度已回落，恢复伪装"
+            sd_spoof_reapply
+            sd_sync_desc
+        else
+            # 还在高位：本 tick 不写任何伪装，交给系统
+            return 1
+        fi
+    fi
+
     # 没有伪装在生效时直接放行，否则熔断后每 tick 都重清一遍并写日志。
     # 这里直接读 _st_*，不再为三个判断 fork 三次。
     if [ "${_st_temp_mode:-off}" = "off" ] \

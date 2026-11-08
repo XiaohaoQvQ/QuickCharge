@@ -169,7 +169,7 @@ grep -q 'a < b' "$OV/vendor/etc/sys_thermal_control_config_cdata.xml" && ok "CDA
 [ -f "$OV/vendor/etc/sys_thermal_control_config_bad.xml" ] && ng "非配平文件被误接受" || ok "非配平文件被拒绝"
 [ -f "$SDD/backup/vendor/etc/thermallevel_to_fps.xml" ] && ok "原件已备份" || ng "原件未备份"
 cmp -s "$SDD/backup/vendor/etc/charging_0.txt" /vendor/etc/charging_0.txt && ok "备份与原件逐字节一致" || ng "备份与原件不一致"
-eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=off" "默认不开启伪装"
+eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=charge" "默认仅充电时生效"
 eq "$(grep '^wall=' "$SDD/state.conf")" "wall=42" "默认墙 42"
 eq "$(grep '^aggr=' "$SDD/state.conf")" "aggr=10" "默认 aggr 10"
 
@@ -214,10 +214,17 @@ set_mode 30 42 10
 set_temp 49000
 sd_sentinel_guard; r=$?
 eq "$r" "1" "电池 49℃ 触发熔断"
-eq "$(sd_state_get temp_mode off)" "off" "熔断后模式置 off"
-eq "$(sd_state_get shell_temp 0)" "0" "熔断后 shell_temp 清 0"
+# 熔断只暂停，不能改用户配置：旧实现会落盘 temp_mode=off，重启后仍是 off，
+# 用户看到的就是"模式始终 off、开不起来"。
+eq "$(sd_state_get temp_mode off)" "static" "熔断后模式保持不变"
+eq "$(sd_state_get shell_temp 0)" "30" "熔断后档位保留"
+sd_sentinel_guard; eq "$?" "1" "熔断期间持续暂停"
 set_temp 46000
-sd_sentinel_guard; eq "$?" "0" "46℃ 不熔断"
+sd_sentinel_guard; eq "$?" "1" "46℃ 未进回差，仍暂停"
+set_temp 44000
+sd_sentinel_guard; eq "$?" "0" "44℃ 回落后自动解除"
+eq "$(sd_state_get temp_mode off)" "static" "解除后仍是用户选定的模式"
+_sd_guard_paused=0
 
 echo "===== T3c 写入与守卫 ====="
 set_mode 30 42 10
@@ -323,16 +330,19 @@ echo "INFO  2000 次决策 $((t1-t0))s（容器 busybox ash，仅供量级参考
 echo "===== T8 WebUI 接口 ====="
 rm -f "$SDD/state.conf"
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
+printf 'Discharging\n' >/sys/class/power_supply/battery/status
 J=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh json 2>/dev/null)
 echo "$J" | grep -q '^{.*}$' && ok "json 输出为单行对象" || ng "json 输出格式异常"
 echo "$J" | grep -q '"aggr":10' && ok "json aggr=10" || ng "json aggr 错误"
 echo "$J" | grep -q '"gap":12' && ok "json gap=12" || ng "json gap 错误"
-echo "$J" | grep -q '"mode":"off"' && ok "json mode=off" || ng "json mode 错误"
+echo "$J" | grep -q '"mode":"charge"' && ok "json mode=charge" || ng "json mode 错误"
+echo "$J" | grep -q '"charging":false' && ok "json charging=false" || ng "json charging 错误"
 echo "$J" | grep -q '"mounted":0' && ok "json mounted=0(未挂载)" || ng "json mounted 错误"
 echo "$J" | grep -q '"daemon":false' && ok "json daemon=false" || ng "json daemon 错误"
 V=$(grep '^version=' /opt/qc/module.prop | cut -d= -f2)
 echo "$J" | grep -q "\"version\":\"$V\"" && ok "json 带版本号" || ng "json 缺版本号"
-echo "$J" | grep -q '"target":0' && ok "json 关闭模式 target=0" || ng "json target 异常"
+# 仅充电档未插电：不算目标温度，target 保持 0
+echo "$J" | grep -q '"target":0' && ok "json 未插电 target=0" || ng "json target 异常"
 printf 'temp_mode=static\nshell_temp=30\nwall=42\naggr=10\n' >"$SDD/state.conf"
 printf '41000\n' >/sys/class/thermal/thermal_zone1/temp
 J2=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh json 2>/dev/null)
@@ -365,7 +375,8 @@ J9=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh json 2>/dev/null)
 echo "$J9" | grep -q '"sentinel_limit":110' && ok "json 回读 soc=110" || ng "json 未保存 soc=110"
 SD_MODDIR=/opt/qc sh /opt/qc/action.sh sentinel 85 >/dev/null 2>&1
 sleep 2
-eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=off" "soc 改回 85 后 2 秒内熔断（tick=300，只能靠 kick）"
+# 熔断不改配置，改为检查"伪装确实被撤掉了"
+eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=static" "熔断不改 temp_mode（只暂停伪装）"
 grep -q '熔断' "$SD_LOG" 2>/dev/null && ok "熔断已写日志" || ng "熔断未写日志"
 kill -TERM "$D9" 2>/dev/null; sleep 1
 
@@ -377,9 +388,10 @@ sleep 3
 sed -i 's/^sentinel_limit=110/sentinel_limit=85/' "$SDD/state.conf"
 sleep 2
 eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=static" "未发信号时守护仍在睡（对照）"
+: >"$SD_LOG"
 kill -USR1 "$D9B" 2>/dev/null
 sleep 2
-eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=off" "USR1 唤醒后立即按新阈值熔断"
+grep -q '熔断' "$SD_LOG" && ok "USR1 唤醒后立即熔断" || ng "USR1 唤醒后未熔断"
 kill -TERM "$D9B" 2>/dev/null; sleep 1
 printf '46000\n' >/sys/class/thermal/thermal_zone2/temp
 
@@ -396,6 +408,24 @@ eq "$(grep '^fast_cap=' "$SDD/state.conf")" "fast_cap=70" "升级保留 fast_cap
 eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=static" "升级保留 temp_mode"
 eq "$(grep '^curve_offset=' "$SDD/state.conf")" "curve_offset=200" "升级保留 curve_offset"
 eq "$(head -1 /opt/qc/files/vendor/etc/charging_0.txt)" "550,3000,4500" "覆盖层按用户 curve_offset 重建"
+
+# 手动关过（off_manual=1）：升级不能把用户重新打开
+printf 'temp_mode=off\nshell_temp=30\nwall=42\naggr=10\noff_manual=1\ndefrev=2\ntick=15\n' >"$SDD/state.conf"
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
+eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=off" "手动关闭的用户升级后仍保持 off"
+
+# 旧版被熔断写成 off（没有 off_manual 标记）：升级回到默认值
+# 这是用户实际遇到的情况——一次过热就永久 off，重装也回不来。
+printf 'temp_mode=off\nshell_temp=30\nwall=42\naggr=10\ndefrev=2\ntick=15\n' >"$SDD/state.conf"
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
+eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=charge" "被熔断改成 off 的升级后自动恢复"
+eq "$(grep '^off_manual=' "$SDD/state.conf")" "off_manual=0" "恢复后写入 off_manual=0"
+
+# 手动关闭会留下标记，下次升级不再覆盖
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp off >/dev/null 2>&1
+eq "$(grep '^off_manual=' "$SDD/state.conf")" "off_manual=1" "手动关闭写入标记"
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp charge >/dev/null 2>&1
+eq "$(grep '^off_manual=' "$SDD/state.conf")" "off_manual=0" "重新开启清除标记"
 
 echo "===== T11 刷新率 ====="
 rm -f /tmp/settings.db
@@ -451,9 +481,9 @@ sleep 1
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
 SD_MODDIR=/opt/qc sh /opt/qc/post-fs-data.sh >/dev/null 2>&1
 
-# 装机默认 temp_mode=off，描述应如实写"关闭"
+# 装机默认 temp_mode=charge，描述应如实写"仅充电"
 D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
-case "$D" in *"温度伪装关闭"*) ok "默认关闭状态写进描述" ;; *) ng "默认状态不符: $D" ;; esac
+case "$D" in *"仅充电"*) ok "默认仅充电状态写进描述" ;; *) ng "默认状态不符: $D" ;; esac
 case "$D" in *"配置 9 项"*) ok "描述含挂载数" ;; *) ng "描述缺挂载数: $D" ;; esac
 eq "$(grep -c '^description=' /opt/qc/module.prop)" "1" "description 只有一行"
 eq "$(grep '^version=' /opt/qc/module.prop)" "$(grep '^version=' /mod/module.prop)" "版本行未被改写"
