@@ -18,7 +18,7 @@ SD_VERBOSE=1
 
 ui_print "*******************************"
 ui_print "  Quick Charge (QC)  v$(grep '^version=' "$MODDIR/module.prop" | cut -d= -f2)"
-ui_print "  by DeepSeek Flash"
+ui_print "  by https://github.com/XiaohaoQvQ"
 ui_print "*******************************"
 
 # ---------- 设备 ----------

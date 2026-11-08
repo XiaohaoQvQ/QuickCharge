@@ -11,7 +11,7 @@ ColorOS / RealmeUI 温控与充电策略改写模块。两条独立链路：
 
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
-- 构建：`DeepSeek Flash`
+- 作者：[XiaohaoQvQ](https://github.com/XiaohaoQvQ)
 
 ---
 
