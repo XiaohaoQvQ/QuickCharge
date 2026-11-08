@@ -71,6 +71,7 @@ sd_apply_state() {
 sd_daemon() {
     local lock="$SD_RUN/daemon.lock" holder tick wall aggr
     local mode last_mode="" cnt=0 _hzr=0 _hz_n=0
+    local _log_out="" _log_cnt=0
     _sd_sp=""
     _sd_reload=0
 
@@ -161,10 +162,20 @@ sd_daemon() {
                 # 一起关在里面；直接调用还能省掉每 tick 一次 fork。
                 sd_shell_target >/dev/null
                 sd_shell_emul "$_sd_last_out"
-                # 每分钟一条摘要：出问题时能看到最后的真实/上报温度，
-                # 又不会像 debug 那样刷屏。
-                if [ $((cnt % 12)) -eq 0 ]; then
-                    sd_info daemon "摘要 真实=${_sd_last_cur:-?}℃ 上报=${_sd_last_out:-0}℃ 墙=$(sd_state_get wall off)"
+                # 只在"上报温度变了"时记一条；数值长期不动就不再刷日志。
+                # 原先固定每分钟一条，一天 1440 行、约 90KB 闪存写入，
+                # 而其中绝大多数是重复值。现在变化即记，再加 15 分钟兜底一条，
+                # 稳定工况下约 96 行/天，排查时仍有完整的时间线。
+                if [ "$_sd_last_out" != "$_log_out" ]; then
+                    sd_info daemon "伪装 真实=${_sd_last_cur:-?}℃ 上报=${_sd_last_out:-0}℃ 墙=${_st_wall:-off}"
+                    _log_out=$_sd_last_out
+                    _log_cnt=0
+                else
+                    _log_cnt=$((_log_cnt + 1))
+                    if [ "$_log_cnt" -ge 60 ]; then
+                        sd_info daemon "摘要 真实=${_sd_last_cur:-?}℃ 上报=${_sd_last_out:-0}℃ 墙=${_st_wall:-off}"
+                        _log_cnt=0
+                    fi
                 fi
                 ;;
             charge)

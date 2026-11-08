@@ -585,6 +585,9 @@ case "$1" in
     mv -f "$DB.t" "$DB" ;;
   delete)
     grep -v "^$key=" "$DB" 2>/dev/null >"$DB.t"; mv -f "$DB.t" "$DB" ;;
+  list)
+    # 真机 settings list system 输出 key=value；模块用它一次取回 peak+min
+    [ "$ns" = "system" ] && sed -n 's|^system/||p' "$DB" ;;
 esac
 EOS
 chmod +x /usr/local/bin/settings

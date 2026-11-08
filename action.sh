@@ -403,7 +403,8 @@ case "$1" in
                  on|hard|1)  v=$(sd_hz_want) || { echo "先选一个刷新率档位"; exit 1; }
                              sd_state_set hz_hard 1
                              sd_hz_write "$v"; sd_hz_mcfr_on
-                             cur=$(sd_hz_read peak); cur=${cur%%.*}
+                             sd_hz_readpair
+                             cur=${_hz_peak%%.*}
                              if [ "$cur" != "$v" ]; then
                                  sd_state_set hz_hard 0; sd_hz_mcfr_relax
                                  echo "写入失败：系统拒绝修改刷新率"

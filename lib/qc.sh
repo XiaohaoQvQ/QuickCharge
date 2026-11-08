@@ -478,33 +478,119 @@ sd_max_gap() { printf '%s' $((2 + $(sd_state_int aggr 10 0 10))); }
 # 温度决策
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# 热路径取值：不产生子 shell
+#
+# 守护每 tick 走一遍温度决策。原先 td_state_get / td_state_int /
+# td_sentinel_temp 都以 $() 取返回值，一次 tick 会 fork 二十多个子 shell；
+# 每个子 shell 都要 fork 一次，真机 mksh 上单次 0.5~1.5ms，合计十几到几十
+# 毫秒，还每次都把 CPU 从 idle 唤醒。
+#
+# 这里给热路径配一套「写全局变量」的版本，语义与原来的函数完全一致，只是
+# 不再 fork。冷路径（action.sh / 开机恢复）继续用原函数 —— 那边本来就要
+# 起一个进程，几个 fork 无足轻重。
+# ---------------------------------------------------------------------------
+
+_sd_rv=""
+_sd_sent_type=""
+
+# 整数校验 + 越界回落默认值，结果写 _sd_rv
+_sd_clamp() {
+    local v="$1"
+    case "$v" in ''|*[!0-9]*) _sd_rv="$4"; return 0 ;; esac
+    if [ "$v" -lt "$2" ] || [ "$v" -gt "$3" ]; then
+        _sd_rv="$4"
+        return 0
+    fi
+    _sd_rv="$v"
+}
+
+# 哨兵温度 → _sd_rv。语义同 sd_sentinel_temp：负数与不可读一律失败。
+sd_sentinel_temp_v() {
+    local v=""
+    [ -n "$1" ] || return 1
+    read -r v 2>/dev/null <"$1/temp"
+    case "$v" in ''|*[!0-9-]*) return 1 ;; esac
+    case "$v" in -*) return 1 ;; esac
+    if [ "$v" -gt 2000 ]; then _sd_rv=$((v / 1000)); else _sd_rv=$v; fi
+    return 0
+}
+
+# 选哨兵 → _sd_rv（路径）、_sd_sent_type（type）。语义同 sd_pick_sentinel。
+sd_pick_sentinel_v() {
+    local e z t want
+    _sd_zones_ready
+    for want in battery Battery batt xo-therm xtherm; do
+        for e in $_sd_zones; do
+            z=${e%%|*}
+            t=${e#*|}
+            [ "$t" = "$want" ] && [ -r "$z/temp" ] && {
+                _sd_rv=$z; _sd_sent_type=$t; return 0
+            }
+        done
+    done
+    for e in $_sd_zones; do
+        z=${e%%|*}
+        t=${e#*|}
+        sd_zone_is_core "$t" && continue
+        sd_zone_is_shell "$t" && continue
+        [ -r "$z/temp" ] && { _sd_rv=$z; _sd_sent_type=$t; return 0; }
+    done
+    return 1
+}
+
+# 按 type 算熔断上限 → _sd_rv。语义同 sd_limit_for_zone，但复用已缓存的 type，
+# 不再重读 sysfs。
+sd_limit_for_type_v() {
+    case "$1" in
+        battery|Battery|batt*)
+            case "${_st_battery_limit:-48}" in
+                off) _sd_rv=off; return 0 ;;
+            esac
+            _sd_clamp "${_st_battery_limit:-48}" 30 70 48 ;;
+        *)
+            case "${_st_sentinel_limit:-85}" in
+                off) _sd_rv=off; return 0 ;;
+            esac
+            _sd_clamp "${_st_sentinel_limit:-85}" 60 110 85 ;;
+    esac
+    return 0
+}
+
 # 计算本次应上报的壳温。返回 0 表示关闭模拟、交还真实读数。
 #
 # 三条约束，每条都是实测踩出来的：
-#   1. base 必须落在 [30,60]。熔断后 shell_temp 会被置 0，charge 模式初始值也是 0，
+#   1. base 必须落在 [25,60]。熔断后 shell_temp 会被置 0，charge 模式初始值也是 0，
 #      不纠正就会把 0℃ 喂给系统 —— 多数 thermal HAL 视为传感器故障。
 #   2. 上报值绝不超过真实温度。超了不是降温伪装，而是伪造高温，系统会提前降频。
 #   3. 越接近温度墙收益越小，最后 4℃ 等步长爬升到墙，与"关闭模拟"无缝衔接。
 #      等步长是必须的：从 30 直跳 42 会让系统看到壳温突变 12℃，触发一次降频。
 sd_shell_target() {
-    local base limit cur gap z v wall barrier room climb
+    local base gap wall z cur limit barrier room climb v
     _sd_last_cur=""
     _sd_last_out=0
+    [ "$_sd_st_loaded" = 1 ] || sd_state_load
 
-    base=$(sd_state_int shell_temp 30 25 60)
-    gap=$(sd_max_gap)
-    wall=$(sd_wall)
+    _sd_clamp "${_st_shell_temp:-30}" 25 60 30
+    base=$_sd_rv
+    _sd_clamp "${_st_aggr:-10}" 0 10 10
+    gap=$((2 + _sd_rv))
+    case "${_st_wall:-off}" in
+        off|'') wall=0 ;;
+        *) _sd_clamp "${_st_wall:-42}" 35 80 42; wall=$_sd_rv ;;
+    esac
 
-    # 拿不到哨兵就放弃伪装。绝不能"读不到就按设定值报" ——
-    # 那等于在完全看不见真实温度的情况下继续骗系统。
-    z=$(sd_pick_sentinel) || { printf '0'; return 0; }
+    sd_pick_sentinel_v || { printf '0'; return 0; }
+    z=$_sd_rv
 
     # 先读真实温度再分支：关闭熔断时同样要读，否则低温环境下会把 30℃ 报上去，
     # 伪造出偏高的壳温，系统反而提前降频，与目的相反。
-    cur=$(sd_sentinel_temp "$z" 2>/dev/null)
-    case "$cur" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
+    sd_sentinel_temp_v "$z" || { printf '0'; return 0; }
+    cur=$_sd_rv
 
-    limit=$(sd_limit_for_zone "$z")
+    sd_limit_for_type_v "$_sd_sent_type"
+    limit=$_sd_rv
+
     case "$limit" in
         ''|0|off)
             [ "$base" -gt "$cur" ] && base=$cur
@@ -549,6 +635,7 @@ sd_shell_target() {
     sd_dbg thermal "目标=${v}℃ base=${base} 真实=${cur} 屏障=${barrier} 余量=${room} gap=${gap}"
     printf '%s' "$v"
 }
+
 
 # ============================================================================
 # 伪装应用
@@ -664,15 +751,19 @@ sd_shell_emul() {
 }
 
 # 单个哨兵是否越限。返回 0 表示熔断（已撤销伪装）。
+# type 传空时读一次 sysfs 兜底，覆盖"没有电池/主板节点、退回首个非 core 节点"
+# 的那条路径。
 sd_guard_one() {
-    local z="$1" limit cur
-    limit=$(sd_limit_for_zone "$z")
+    local z="$1" t="${2:-}" limit cur
+    [ -n "$t" ] || read -r t 2>/dev/null <"$z/type"
+    sd_limit_for_type_v "$t"
+    limit=$_sd_rv
     case "$limit" in ''|0|off) return 1 ;; esac
-    cur=$(sd_sentinel_temp "$z" 2>/dev/null) || return 1
-    case "$cur" in ''|*[!0-9]*) return 1 ;; esac
+    sd_sentinel_temp_v "$z" || return 1
+    cur=$_sd_rv
     [ "$cur" -ge "$limit" ] || return 1
 
-    sd_warn guard "⚠ 熔断：哨兵 $(basename "$z") 实测 ${cur}℃ ≥ 上限 ${limit}℃"
+    sd_warn guard "⚠ 熔断：哨兵 ${z##*/} 实测 ${cur}℃ ≥ 上限 ${limit}℃"
     sd_spoof_clear
     _sd_emul_last=""
     sd_shell_emul 0
@@ -689,11 +780,13 @@ sd_guard_one() {
 # WebUI 上调 SoC 阈值等于没改。现在电池走 battery_limit，
 # xo-therm 等走 sentinel_limit，任一超限即熔断。
 sd_sentinel_guard() {
-    local e z t fb="" checked=0
-    # 没有伪装在生效时直接放行，否则熔断后每 tick 都重清一遍并写日志
-    if [ "$(sd_state_get temp_mode off)" = "off" ] \
-        && [ "$(sd_state_get core_temp off)" = "off" ] \
-        && [ "$(sd_state_get noncore_temp off)" = "off" ]; then
+    local e z t fb="" fb_t="" checked=0
+    [ "$_sd_st_loaded" = 1 ] || sd_state_load
+    # 没有伪装在生效时直接放行，否则熔断后每 tick 都重清一遍并写日志。
+    # 这里直接读 _st_*，不再为三个判断 fork 三次。
+    if [ "${_st_temp_mode:-off}" = "off" ] \
+        && [ "${_st_core_temp:-off}" = "off" ] \
+        && [ "${_st_noncore_temp:-off}" = "off" ]; then
         return 0
     fi
     _sd_zones_ready
@@ -706,14 +799,14 @@ sd_sentinel_guard() {
         case "$t" in
             battery|Battery|batt*|xo-therm|xtherm)
                 checked=1
-                sd_guard_one "$z" && return 1
+                sd_guard_one "$z" "$t" && return 1
                 ;;
-            *) [ -n "$fb" ] || fb=$z ;;
+            *) [ -n "$fb" ] || { fb=$z; fb_t=$t; } ;;
         esac
     done
     # 没有明确的电池/主板节点时，退回第一个非 core/shell 节点
     if [ "$checked" -eq 0 ] && [ -n "$fb" ]; then
-        sd_guard_one "$fb" && return 1
+        sd_guard_one "$fb" "$fb_t" && return 1
     fi
     return 0
 }
@@ -1054,16 +1147,23 @@ sd_batt_power() {
 
 # 按温度算本轮允许的电流上限（mA）。0 = 不限制。
 # 分四档而非线性插值：充电 IC 对阶跃响应更稳定，日志也便于核对。
-sd_curr_target() {
+# 电流目标 → _sd_rv。零 fork 版本，供守护每 tick 调用。
+sd_curr_target_v() {
     local ma wall cur pct
-    ma=$(sd_state_int curr_max 0 0 8000)
-    [ "$ma" -gt 0 ] || { printf '0'; return 0; }
+    [ "$_sd_st_loaded" = 1 ] || sd_state_load
+    _sd_clamp "${_st_curr_max:-0}" 0 8000 0
+    ma=$_sd_rv
+    [ "$ma" -gt 0 ] || { _sd_rv=0; return 0; }
 
-    cur=$(sd_sentinel_temp "$(sd_pick_sentinel)" 2>/dev/null)
-    case "$cur" in ''|*[!0-9]*) printf '%s' "$ma"; return 0 ;; esac
+    sd_pick_sentinel_v || { _sd_rv=$ma; return 0; }
+    sd_sentinel_temp_v "$_sd_rv" || { _sd_rv=$ma; return 0; }
+    cur=$_sd_rv
 
-    wall=$(sd_wall)
-    [ "$wall" -gt 0 ] || wall=42
+    case "${_st_wall:-off}" in
+        off|'') wall=42 ;;
+        *) _sd_clamp "${_st_wall:-42}" 35 80 42; wall=$_sd_rv
+           [ "$wall" -gt 0 ] || wall=42 ;;
+    esac
 
     if [ "$cur" -ge "$wall" ]; then pct=25
     elif [ "$cur" -ge $((wall - 3)) ]; then pct=50
@@ -1072,40 +1172,38 @@ sd_curr_target() {
     fi
 
     sd_dbg charge "电流目标 ${cur}℃/墙${wall}℃ → ${pct}% of ${ma}mA"
-    printf '%s' $((ma * pct / 100))
+    _sd_rv=$((ma * pct / 100))
+    return 0
 }
 
-sd_curr_apply() {
-    local ma="$1" ua n total=0 ok=0 cur=""
-    [ "$ma" -gt 0 ] || return 1
-    ua=$((ma * 1000))
-    for n in $(sd_curr_nodes); do
-        total=$((total + 1))
-        read -r cur 2>/dev/null <"$n"
-        if printf '%s\n' "$ua" 2>/dev/null >"$n"; then
-            ok=$((ok + 1))
-            sd_dbg charge "  写入 $(basename "$n"): ${cur:-?} → ${ua}µA"
-        else
-            sd_warn charge "  节点不可写: $n"
-        fi
-    done
-    if [ "$total" -eq 0 ]; then
-        sd_warn charge "未找到任何电流节点，curr_max 不生效"
-        return 1
-    fi
-    sd_info charge "电流上限 ${ma}mA 已写入 $ok/$total 个节点"
-    [ "$ok" -gt 0 ]
-}
+sd_curr_target() { sd_curr_target_v; printf '%s' "$_sd_rv"; }
 
-# 系统/IC 会自己往上调，每次 tick 检查。只在超出目标 10% 时重写 ——
-# 否则每秒都在和 IC 打架，日志也会刷屏。
 sd_curr_keep() {
     local want ua margin n cur="" n_ok=0
-    want=$(sd_curr_target)
+    sd_curr_target_v
+    want=$_sd_rv
+    # 未设限流时连节点都不用探 —— 原来这里每 tick 白跑一次目标计算
     [ "$want" -gt 0 ] || return 0
     ua=$((want * 1000))
     margin=$((ua * 11 / 10))
-    for n in $(sd_curr_nodes); do
+
+    # set -- 是内建命令，不 fork；节点表本来就是固定的几个路径
+    if [ -n "${SD_CURR_NODES:-}" ]; then
+        set -- $(printf '%s' "$SD_CURR_NODES" | tr ',' ' ')
+    else
+        set -- \
+            "$SD_PS/battery/constant_charge_current_max" \
+            "$SD_PS/battery/constant_charge_current" \
+            "$SD_PS/battery/current_max" \
+            "$SD_PS/main/constant_charge_current_max" \
+            "$SD_PS/bms/current_max" \
+            "$SD_PS/usb/current_max" \
+            /sys/devices/virtual/oplus_chg/battery/chg_current_max \
+            /sys/devices/virtual/oplus_chg/battery/current_max
+    fi
+
+    for n in "$@"; do
+        [ -e "$n" ] || continue
         read -r cur 2>/dev/null <"$n"
         case "$cur" in ''|*[!0-9]*) continue ;; esac
         if [ "$cur" -gt "$margin" ]; then
@@ -1114,43 +1212,6 @@ sd_curr_keep() {
     done
     [ "$n_ok" -gt 0 ] && sd_info charge "电流墙被抬高，已压回 ${want}mA（$n_ok 节点）"
     return 0
-}
-
-sd_charge_renegotiate() {
-    local node=/sys/devices/virtual/oplus_chg/battery/mmi_charging_enable i=0
-    [ -w "$node" ] || { sd_warn charge "充电使能节点不可写，跳过重握手"; return 1; }
-    sd_info charge "开始重新握手（3 轮 × 5s）"
-    while [ "$i" -lt 3 ]; do
-        printf '0\n' 2>/dev/null >"$node"
-        sleep 5
-        printf '1\n' 2>/dev/null >"$node"
-        sleep 5
-        i=$((i + 1))
-    done
-    sd_info charge "重握手结束，当前 $(sd_batt_power 2>/dev/null || echo '?') W"
-}
-
-sd_charge_tick() {
-    local cap st target fast_cap
-    cap=$(sd_batt_capacity)
-    st=$(sd_batt_status)
-    target=$(sd_shell_target)
-    fast_cap=$(sd_state_int fast_cap 55 20 90)
-
-    case "$st" in
-        Charging|Full) ;;
-        *) sd_shell_emul 0; return 0 ;;
-    esac
-
-    # 电流墙独立于电量段：只要在充电就维持
-    sd_curr_keep
-
-    # fast_cap 以上不再伪装，让系统正常进恒压段
-    if [ "$cap" -lt "$fast_cap" ]; then
-        sd_shell_emul "$target"
-    else
-        sd_shell_emul 0
-    fi
 }
 
 # ============================================================================
@@ -1221,6 +1282,37 @@ sd_hz_read() {
     local k
     case "$1" in peak|max) k=peak_refresh_rate ;; *) k=min_refresh_rate ;; esac
     settings get system "$k" 2>/dev/null | tr -d '\r'
+}
+
+# 一次取回 peak + min 两个键。
+#
+# 真机上 `settings` 不是简单的读文件：它启动 app_process 跑 Java 命令，
+# 单次冷启动 80~150ms（低端机更久）。锁定档每 tick 要对比这两个键，
+# 用两次 get 就是每 15 秒启动两个 app_process，折合单核 1.5% 以上。
+# `settings list system` 一次就能拿全表，筛两个键出来，进程数减半。
+_hz_peak=""
+_hz_min=""
+sd_hz_readpair() {
+    local k v out
+    _hz_peak=""
+    _hz_min=""
+    command -v settings >/dev/null 2>&1 || return 1
+    out=$(settings list system 2>/dev/null)
+    if [ -n "$out" ]; then
+        while IFS='=' read -r k v; do
+            case "$k" in
+                peak_refresh_rate) _hz_peak=$v ;;
+                min_refresh_rate)  _hz_min=$v ;;
+            esac
+        done <<EOF
+$out
+EOF
+    else
+        # 个别 ROM 的 settings 不支持 list，退回逐个 get
+        _hz_peak=$(settings get system peak_refresh_rate 2>/dev/null | tr -d '\r')
+        _hz_min=$(settings get system min_refresh_rate 2>/dev/null | tr -d '\r')
+    fi
+    return 0
 }
 
 sd_hz_write() {
@@ -1327,7 +1419,8 @@ sd_hz_set() {
 
     # settings put 不报错不代表写进去了：部分机型会立刻把值改回去。
     # 写不进就回滚，不留下"状态显示已开启、实际没生效"的半套配置。
-    cur=$(sd_hz_read peak); cur=${cur%%.*}
+    sd_hz_readpair
+    cur=${_hz_peak%%.*}
     if [ "$cur" != "$v" ]; then
         prev_p=$(sd_state_get hz_prev_peak "")
         prev_m=$(sd_state_get hz_prev_min "")
@@ -1365,8 +1458,9 @@ sd_hz_guard() {
     [ "$_st_hz_hard" = "1" ] || return 0
     case "$_st_hz" in ''|off|*[!0-9]*) return 0 ;; esac
     v=$_st_hz
-    peak=$(sd_hz_read peak); peak=${peak%%.*}
-    min=$(sd_hz_read min);   min=${min%%.*}
+    sd_hz_readpair
+    peak=${_hz_peak%%.*}
+    min=${_hz_min%%.*}
     if [ "$peak" = "$v" ] && [ "$min" = "$v" ]; then
         _hz_bad=0; _hz_reason=""
         return 0
@@ -1382,7 +1476,8 @@ sd_hz_guard() {
     fi
     sd_hz_write "$v"
     sd_hz_mcfr_on
-    peak=$(sd_hz_read peak); peak=${peak%%.*}
+    sd_hz_readpair
+    peak=${_hz_peak%%.*}
     if [ "$peak" = "$v" ]; then
         _hz_bad=0; _hz_reason=""
         return 1
@@ -1396,8 +1491,9 @@ sd_hz_guard() {
 sd_hz_state_text() {
     local v peak min
     v=$(sd_hz_want) || { echo off; return 0; }
-    peak=$(sd_hz_read peak); peak=${peak%%.*}
-    min=$(sd_hz_read min);   min=${min%%.*}
+    sd_hz_readpair
+    peak=${_hz_peak%%.*}
+    min=${_hz_min%%.*}
     [ "$peak" = "$v" ] && [ "$min" = "$v" ] || { echo drift; return 0; }
     [ "$(sd_hz_lowpower)" = "1" ] && { echo low_power; return 0; }
     echo ok
@@ -1408,7 +1504,8 @@ sd_hz_state_text() {
 sd_hz_boot() {
     local v cur
     v=$(sd_hz_want) || return 0
-    cur=$(sd_hz_read peak); cur=${cur%%.*}
+    sd_hz_readpair
+    cur=${_hz_peak%%.*}
     if [ "$cur" = "$v" ]; then
         if sd_hz_hard; then sd_hz_mcfr_on; fi
         return 0
@@ -1537,9 +1634,13 @@ SD_DESC_LAST="$SD_RUN/desc.last"
 
 sd_desc_text() {
     local mode gear hz n t
-    mode=$(sd_state_get temp_mode off)
+    # 读内存状态即可：这个函数每 3 分钟被守护调一次，四个 $(...) 换四个 fork
+    # 不划算。状态刚被 sd_state_load 刷过，直接读 _st_* 与读文件等价。
+    [ "$_sd_st_loaded" = 1 ] || sd_state_load
+    mode=${_st_temp_mode:-off}
     [ "$mode" = dyn ] && mode=static
-    gear=$(sd_state_int aggr 10 0 10)
+    _sd_clamp "${_st_aggr:-10}" 0 10 10
+    gear=$_sd_rv
 
     case "$mode" in
         static|charge) t="温控档位 $gear/10" ;;
@@ -1547,10 +1648,10 @@ sd_desc_text() {
     esac
     [ "$mode" = charge ] && t="$t（仅充电）"
 
-    hz=$(sd_state_get hz off)
+    hz=${_st_hz:-off}
     case "$hz" in
         off|'') t="$t · 高刷关闭" ;;
-        *)      if [ "$(sd_state_get hz_hard 0)" = "1" ]; then
+        *)      if [ "${_st_hz_hard:-0}" = "1" ]; then
                     t="$t · 高刷 ${hz}Hz 锁定"
                 else
                     t="$t · 高刷 ${hz}Hz"
