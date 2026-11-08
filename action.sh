@@ -351,6 +351,9 @@ sd_menu() {
 
 [ -n "${1:-}" ] && sd_session cmd "命令行: $*"
 
+# 保存命令名：各分支会 shift，末尾判断该不该叫醒守护时 $1 已经变成参数值了
+_CMD="${1:-}"
+
 case "$1" in
     status)  sd_do_status ;;
     json)    sd_do_json ;;
@@ -420,3 +423,14 @@ case "$1" in
         awk 'NR>=3 { if (/^#/) { print; next } if ($0 == "") next; exit }' "$0"
         exit 1 ;;
 esac
+
+# 参数类命令写完后立刻叫醒守护，不必等下一个 tick（最长 15 秒）。
+# 守护没在跑时 sd_daemon_kick 静默返回。
+# 退出码必须沿用命令本身的结果：WebUI 靠它判断成败，kick 把它覆盖成 0
+# 会让 "aggr 11" 这种被拒绝的输入看起来成功。
+_rc=$?
+case "$_CMD" in
+    temp|shell|core|noncore|aggr|base|wall|curr|fast|sentinel|battery|horae|level)
+        sd_daemon_kick ;;
+esac
+exit "$_rc"

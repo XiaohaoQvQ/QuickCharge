@@ -67,6 +67,8 @@ sd_apply_state() {
 sd_daemon() {
     local lock="$SD_RUN/daemon.lock" holder tick wall aggr
     local mode last_mode="" cnt=0
+    _sd_sp=""
+    _sd_reload=0
 
     # mkdir 是原子的。先读 pidfile 再判断在两进程同时启动时都会通过检查，
     # 结果拉起两个守护而 pidfile 只记得最后一个 —— 卸载就漏杀。
@@ -89,6 +91,10 @@ sd_daemon() {
 
     trap 'sd_info daemon "收到 TERM，退出"; rm -rf "$SD_RUN/daemon.lock"; rm -f "$SD_RUN/daemon.pid"; exit 0' TERM INT
 
+    # USR1：参数被改过，打断 sleep 立刻进入下一轮。默认动作是终止进程，
+    # 必须显式接管，否则 WebUI 一改参数守护就没了。
+    trap 'sd_info daemon "收到重载信号，立即刷新参数"; [ -n "${_sd_sp:-}" ] && kill "$_sd_sp" 2>/dev/null; _sd_reload=1' USR1
+
     sd_wait_boot || sd_warn daemon "等待 boot_completed 超时，继续启动"
 
     tick=$(sd_state_int tick 15 5 300)
@@ -96,10 +102,24 @@ sd_daemon() {
     aggr=$(sd_state_int aggr 10 0 10)
     sd_info daemon "循环参数: tick=${tick}s wall=${wall} aggr=${aggr} curr_max=$(sd_state_get curr_max 0)"
 
+    # sleep 放后台再 wait：收到信号时 wait 立即返回，sleep 子进程被 kill，
+    # 不必等满 15 秒。直接把 sleep 放前台的话信号会一直压到它睡完。
+    _sd_pause() {
+        sleep "$1" & _sd_sp=$!
+        wait $_sd_sp 2>/dev/null
+        _sd_sp=""
+    }
+
     while :; do
         # 每 tick 重新读 state：用户改完参数最多等一个 tick 生效，不用重启守护。
         # read 循环是内建的，不产生 fork。
         sd_state_load
+        if [ "$_sd_reload" = 1 ]; then
+            _sd_reload=0
+            tick=$(sd_state_int tick 15 5 300)
+            wall=$(sd_state_get wall off)
+            aggr=$(sd_state_int aggr 10 0 10)
+        fi
 
         # 模块被删除后自己退出，不用等重启
         if [ ! -f "$MODDIR/service.sh" ]; then
@@ -112,7 +132,7 @@ sd_daemon() {
         [ $((cnt % 40)) -eq 0 ] && sd_zone_scan
 
         if ! sd_sentinel_guard; then
-            sleep "$tick" & wait $!
+            _sd_pause "$tick"
             continue
         fi
 
@@ -142,7 +162,7 @@ sd_daemon() {
                 ;;
         esac
 
-        sleep "$tick" & wait $!
+        _sd_pause "$tick"
     done
 
     rm -rf "$SD_RUN/daemon.lock" "$SD_RUN/daemon.pid"

@@ -278,6 +278,15 @@ sd_daemon_stop() {
     rm -rf "$SD_RUN/daemon.lock" "$SD_RUN/daemon.pid"
 }
 
+# 叫醒守护立刻重读 state，不用等完当前 tick。
+# WebUI 改完参数后最多 15 秒才生效，用户会以为没生效而反复拖滑块。
+sd_daemon_kick() {
+    local pid
+    pid=$(sd_daemon_pid 2>/dev/null) || return 0
+    kill -USR1 "$pid" 2>/dev/null
+    return 0
+}
+
 # ============================================================================
 # 工具
 # ============================================================================
@@ -626,31 +635,57 @@ sd_shell_emul() {
     return 0
 }
 
-# 熔断：任一哨兵超阈值就撤销全部伪装并置 off，返回 1。
+# 单个哨兵是否越限。返回 0 表示熔断（已撤销伪装）。
+sd_guard_one() {
+    local z="$1" limit cur
+    limit=$(sd_limit_for_zone "$z")
+    case "$limit" in ''|0|off) return 1 ;; esac
+    cur=$(sd_sentinel_temp "$z" 2>/dev/null) || return 1
+    case "$cur" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$cur" -ge "$limit" ] || return 1
+
+    sd_warn guard "⚠ 熔断：哨兵 $(basename "$z") 实测 ${cur}℃ ≥ 上限 ${limit}℃"
+    sd_spoof_clear
+    _sd_emul_last=""
+    sd_shell_emul 0
+    sd_state_set temp_mode off
+    sd_state_set core_temp off
+    sd_state_set noncore_temp off
+    sd_state_set shell_temp 0
+    sd_warn guard "已撤销全部伪装并置 off，等待温度回落"
+    return 0
+}
+
+# 熔断：电池与主板两路都查。此前只查 sd_pick_sentinel 选中的那一个
+# （电池优先），设备有 battery 节点时 sentinel_limit 永远不会被读到，
+# WebUI 上调 SoC 阈值等于没改。现在电池走 battery_limit，
+# xo-therm 等走 sentinel_limit，任一超限即熔断。
 sd_sentinel_guard() {
-    local limit z cur
+    local e z t fb="" checked=0
     # 没有伪装在生效时直接放行，否则熔断后每 tick 都重清一遍并写日志
     if [ "$(sd_state_get temp_mode off)" = "off" ] \
         && [ "$(sd_state_get core_temp off)" = "off" ] \
         && [ "$(sd_state_get noncore_temp off)" = "off" ]; then
         return 0
     fi
-    z=$(sd_pick_sentinel) || return 0
-    limit=$(sd_limit_for_zone "$z")
-    case "$limit" in ''|0|off) return 0 ;; esac
-    cur=$(sd_sentinel_temp "$z") || return 0
-
-    if [ "$cur" -ge "$limit" ]; then
-        sd_warn guard "⚠ 熔断：哨兵 $(basename "$z") 实测 ${cur}℃ ≥ 上限 ${limit}℃"
-        sd_spoof_clear
-        _sd_emul_last=""
-        sd_shell_emul 0
-        sd_state_set temp_mode off
-        sd_state_set core_temp off
-        sd_state_set noncore_temp off
-        sd_state_set shell_temp 0
-        sd_warn guard "已撤销全部伪装并置 off，等待温度回落"
-        return 1
+    _sd_zones_ready
+    for e in $_sd_zones; do
+        z=${e%%|*}
+        t=${e#*|}
+        sd_zone_is_core "$t" && continue
+        sd_zone_is_shell "$t" && continue
+        [ -r "$z/temp" ] || continue
+        case "$t" in
+            battery|Battery|batt*|xo-therm|xtherm)
+                checked=1
+                sd_guard_one "$z" && return 1
+                ;;
+            *) [ -n "$fb" ] || fb=$z ;;
+        esac
+    done
+    # 没有明确的电池/主板节点时，退回第一个非 core/shell 节点
+    if [ "$checked" -eq 0 ] && [ -n "$fb" ]; then
+        sd_guard_one "$fb" && return 1
     fi
     return 0
 }

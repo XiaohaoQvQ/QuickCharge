@@ -322,6 +322,53 @@ eq "$(grep '^aggr=' "$SDD/state.conf")" "aggr=4" "WebUI 可改 aggr"
 SD_NO_DAEMON=1 sh /opt/qc/action.sh aggr 11 >/dev/null 2>&1
 eq "$?" "1" "aggr 11 被拒绝"
 
+echo "===== T9 参数即时生效 ====="
+SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/uninstall.sh >/dev/null 2>&1
+sleep 1
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
+printf 'temp_mode=static\nshell_temp=30\nsentinel_limit=110\nbattery_limit=48\nwall=42\naggr=10\ntick=300\ndefrev=2\n' >"$SDD/state.conf"
+printf '46000\n' >/sys/class/thermal/thermal_zone1/temp
+printf '100000\n' >/sys/class/thermal/thermal_zone2/temp
+SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d9.log 2>&1 &
+D9=$!
+sleep 3
+eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=static" "soc=110 时主板 100℃ 不熔断"
+J9=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh json 2>/dev/null)
+echo "$J9" | grep -q '"sentinel_limit":110' && ok "json 回读 soc=110" || ng "json 未保存 soc=110"
+SD_MODDIR=/opt/qc sh /opt/qc/action.sh sentinel 85 >/dev/null 2>&1
+sleep 2
+eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=off" "soc 改回 85 后 2 秒内熔断（tick=300，只能靠 kick）"
+grep -q '熔断' "$SD_LOG" 2>/dev/null && ok "熔断已写日志" || ng "熔断未写日志"
+kill -TERM "$D9" 2>/dev/null; sleep 1
+
+# 对照：直接改文件、不发信号，300 秒 tick 未到就不该熔断
+printf 'temp_mode=static\nshell_temp=30\nsentinel_limit=110\nbattery_limit=48\nwall=42\naggr=10\ntick=300\ndefrev=2\n' >"$SDD/state.conf"
+SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d9b.log 2>&1 &
+D9B=$!
+sleep 3
+sed -i 's/^sentinel_limit=110/sentinel_limit=85/' "$SDD/state.conf"
+sleep 2
+eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=static" "未发信号时守护仍在睡（对照）"
+kill -USR1 "$D9B" 2>/dev/null
+sleep 2
+eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=off" "USR1 唤醒后立即按新阈值熔断"
+kill -TERM "$D9B" 2>/dev/null; sleep 1
+printf '46000\n' >/sys/class/thermal/thermal_zone2/temp
+
+echo "===== T10 升级保留配置 ====="
+printf 'temp_mode=static\nshell_temp=38\nsentinel_limit=95\nbattery_limit=52\nwall=45\naggr=3\ncurr_max=2500\nfast_cap=70\ncurve_offset=200\nlog_level=4\ntick=20\ndefrev=2\n' >"$SDD/state.conf"
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install5.log 2>&1
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=38" "升级保留 shell_temp"
+eq "$(grep '^aggr=' "$SDD/state.conf")" "aggr=3" "升级保留 aggr"
+eq "$(grep '^wall=' "$SDD/state.conf")" "wall=45" "升级保留 wall"
+eq "$(grep '^sentinel_limit=' "$SDD/state.conf")" "sentinel_limit=95" "升级保留 sentinel_limit"
+eq "$(grep '^battery_limit=' "$SDD/state.conf")" "battery_limit=52" "升级保留 battery_limit"
+eq "$(grep '^curr_max=' "$SDD/state.conf")" "curr_max=2500" "升级保留 curr_max"
+eq "$(grep '^fast_cap=' "$SDD/state.conf")" "fast_cap=70" "升级保留 fast_cap"
+eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=static" "升级保留 temp_mode"
+eq "$(grep '^curve_offset=' "$SDD/state.conf")" "curve_offset=200" "升级保留 curve_offset"
+eq "$(head -1 /opt/qc/files/vendor/etc/charging_0.txt)" "550,3000,4500" "覆盖层按用户 curve_offset 重建"
+
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]
