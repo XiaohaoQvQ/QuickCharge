@@ -396,17 +396,22 @@ sd_pick_sentinel() {
 # 电池 48℃ 已是严重过热，SoC 结温 85℃ 才需要干预 —— 用同一个阈值等于没保护。
 # off 必须原样透传：sd_state_int 会把 off 转成默认值，让"关闭熔断"失效。
 sd_limit_for_zone() {
-    local t v d
+    local t v
     _sd_zones_ready
     read -r t 2>/dev/null <"$1/type"
+    # 越界回落默认，与其它参数一致：手改 state.conf 写 battery_limit=200
+    # 会让熔断永不触发，等于把唯一可信的一路保护关掉。
     case "$t" in
-        battery|Battery|batt*) d=48; v=$(sd_state_get battery_limit 48) ;;
-        *)                     d=85; v=$(sd_state_get sentinel_limit 85) ;;
-    esac
-    case "$v" in
-        off) printf 'off' ;;
-        ''|*[!0-9]*) printf '%s' "$d" ;;
-        *) printf '%s' "$v" ;;
+        battery|Battery|batt*)
+            v=$(sd_state_get battery_limit 48)
+            [ "$v" = off ] && { printf 'off'; return 0; }
+            sd_state_int battery_limit 48 30 70
+            ;;
+        *)
+            v=$(sd_state_get sentinel_limit 85)
+            [ "$v" = off ] && { printf 'off'; return 0; }
+            sd_state_int sentinel_limit 85 60 110
+            ;;
     esac
 }
 
@@ -425,8 +430,7 @@ sd_sentinel_temp() {
 sd_wall() {
     case "$(sd_state_get wall off)" in
         off|'') printf '0' ;;
-        *[!0-9]*) printf '0' ;;
-        *) sd_state_get wall 42 ;;
+        *) sd_state_int wall 42 35 80 ;;
     esac
 }
 
@@ -912,6 +916,9 @@ sd_umount_overrides() {
         fi
     } | sort -u | while IFS= read -r p; do
         [ -n "$p" ] || continue
+        # 只卸"文件型"挂载点。本模块的覆盖层挂在单个文件上，目标永远是 -f；
+        # 若清单被写入 /vendor、/data 这类目录，umount 会卸掉整个分区。
+        [ -f "$p" ] || continue
         # 普通 umount 优先：lazy 不立即生效，紧接着删源目录会让挂载点指向
         # 已删除的 inode，之后的 bind mount 全部解析失败 —— 最难查的一种残留。
         umount "$p" 2>/dev/null || umount -l "$p" 2>/dev/null

@@ -1,0 +1,294 @@
+#!/bin/sh
+# 用法: docker run --rm --privileged -v $PWD:/mod:ro -v $(dirname $0):/t alpine:3.20 sh /t/run.sh
+# QC 仿真测试：alpine + tmpfs 伪造 Android 根文件系统
+
+PASS=0; FAIL=0
+ok()  { PASS=$((PASS+1)); printf 'PASS  %s\n' "$*"; }
+ng()  { FAIL=$((FAIL+1)); printf 'FAIL  %s\n' "$*"; }
+eq()  { if [ "$1" = "$2" ]; then ok "$3"; else ng "$3 (want=$2 got=$1)"; fi; }
+
+# ---------------------------------------------------------------- 桩
+cat >/usr/local/bin/getprop <<'EOF'
+#!/bin/sh
+case "$1" in
+  ro.product.odm.manufacturer)     echo "${FAKE_MFR:-OPPO}" ;;
+  ro.product.vendor.manufacturer)  echo "${FAKE_MFR:-OPPO}" ;;
+  ro.product.manufacturer)         echo "${FAKE_MFR:-OPPO}" ;;
+  ro.product.model)                echo PJZ110 ;;
+  ro.vendor.oplus.market.name)     echo "OPPO Find X8" ;;
+  ro.soc.model)                    echo SM8750 ;;
+  ro.build.display.id)             echo "PJZ110_16.0.1_A.1" ;;
+  ro.build.version.release)        echo 16 ;;
+  ro.build.version.security_patch) echo 2026-10-01 ;;
+  sys.boot_completed)              echo 1 ;;
+  *) echo "" ;;
+esac
+EOF
+printf '#!/bin/sh\necho "UI: $*"\n' >/usr/local/bin/ui_print
+printf '#!/bin/sh\necho "ABORT: $*" >&2\nexit 1\n' >/usr/local/bin/abort
+printf '#!/bin/sh\nexit 0\n' >/usr/local/bin/start
+printf '#!/bin/sh\nexit 0\n' >/usr/local/bin/stop
+printf '#!/bin/sh\nexit 1\n' >/usr/local/bin/chcon   # 无 SELinux，模拟失败
+chmod +x /usr/local/bin/*
+
+# ---------------------------------------------------------------- 假 sysfs
+mount -t tmpfs tmpfs /sys 2>/dev/null || { echo "NO_TMPFS_SYS"; exit 1; }
+mkzone() {  # dir type temp
+    mkdir -p "/sys/class/thermal/$1"
+    printf '%s\n' "$2" >"/sys/class/thermal/$1/type"
+    printf '%s\n' "$3" >"/sys/class/thermal/$1/temp"
+    : >"/sys/class/thermal/$1/emul_temp"
+}
+mkzone thermal_zone0 shell-back 30000
+mkzone thermal_zone1 battery    46000
+mkzone thermal_zone2 xo-therm   45000
+mkzone thermal_zone3 cpu-0-0    50000
+mkdir -p /sys/class/power_supply/battery
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+printf '80\n'        >/sys/class/power_supply/battery/capacity
+
+# ---------------------------------------------------------------- 假 vendor 配置
+mkdir -p /vendor/etc /odm/etc
+cat >/vendor/etc/sys_high_temp_protect_0.xml <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<high_temp_protect>
+    <item enable="true" threshold="65000"/>
+    <item enable="true" threshold="70000"/>
+</high_temp_protect>
+EOF
+cat >/vendor/etc/sys_thermal_control_config.xml <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<thermal_control enable="true">
+    <level value="1" enable="true"/>
+    <level value="2" enable="true"/>
+</thermal_control>
+EOF
+cat >/vendor/etc/thermallevel_to_fps.xml <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<ThermalLevel>
+    <level name="0" fps="120" temp="40000"/>
+    <level name="1" fps="90.5" temp="42000"/>
+    <level name="2" fps="60" temp="45000"/>
+</ThermalLevel>
+EOF
+cat >/vendor/etc/sys_thermal_config.xml <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<config>
+    <cpu enable="1">1</cpu>
+    <gpu enable="1">1</gpu>
+    <other>1</other>
+</config>
+EOF
+cat >/vendor/etc/devices_config.json <<'EOF'
+{
+  "battery": { "temp_window": "[150,450]", "high.capacity.threshold": "[150,450]" }
+}
+EOF
+cat >/vendor/etc/QEGA_Config.txt <<'EOF'
+SkinTemperatureNode: xo-therm
+100001 hok 48000 1200
+0 adaptive 50000
+EOF
+cat >/vendor/etc/charging_0.txt <<'EOF'
+350,3000,4500
+400,2500,4200
+410,2000,4000
+450,1000,3000
+EOF
+printf 'some=1\nother=2\n' >/vendor/etc/horae_0.conf
+
+# 负例：CDATA（开闭标签计数会被误判）
+cat >/vendor/etc/sys_thermal_control_config_cdata.xml <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<root enable="true"><data><![CDATA[ a < b ]]></data></root>
+EOF
+# 负例：非配平
+printf '<root enable="true"><item></root>\n' >/vendor/etc/sys_thermal_control_config_bad.xml
+
+# ---------------------------------------------------------------- 模块副本
+cp -a /mod /opt/qc
+chmod +x /opt/qc/*.sh
+SDD=/data/adb/quickcharge
+mkdir -p "$SDD"
+
+echo "===== T1 安装 ====="
+MODPATH=/opt/qc sh -c '. /usr/local/bin/ui_print 2>/dev/null; MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install.log 2>&1
+eq "$?" "0" "customize.sh 退出码 0"
+grep -q "已生成" /tmp/install.log && ok "安装日志有生成计数" || ng "安装日志缺生成计数"
+
+OV=/opt/qc/files
+n=$(find "$OV" -type f 2>/dev/null | wc -l | tr -d ' ')
+eq "$n" "9" "生成 9 个覆盖文件"
+
+eq "$(grep -c 'fps="144"' "$OV/vendor/etc/thermallevel_to_fps.xml" 2>/dev/null)" "3" "fps 全部改为 144"
+eq "$(grep -c 'fps="90.5"' "$OV/vendor/etc/thermallevel_to_fps.xml" 2>/dev/null)" "0" "小数 fps 也被替换"
+eq "$(grep -c 'enable="true"' "$OV/vendor/etc/sys_high_temp_protect_0.xml" 2>/dev/null)" "0" "高温保护 true→false"
+grep -q 'threshold="65000"' "$OV/vendor/etc/sys_high_temp_protect_0.xml" && ok "高温阈值未被改动" || ng "高温阈值被改"
+eq "$(grep -c 'enable="true"' "$OV/vendor/etc/sys_thermal_control_config.xml" 2>/dev/null)" "0" "温控开关 true→false"
+grep -q '<level value="1"' "$OV/vendor/etc/sys_thermal_control_config.xml" && ok "温控档位数据保留" || ng "温控档位丢失"
+eq "$(grep -c '>0<' "$OV/vendor/etc/sys_thermal_config.xml" 2>/dev/null)" "2" "legacy 含 enable 行的 1→0"
+grep -q '<other>1</other>' "$OV/vendor/etc/sys_thermal_config.xml" && ok "legacy 非 enable 行未被误伤" || ng "legacy 误伤其他行"
+grep -q '150,550\]' "$OV/vendor/etc/devices_config.json" && ok "充电窗口改到 55℃" || ng "充电窗口未改"
+eq "$(grep -o '150,550\]' "$OV/vendor/etc/devices_config.json" 2>/dev/null | wc -l | tr -d ' ')" "2" "两处窗口都改"
+grep -q 'SkinTemperatureNode: battery' "$OV/vendor/etc/QEGA_Config.txt" && ok "QEGA 取样节点改 battery" || ng "QEGA 未改"
+eq "$(head -1 "$OV/vendor/etc/charging_0.txt")" "470,3000,4500" "充电曲线温度轴 +120"
+eq "$(wc -c <"$OV/vendor/etc/horae_0.conf" | tr -d ' ')" "0" "horae 配置置空"
+[ -f "$OV/vendor/etc/sys_thermal_control_config_cdata.xml" ] && ok "CDATA 文件结构可正常改写" || ng "CDATA 文件被误拒绝"
+grep -q 'a < b' "$OV/vendor/etc/sys_thermal_control_config_cdata.xml" && ok "CDATA 内容未被破坏" || ng "CDATA 内容被破坏"
+[ -f "$OV/vendor/etc/sys_thermal_control_config_bad.xml" ] && ng "非配平文件被误接受" || ok "非配平文件被拒绝"
+[ -f "$SDD/backup/vendor/etc/thermallevel_to_fps.xml" ] && ok "原件已备份" || ng "原件未备份"
+cmp -s "$SDD/backup/vendor/etc/charging_0.txt" /vendor/etc/charging_0.txt && ok "备份与原件逐字节一致" || ng "备份与原件不一致"
+eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=off" "默认不开启伪装"
+eq "$(grep '^wall=' "$SDD/state.conf")" "wall=42" "默认墙 42"
+eq "$(grep '^aggr=' "$SDD/state.conf")" "aggr=10" "默认 aggr 10"
+
+echo "===== T1b 覆盖安装不叠加 ====="
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install2.log 2>&1
+eq "$(head -1 "$OV/vendor/etc/charging_0.txt")" "470,3000,4500" "二次安装曲线未叠加"
+eq "$(grep -c 'fps="144"' "$OV/vendor/etc/thermallevel_to_fps.xml")" "3" "二次安装 fps 未叠加"
+
+echo "===== T1c 非欧加真拒绝 ====="
+FAKE_MFR=Xiaomi MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install3.log 2>&1
+eq "$?" "1" "Xiaomi 安装退出码 1"
+grep -q "仅支持" /tmp/install3.log && ok "提示不支持机型" || ng "缺少不支持提示"
+
+echo "===== T2 挂载 ====="
+orig_md5=$(md5sum /vendor/etc/charging_0.txt | awk '{print $1}')
+SD_MODDIR=/opt/qc sh /opt/qc/post-fs-data.sh >/tmp/pfd.log 2>&1
+eq "$?" "0" "post-fs-data 退出码 0"
+m=$(grep -c ' /vendor/etc/' /proc/mounts)
+eq "$m" "9" "9 个 vendor 配置已挂载"
+grep -q 'fps="144"' /vendor/etc/thermallevel_to_fps.xml && ok "挂载后读到的是覆盖层内容" || ng "挂载未生效"
+eq "$(cat "$SDD/boot.count")" "1" "开机计数 1"
+
+echo "===== T3 温度决策 ====="
+MODDIR=/opt/qc
+. /opt/qc/lib/qc.sh
+sd_state_load
+set_temp() { printf '%s\n' "$1" >/sys/class/thermal/thermal_zone1/temp; }
+set_mode() { sd_state_set temp_mode static; sd_state_set shell_temp "$1"; sd_state_set wall "$2"; sd_state_set aggr "$3"; _sd_st_loaded=0; sd_state_load; }
+
+set_mode 30 42 10
+set_temp 38000; t=$(sd_shell_target); eq "$t" "30" "真实 38℃ → 上报 30℃"
+set_temp 39000; t=$(sd_shell_target); eq "$t" "33" "真实 39℃ → 上报 33℃"
+set_temp 40000; t=$(sd_shell_target); eq "$t" "36" "真实 40℃ → 上报 36℃"
+set_temp 41000; t=$(sd_shell_target); eq "$t" "39" "真实 41℃ → 上报 39℃"
+set_temp 42000; t=$(sd_shell_target); eq "$t" "0"  "真实 42℃ → 关闭模拟"
+set_temp 30000; t=$(sd_shell_target); eq "$t" "30" "低温不伪造高温"
+set_mode 30 42 0
+set_temp 39000; t=$(sd_shell_target); eq "$t" "37" "aggr=0 时温差压到 2℃"
+
+echo "===== T3b 熔断 ====="
+set_mode 30 42 10
+set_temp 49000
+sd_sentinel_guard; r=$?
+eq "$r" "1" "电池 49℃ 触发熔断"
+eq "$(sd_state_get temp_mode off)" "off" "熔断后模式置 off"
+eq "$(sd_state_get shell_temp 0)" "0" "熔断后 shell_temp 清 0"
+set_temp 46000
+sd_sentinel_guard; eq "$?" "0" "46℃ 不熔断"
+
+echo "===== T3c 写入与守卫 ====="
+set_mode 30 42 10
+set_temp 38000
+sd_shell_emul 30
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "30000" "壳温节点写入毫摄氏度"
+eq "$(cat /sys/class/thermal/thermal_zone1/emul_temp)" "" "电池节点未被写"
+eq "$(cat /sys/class/thermal/thermal_zone2/emul_temp)" "" "xo-therm 未被写"
+sd_shell_emul 0
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "0" "0 表示关闭模拟"
+
+echo "===== T4 参数与写入边界 ====="
+eq "$(sd_state_int shell_temp 30 25 60)" "30" "shell_temp 缺省 30"
+sd_state_set shell_temp 99
+eq "$(sd_state_int shell_temp 30 25 60)" "30" "shell_temp=99 回落 30"
+sd_state_set shell_temp abc
+eq "$(sd_state_int shell_temp 30 25 60)" "30" "shell_temp=abc 回落 30"
+sd_state_set shell_temp -5
+eq "$(sd_state_int shell_temp 30 25 60)" "30" "shell_temp 负数回落 30"
+sd_state_set aggr 99
+eq "$(sd_state_int aggr 10 0 10)" "10" "aggr=99 回落 10"
+sd_shell_emul 19; eq "$?" "1" "19℃ 拒绝写入"
+sd_shell_emul 101; eq "$?" "1" "101℃ 拒绝写入"
+sd_shell_emul 25; eq "$?" "0" "25℃ 允许写入"
+
+echo "===== T4b 路径保护 ====="
+( SD_DATA=/ ; . /opt/qc/lib/qc.sh; printf '%s' "$SD_DATA" ) >/tmp/pathguard.txt
+eq "$(cat /tmp/pathguard.txt)" "/data/adb/quickcharge" "SD_DATA=/ 被纠正"
+
+echo "===== T5 卸载还原 ====="
+SD_DATA=$SDD sh /opt/qc/uninstall.sh >/tmp/unin.log 2>&1
+eq "$?" "0" "卸载退出码 0"
+eq "$(grep -c ' /vendor/etc/' /proc/mounts)" "0" "挂载全部解除"
+after=$(md5sum /vendor/etc/charging_0.txt | awk '{print $1}')
+eq "$after" "$orig_md5" "原文件逐字节恢复"
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "0" "emul_temp 归零"
+[ -d "$SDD" ] && ng "数据目录残留" || ok "数据目录已删除"
+SD_DATA=$SDD sh /opt/qc/uninstall.sh >/dev/null 2>&1
+eq "$?" "0" "重复卸载不报错"
+
+echo "===== T5b 清单丢失反推卸载 ====="
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
+SD_MODDIR=/opt/qc sh /opt/qc/post-fs-data.sh >/dev/null 2>&1
+eq "$(grep -c ' /vendor/etc/' /proc/mounts)" "9" "重建后重新挂载"
+rm -f "$SDD/mounts.list"
+SD_DATA=$SDD sh /opt/qc/uninstall.sh >/dev/null 2>&1
+eq "$(grep -c ' /vendor/etc/' /proc/mounts)" "0" "清单丢失时按覆盖层反推卸载"
+eq "$(md5sum /vendor/etc/charging_0.txt | awk '{print $1}')" "$orig_md5" "反推卸载后原文件一致"
+
+echo "===== T5c 守护进程清理 ====="
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
+sd_state_set() { :; }
+printf 'temp_mode=static\nshell_temp=30\ntick=5\nwall=42\naggr=10\n' >"$SDD/state.conf"
+SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/daemon.log 2>&1 &
+DPID=$!
+sleep 2
+kill -0 "$DPID" 2>/dev/null && ok "守护进程已启动" || ng "守护未能启动"
+SD_DATA=$SDD sh /opt/qc/uninstall.sh >/dev/null 2>&1
+sleep 1
+kill -0 "$DPID" 2>/dev/null && { ng "守护进程残留"; kill -9 "$DPID" 2>/dev/null; } || ok "守护进程已停止"
+[ -d "$SDD" ] && ng "数据目录残留(守护轮)" || ok "数据目录已删除(守护轮)"
+
+echo "===== T6 安全边界 ====="
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
+SD_MODDIR=/opt/qc sh /opt/qc/post-fs-data.sh >/dev/null 2>&1
+MODDIR=/opt/qc
+. /opt/qc/lib/qc.sh
+
+printf 'temp_mode=static\nshell_temp=30\nbattery_limit=200\nsentinel_limit=85\nwall=42\naggr=10\n' >"$SDD/state.conf"
+_sd_st_loaded=0; sd_state_load
+printf '49000\n' >/sys/class/thermal/thermal_zone1/temp
+sd_sentinel_guard; eq "$?" "1" "battery_limit=200 时 49℃ 仍应熔断"
+
+printf 'temp_mode=static\nshell_temp=30\nbattery_limit=48\nsentinel_limit=500\nwall=42\naggr=10\n' >"$SDD/state.conf"
+_sd_st_loaded=0; sd_state_load
+printf '90000\n' >/sys/class/thermal/thermal_zone3/temp
+eq "$(sd_limit_for_zone /sys/class/thermal/thermal_zone3)" "85" "sentinel_limit=500 回落 85"
+
+printf 'temp_mode=static\nshell_temp=30\nbattery_limit=48\nsentinel_limit=85\nwall=5\naggr=10\n' >"$SDD/state.conf"
+_sd_st_loaded=0; sd_state_load
+eq "$(sd_wall)" "42" "wall=5 回落默认 42"
+
+mkdir -p /evil
+mount -t tmpfs tmpfs /evil 2>/dev/null
+grep -q ' /evil ' /proc/mounts && ok "测试挂载点已建立" || ng "测试挂载点未建立"
+printf '/evil\n/vendor\n/data\n' >"$SDD/mounts.list"
+SD_DATA=$SDD sh /opt/qc/uninstall.sh >/dev/null 2>&1
+grep -q ' /evil ' /proc/mounts && ok "清单里的目录路径未被 umount" || ng "清单污染导致目录分区被卸载"
+umount /evil 2>/dev/null
+
+echo "===== T7 决策循环耗时 ====="
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
+MODDIR=/opt/qc; . /opt/qc/lib/qc.sh
+printf 'temp_mode=static\nshell_temp=30\nbattery_limit=48\nsentinel_limit=85\nwall=42\naggr=10\n' >"$SDD/state.conf"
+sd_state_load
+printf '38000\n' >/sys/class/thermal/thermal_zone1/temp
+i=0; t0=$(date +%s)
+while [ $i -lt 2000 ]; do sd_shell_target >/dev/null; i=$((i+1)); done
+t1=$(date +%s)
+echo "INFO  2000 次决策 $((t1-t0))s（容器 busybox ash，仅供量级参考）"
+[ $((t1-t0)) -le 20 ] && ok "2000 次决策 <20s" || ng "决策循环异常缓慢"
+
+echo
+echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
+[ "$FAIL" -eq 0 ]

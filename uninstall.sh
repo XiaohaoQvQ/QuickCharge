@@ -54,6 +54,9 @@ unmount_one() {
 
 if [ -s "$SD_MOUNTS" ]; then
     sort -u "$SD_MOUNTS" 2>/dev/null | while IFS= read -r p; do
+        # 清单只应记录文件型挂载点。被写入 /vendor、/data 这类目录时，
+        # umount 会卸掉整个分区 —— 卸载脚本反而成了破坏源。
+        case "$p" in /*) [ -f "$p" ] || continue ;; *) continue ;; esac
         unmount_one "$p"
     done
 fi
