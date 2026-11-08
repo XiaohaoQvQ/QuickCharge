@@ -1,5 +1,4 @@
 #!/bin/sh
-# 用法: docker run --rm --privileged -v $PWD:/mod:ro -v $(dirname $0):/t alpine:3.20 sh /t/run.sh
 # QC 仿真测试：alpine + tmpfs 伪造 Android 根文件系统
 
 PASS=0; FAIL=0
@@ -29,6 +28,7 @@ printf '#!/bin/sh\necho "ABORT: $*" >&2\nexit 1\n' >/usr/local/bin/abort
 printf '#!/bin/sh\nexit 0\n' >/usr/local/bin/start
 printf '#!/bin/sh\nexit 0\n' >/usr/local/bin/stop
 printf '#!/bin/sh\nexit 1\n' >/usr/local/bin/chcon   # 无 SELinux，模拟失败
+printf '#!/bin/sh\necho "$@" >/tmp/am.args\n' >/usr/local/bin/am
 chmod +x /usr/local/bin/*
 
 # ---------------------------------------------------------------- 假 sysfs
@@ -114,6 +114,10 @@ mkdir -p "$SDD"
 echo "===== T1 安装 ====="
 MODPATH=/opt/qc sh -c '. /usr/local/bin/ui_print 2>/dev/null; MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install.log 2>&1
 eq "$?" "0" "customize.sh 退出码 0"
+grep -q "代码由 AI 辅助完成" /tmp/install.log && ok "横幅含 AI 辅助声明" || ng "缺 AI 辅助声明"
+grep -q "coolapk.com/u/27316679" /tmp/install.log && ok "安装末尾显示酷安主页" || ng "缺酷安主页提示"
+sleep 1
+grep -q "27316679" /tmp/am.args 2>/dev/null && ok "刷写后调用 am 跳转主页" || ng "未触发主页跳转"
 grep -q "已生成" /tmp/install.log && ok "安装日志有生成计数" || ng "安装日志缺生成计数"
 
 OV=/opt/qc/files
