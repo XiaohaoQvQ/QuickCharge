@@ -843,6 +843,63 @@ sleep 12
 eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "0" "tick=60 拔电 12 秒内还原"
 kill -TERM "$D16D" 2>/dev/null; sleep 1
 
+# ============================================================ T17 真实温度与限流
+echo
+echo "===== T17 传感器容错 / 限流落盘 ====="
+printf 'battery\n' >/sys/class/thermal/thermal_zone1/type
+printf '46000\n'   >/sys/class/thermal/thermal_zone1/temp
+printf 'xo-therm\n' >/sys/class/thermal/thermal_zone2/type
+printf '45000\n'   >/sys/class/thermal/thermal_zone2/temp
+printf 'temp_mode=charge\nwall=42\naggr=10\ncurr_max=0\ndefrev=3\n' >"$SDD/state.conf"
+
+# 小数温度：部分平台 temp 写成 45.000，按整数校验会整条读不到
+printf '47.000\n' >/sys/class/thermal/thermal_zone1/temp
+eq "$(SD_MODDIR=/opt/qc sh /opt/qc/action.sh json | sed 's/.*"real":\([^,]*\).*/\1/')" "47" "小数温度被正确解析"
+
+# 电池温区读不到时，必须换下一个可用温区，而不是返回空
+rm -f /sys/class/thermal/thermal_zone1/temp
+J=$(SD_MODDIR=/opt/qc sh /opt/qc/action.sh json)
+eq "$(printf '%s' "$J" | sed 's/.*"sentinel":"\([^"]*\)".*/\1/')" "thermal_zone2" "坏温区被跳过"
+eq "$(printf '%s' "$J" | sed 's/.*"real":\([^,]*\).*/\1/')" "45" "改用备用温区读数"
+printf '46000\n' >/sys/class/thermal/thermal_zone1/temp
+
+# 限流：µA 节点写 µA，mA 节点写 mA，不能差一个数量级
+mkdir -p /sys/class/power_supply/battery
+printf '30000\n'   >/sys/class/thermal/thermal_zone1/temp
+printf '6000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+printf '50\n'       >/sys/class/power_supply/battery/capacity
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh curr 2000 >/tmp/t17a.log 2>&1
+eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "2000000" "µA 节点写入 µA"
+
+mkdir -p /sys/devices/virtual/oplus_chg/battery
+printf '6000\n' >/sys/devices/virtual/oplus_chg/battery/chg_current_max
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh curr 1500 >/tmp/t17b.log 2>&1
+eq "$(cat /sys/devices/virtual/oplus_chg/battery/chg_current_max)" "1500" "mA 节点写入 mA"
+
+# 高温按档位降流：46℃ 已过 42℃ 墙 → 只放行 25%
+printf '46000\n'   >/sys/class/thermal/thermal_zone1/temp
+printf '6000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh curr 2000 >/tmp/t17d.log 2>&1
+eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "500000" "高温按 25% 降流"
+printf '30000\n' >/sys/class/thermal/thermal_zone1/temp
+
+# 未插电时只记录，不写节点
+printf 'Discharging\n' >/sys/class/power_supply/battery/status
+printf '6000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh curr 3000 >/tmp/t17c.log 2>&1
+eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "6000000" "未插电不动节点"
+grep -q "接上充电器后生效" /tmp/t17c.log && ok "未插电给出提示" || ng "未插电没有提示"
+
+# 守护复查：系统把上限抬回去时压回
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+printf '6000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
+MODDIR=/opt/qc SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_state_set curr_max 2000; _sd_st_loaded=0; sd_state_load; sd_curr_keep'
+eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "2000000" "守护把抬高的上限压回"
+
+printf 'temp_mode=charge\ncurr_max=0\nwall=42\naggr=10\ndefrev=3\n' >"$SDD/state.conf"
+printf 'Discharging\n' >/sys/class/power_supply/battery/status
+
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]

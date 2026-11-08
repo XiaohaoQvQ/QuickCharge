@@ -412,6 +412,21 @@ sd_zone_in_scope() {
     esac
 }
 
+# 这个温区能不能当温度源用 —— 必须真读一次。
+#
+# [ -r ] 在 root 下几乎恒真，但 SELinux 仍会拒绝读某些 zone。选中这种节点，
+# 真实温度就永远是空值，而且不会 fallback 到下一个可用温区（面板上表现为
+# "真实"一栏长期是 —，熔断也一起失效）。
+# 另外有的平台 temp 写成 "45.000"，按整数校验会直接判非法，这里先截掉小数。
+_sd_temp_readable() {
+    local v=""
+    read -r v 2>/dev/null <"$1/temp" || return 1
+    case "$v" in *.*) v=${v%%.*} ;; esac
+    case "$v" in ''|*[!0-9-]*) return 1 ;; esac
+    case "$v" in -*) return 1 ;; esac
+    return 0
+}
+
 # 哨兵优先级：电池 > 主板 > 任意非 core/shell 温区。
 # 不选 cpu-0-0：CPU 正是伪装对象，钉死之后哨兵就失效了。
 sd_pick_sentinel() {
@@ -421,7 +436,7 @@ sd_pick_sentinel() {
         for e in $_sd_zones; do
             z=${e%%|*}
             t=${e#*|}
-            [ "$t" = "$want" ] && [ -r "$z/temp" ] && { printf '%s' "$z"; return 0; }
+            [ "$t" = "$want" ] && _sd_temp_readable "$z" && { printf '%s' "$z"; return 0; }
         done
     done
     for e in $_sd_zones; do
@@ -429,7 +444,7 @@ sd_pick_sentinel() {
         t=${e#*|}
         sd_zone_is_core "$t" && continue
         sd_zone_is_shell "$t" && continue
-        [ -r "$z/temp" ] && { printf '%s' "$z"; return 0; }
+        _sd_temp_readable "$z" && { printf '%s' "$z"; return 0; }
     done
     return 1
 }
@@ -460,7 +475,8 @@ sd_limit_for_zone() {
 sd_sentinel_temp() {
     local z="$1" v=""
     [ -n "$z" ] || return 1
-    read -r v 2>/dev/null <"$z/temp"
+    read -r v 2>/dev/null <"$z/temp" || return 1
+    case "$v" in *.*) v=${v%%.*} ;; esac
     case "$v" in ''|*[!0-9-]*) return 1 ;; esac
     # -1 在部分平台表示"传感器不可用"，当温度用会把负值带进下游的 max/min
     case "$v" in -*) return 1 ;; esac
@@ -513,7 +529,8 @@ _sd_clamp() {
 sd_sentinel_temp_v() {
     local v=""
     [ -n "$1" ] || return 1
-    read -r v 2>/dev/null <"$1/temp"
+    read -r v 2>/dev/null <"$1/temp" || return 1
+    case "$v" in *.*) v=${v%%.*} ;; esac
     case "$v" in ''|*[!0-9-]*) return 1 ;; esac
     case "$v" in -*) return 1 ;; esac
     if [ "$v" -gt 2000 ]; then _sd_rv=$((v / 1000)); else _sd_rv=$v; fi
@@ -528,7 +545,7 @@ sd_pick_sentinel_v() {
         for e in $_sd_zones; do
             z=${e%%|*}
             t=${e#*|}
-            [ "$t" = "$want" ] && [ -r "$z/temp" ] && {
+            [ "$t" = "$want" ] && _sd_temp_readable "$z" && {
                 _sd_rv=$z; _sd_sent_type=$t; return 0
             }
         done
@@ -538,7 +555,7 @@ sd_pick_sentinel_v() {
         t=${e#*|}
         sd_zone_is_core "$t" && continue
         sd_zone_is_shell "$t" && continue
-        [ -r "$z/temp" ] && { _sd_rv=$z; _sd_sent_type=$t; return 0; }
+        _sd_temp_readable "$z" && { _sd_rv=$z; _sd_sent_type=$t; return 0; }
     done
     return 1
 }
@@ -1159,26 +1176,14 @@ sd_umount_overrides() {
 # 变低（壳温伪装）。所以这个参数的定位是限流保护，不是加速。
 # ============================================================================
 
+# 节点表只维护一份（_sd_curr_prepare），这里只负责筛出本机真实存在的。
 sd_curr_nodes() {
     local n
-    if [ -n "${SD_CURR_NODES:-}" ]; then
-        for n in $(printf '%s' "$SD_CURR_NODES" | tr ',' ' '); do
-            [ -e "$n" ] && printf '%s\n' "$n"
-        done
-        return 0
-    fi
-    for n in \
-        "$SD_PS/battery/constant_charge_current_max" \
-        "$SD_PS/battery/constant_charge_current" \
-        "$SD_PS/battery/current_max" \
-        "$SD_PS/main/constant_charge_current_max" \
-        "$SD_PS/bms/current_max" \
-        "$SD_PS/usb/current_max" \
-        /sys/devices/virtual/oplus_chg/battery/chg_current_max \
-        /sys/devices/virtual/oplus_chg/battery/current_max
-    do
+    _sd_curr_prepare
+    for n in $_sd_curr_nodes; do
         [ -e "$n" ] && printf '%s\n' "$n"
     done
+    return 0
 }
 
 sd_batt_power() {
@@ -1230,36 +1235,67 @@ sd_curr_target_v() {
 
 sd_curr_target() { sd_curr_target_v; printf '%s' "$_sd_rv"; }
 
+# ---------------------------------------------------------------------------
+# 限流节点
+#
+# 单位不统一：power_supply 下基本都是 µA，部分 oplus_chg 节点是 mA。
+# 按节点当前值判断（>100000 视为 µA），比按路径猜可靠 —— 写错一个数量级
+# 比不写更危险。
+# ---------------------------------------------------------------------------
+
+_sd_curr_nodes=""
+
+_sd_curr_prepare() {
+    [ -n "$_sd_curr_nodes" ] && return 0
+    if [ -n "${SD_CURR_NODES:-}" ]; then
+        _sd_curr_nodes=$(printf '%s' "$SD_CURR_NODES" | tr ',' ' ')
+    else
+        _sd_curr_nodes="$SD_PS/battery/constant_charge_current_max \
+$SD_PS/battery/constant_charge_current \
+$SD_PS/battery/current_max \
+$SD_PS/main/constant_charge_current_max \
+$SD_PS/bms/current_max \
+$SD_PS/usb/current_max \
+/sys/devices/virtual/oplus_chg/battery/chg_current_max \
+/sys/devices/virtual/oplus_chg/battery/current_max"
+    fi
+    return 0
+}
+
+# 立即把限流写进节点，返回 0 表示至少写成功一个。
+# WebUI 改完电流要马上看到效果，不能等下一个 tick（最长 60 秒）。
+sd_curr_apply() {
+    local want="$1" n cur v n_ok=0
+    case "$want" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$want" -gt 0 ] || return 0
+    _sd_curr_prepare
+    for n in $_sd_curr_nodes; do
+        [ -e "$n" ] || continue
+        read -r cur 2>/dev/null <"$n" || continue
+        case "$cur" in ''|*[!0-9]*) continue ;; esac
+        if [ "$cur" -gt 100000 ]; then v=$((want * 1000)); else v=$want; fi
+        printf '%s\n' "$v" >"$n" 2>/dev/null && n_ok=$((n_ok + 1))
+    done
+    [ "$n_ok" -gt 0 ]
+}
+
+# 守护每 tick 复查：系统（或充电器协商）把上限抬回去时压回目标值。
+# 只压不抬 —— 限流是天花板，本来就该允许实际电流低于它。
 sd_curr_keep() {
-    local want ua margin n cur="" n_ok=0
+    local want cur v n n_ok=0
     sd_curr_target_v
     want=$_sd_rv
-    # 未设限流时连节点都不用探 —— 原来这里每 tick 白跑一次目标计算
+    # 未设限流时连节点都不用探
     [ "$want" -gt 0 ] || return 0
-    ua=$((want * 1000))
-    margin=$((ua * 11 / 10))
+    _sd_curr_prepare
 
-    # set -- 是内建命令，不 fork；节点表本来就是固定的几个路径
-    if [ -n "${SD_CURR_NODES:-}" ]; then
-        set -- $(printf '%s' "$SD_CURR_NODES" | tr ',' ' ')
-    else
-        set -- \
-            "$SD_PS/battery/constant_charge_current_max" \
-            "$SD_PS/battery/constant_charge_current" \
-            "$SD_PS/battery/current_max" \
-            "$SD_PS/main/constant_charge_current_max" \
-            "$SD_PS/bms/current_max" \
-            "$SD_PS/usb/current_max" \
-            /sys/devices/virtual/oplus_chg/battery/chg_current_max \
-            /sys/devices/virtual/oplus_chg/battery/current_max
-    fi
-
-    for n in "$@"; do
+    for n in $_sd_curr_nodes; do
         [ -e "$n" ] || continue
-        read -r cur 2>/dev/null <"$n"
+        read -r cur 2>/dev/null <"$n" || continue
         case "$cur" in ''|*[!0-9]*) continue ;; esac
-        if [ "$cur" -gt "$margin" ]; then
-            printf '%s\n' "$ua" 2>/dev/null >"$n" && n_ok=$((n_ok + 1))
+        if [ "$cur" -gt 100000 ]; then v=$((want * 1000)); else v=$want; fi
+        if [ "$cur" -gt $((v * 11 / 10)) ]; then
+            printf '%s\n' "$v" >"$n" 2>/dev/null && n_ok=$((n_ok + 1))
         fi
     done
     [ "$n_ok" -gt 0 ] && sd_info charge "电流墙被抬高，已压回 ${want}mA（$n_ok 节点）"

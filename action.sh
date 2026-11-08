@@ -108,7 +108,7 @@ sd_do_status() {
 # 供 WebUI / 元模块消费。所有数值先过一遍夹紧，不会吐越界值；
 # 无法读到的字段给 null，前端据此显示"—"而不是 0。
 sd_do_json() {
-    local mode c nc wall aggr curmax curtar sz sname real slim bc mt dm bl sl rj blj slj tgt hz hzn
+    local mode c nc wall aggr curmax curtar sz sname real slim bc mt dm bl sl rj blj slj tgt hz hzn zc _e
     local chg=false _bst=
     mode=$(sd_state_get temp_mode off)
     [ "$mode" = "dyn" ] && mode=static
@@ -163,8 +163,9 @@ sd_do_json() {
     printf '"log_level":%s,"tick":%s,"mounted":%s,"daemon":%s,"boot_count":%s,"safety":%s,' \
         "$(sd_state_int log_level 3 0 4)" "$(sd_state_int tick 15 5 300)" \
         "$mt" "$dm" "$bc" "$([ "$bc" -gt 3 ] && echo true || echo false)"
-    printf '"hz":"%s","hz_now":%s,"hz_hard":%s,"hz_state":"%s","charging":%s}\n' \
-        "$hz" "$hzn" "$hzh" "$hzs" "$chg"
+    zc=0; for _e in $_sd_zones; do zc=$((zc + 1)); done
+    printf '"hz":"%s","hz_now":%s,"hz_hard":%s,"hz_state":"%s","charging":%s,"zones":%s}\n' \
+        "$hz" "$hzn" "$hzh" "$hzs" "$chg" "$zc"
 }
 
 # ---------- 设置 ----------
@@ -285,11 +286,18 @@ sd_set_curr() {
     applied=$(sd_curr_target)
     sd_info cmd "电流墙 → ${v}mA（当前允许 ${applied}mA）"
     if [ "$(sd_batt_status)" = "Charging" ]; then
-        sd_curr_apply "$applied"
+        # 之前这里调用了一个不存在的 sd_curr_apply，命令直接 "not found"，
+        # 于是面板显示"已更新"但节点一次都没被写过 —— 要等 15~60 秒后
+        # 守护 tick 里的 sd_curr_keep 才可能压回，用户看到的就是"调节无效"。
+        if sd_curr_apply "$applied"; then
+            echo "电流墙 -> ${v}mA，已写入（当前温度下允许 ${applied}mA）"
+        else
+            echo "电流墙 -> ${v}mA 已记录，但没有可写的限流节点"
+            echo "  本机可能不开放充电限流；充电时守护仍会持续尝试"
+        fi
     else
-        echo "当前未在充电，接上充电器后生效"
+        echo "电流墙 -> ${v}mA，未在充电，接上充电器后生效"
     fi
-    echo "电流墙 -> ${v}mA，当前温度下允许 ${applied}mA"
 }
 
 sd_set_fast() {

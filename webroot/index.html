@@ -178,6 +178,7 @@
 
   <div class="row" style="margin-top:18px"><label for="curr">充电限流</label><span class="val" id="currV">—</span></div>
   <input type="range" id="curr" min="0" max="8000" step="500">
+  <div class="switch" id="currHint" style="margin-top:2px">限流是上限，未插电时不生效</div>
 </div>
 
 <div class="card">
@@ -572,6 +573,10 @@
     $("shellV").textContent = d.shell_temp + "℃";
     $("curr").value = d.curr_max;
     $("currV").textContent = d.curr_max > 0 ? d.curr_max + "mA" : "不限";
+    // 限流只在充电时有意义，把"为什么现在没效果"直接写在下面
+    $("currHint").textContent = d.curr_max > 0
+      ? (d.charging ? "已生效 · 实际电流还受充电器与线材限制" : "未插电 · 接上充电器后生效")
+      : "不限制充电电流";
     $("batt").value = d.battery_limit === "off" ? 48 : d.battery_limit;
     $("battV").textContent = d.battery_limit === "off" ? "关" : d.battery_limit + "℃";
     $("soc").value = d.sentinel_limit === "off" ? 85 : d.sentinel_limit;
@@ -614,6 +619,11 @@
     push("ksu     " + (window.ksu ? "有 exec=" + typeof window.ksu.exec : "无"));
     push("mmrl    " + (window.mmrl ? "有 exec=" + typeof window.mmrl.exec : "无"));
     push("模块    " + (MOD || "未探测到"));
+    if (S) {
+      push("温度源  " + (S.sentinel || "没选到") +
+           "  真实=" + (S.real === null ? "读不到" : S.real + "℃") +
+           "  上限=" + S.limit + "  温区=" + S.zones);
+    }
     push("SH      " + SH);
     if (lastErr) push("最近错误 " + lastErr);
     if (reset) return;
