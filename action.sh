@@ -18,6 +18,7 @@
 #   curr <300-8000|off>          充电限流（mA），按温度联动降流
 #   hz <60-165|off>              锁定刷新率（写 peak/min_refresh_rate），off 还原
 #   power                        电流 / 电压 / 功率读数（JSON，供面板采样）
+#   pscale <50-200>              电流校准百分比，读数偏低/偏高时微调（默认 100）
 #   fast <20-90>                 快充生效的电量阈值（%）
 #   sentinel <60-110|off>        SoC/主板哨兵熔断阈值
 #   battery <30-70|off>          电池哨兵熔断阈值
@@ -209,6 +210,17 @@ sd_set_aggr() {
     echo "温控档位 -> $1/10，允许真实与上报相差 $((2 + $1))℃"
 }
 
+sd_set_pscale() {
+    local v="$1"
+    case "$v" in ''|*[!0-9]*) echo "校准值需为 50~200 的整数"; return 1 ;; esac
+    if [ "$v" -lt 50 ] || [ "$v" -gt 200 ]; then
+        echo "校准值需为 50~200 的整数"; return 1
+    fi
+    sd_state_set power_scale "$v"
+    sd_info cmd "电流校准 → $v%"
+    echo "电流校准 -> $v%（100 为原始读数）"
+}
+
 sd_set_wall() {
     local v="$1" bl
     if [ "$v" = "off" ] || [ "$v" = "0" ]; then
@@ -381,6 +393,7 @@ case "$1" in
     curr)    shift; sd_set_curr "${1:-off}" ;;
     hz)      shift; sd_hz_set "${1:-}" ;;
     power)   sd_power_json ;;
+    pscale)  shift; sd_set_pscale "${1:-100}" ;;
     fast)    shift; sd_set_fast "${1:-55}" ;;
     sentinel) shift; sd_set_limit sentinel_limit "${1:-85}" 60 110 "SoC 哨兵" 85 ;;
     battery)  shift; sd_set_limit battery_limit  "${1:-48}" 30 70  "电池哨兵" 48 ;;

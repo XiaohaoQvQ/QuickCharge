@@ -55,6 +55,7 @@ sh /data/adb/modules/quickcharge/action.sh temp static
 | `curr_max` | 0 | 0~8000 | 充电限流（mA），0 = 不限 |
 | `curve_offset` | 120 | 0~300 | 充电曲线温度轴右移量，0.1℃ 单位（120 = +12℃） |
 | `fast_cap` | 55 | 20~90 | `charge` 模式生效的电量上限（%） |
+| `power_scale` | 100 | 50~200 | 电流校准百分比，读数偏低/偏高时微调 |
 | `tick` | 15 | 5~300 | 守护周期（秒） |
 | `log_level` | 3 | 0~4 | 0 关 / 1 错误 / 2 警告 / 3 信息 / 4 调试 |
 
@@ -68,6 +69,7 @@ sh action.sh temp static 32         # 开启伪装，基准 32℃
 sh action.sh temp off               # 关闭伪装
 sh action.sh gear 6                 # 温控档位降到 6（aggr 是旧名，仍可用）
 sh action.sh wall 45                # 改成 45℃ 收手
+sh action.sh pscale 110             # 电流读数偏低一成时校准
 sh action.sh curr 3000              # 限流 3A
 sh action.sh core 55                # CPU/GPU/DDR 固定报 55℃（独立于 temp 模式）
 sh action.sh sentinel 90            # SoC 熔断改 90℃
@@ -121,7 +123,18 @@ QC · 温控档位 8/10 · 高刷 120Hz · 配置 9 项
 
 **刷新率。** 写系统 `peak_refresh_rate` 与 `min_refresh_rate`，和 ColorOS「屏幕刷新率」开关走同一路径，改完立即生效。开启前记下原值，关闭时原样写回；原本为空的键直接删除，交还系统默认。不碰 SurfaceFlinger 的 `setDisplayMode`——那条路绕过分辨率与亮度策略，部分机型会黑屏，也没有可靠的取消接口。
 
-**功耗。** `sh action.sh power` 读一次 `/sys/class/power_supply/battery`，返回 `ma` / `mv` / `w` / `temp` / `status`。电流自动识别 µA 与 mA，电压识别 µV 与 mV。面板每 2 秒采样一次，页面隐藏或关闭立即停止并清空，不写日志、不留后台进程。
+**功耗。** `sh action.sh power` 读一次电池节点，返回 `ma` / `mv` / `w` / `temp` / `status` / `cells` / `src`。两条路径按顺序尝试：
+
+1. **`/sys/class/oplus_chg/battery/bcc_parms`** —— 欧加真专属，逗号分隔 19 个字段，`[6]` 是电芯 0 电压、`[8]` 是电流、`[11]` 是电芯 1 电压，单位 mV / mA。
+2. **`/sys/class/power_supply/battery/*`** —— 通用节点，电流自动识别 µA 与 mA，电压识别 µV 与 mV。
+
+**双电芯为什么必须走第一条路。** 串联双电芯的总压是两颗相加（4.4 + 4.4 = 8.8V），但部分机型的 `voltage_now` 只报单芯电压。按 4.4V 算出来的功率正好少一半，30W 快充会显示成 15W。`bcc_parms` 里两路电压都在，相加才是真实总压；只有一路大于 1V 时才相加，单电芯机型这一位是 0。字段数不是 19 说明驱动版本不同、索引会错位，此时直接放弃这条路，不猜位置。
+
+电流符号各平台约定相反，统一按 `status` 校正成「充电为正、放电为负」。读数仍有固定偏差的机型用 `pscale` 微调（百分比，50~200）。
+
+面板每 2 秒采样一次，页面隐藏或关闭立即停止并清空，不写日志、不留后台进程。
+
+> 双电芯读数的思路参考了 [PlusPlusBattery](https://github.com/dijia1124/PlusPlusBattery)（MIT），它把 `bcc_parms` 的字段位置和双芯相加的做法验证得很清楚。
 
 ## 安全设计
 

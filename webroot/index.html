@@ -95,7 +95,7 @@
 </div>
 
 <div class="card">
-  <h2>实时功耗 <span class="tag">仅页面打开时采样</span></h2>
+  <h2>实时功耗 <span class="tag" id="psrc">仅页面打开时采样</span></h2>
   <div class="pwr">
     <div><div class="k">电流</div><div class="v" id="pma">—</div></div>
     <div><div class="k">功率</div><div class="v" id="pw">—</div></div>
@@ -330,6 +330,7 @@
     exec('sh "' + MOD + '/action.sh" power').then(function (r) {
       var d = parseJSON(r.out);
       if (!d) return;
+      $("psrc").textContent = (d.cells === 2 ? "双电芯 · " : "") + "仅页面打开时采样";
       $("pma").textContent = d.ma === null ? "—" : d.ma + " mA";
       $("pw").textContent = d.w === null ? "—" : d.w + " W";
       $("ptemp").textContent = d.temp === null ? "—" : d.temp + "℃";

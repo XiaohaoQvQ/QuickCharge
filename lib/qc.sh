@@ -23,6 +23,9 @@ SD_BACKUP="$SD_DATA/backup"
 SD_RUN="$SD_DATA/run"
 SD_BUILT="$SD_DATA/built.id"
 SD_PS=/sys/class/power_supply
+# 欧加真专属充电节点。bcc_parms 里有每颗电芯的电压，双电芯机型
+# 只有这里能拿到真实总压；不存在时退回 SD_PS 的通用节点。
+SD_OPLUS_CHG="${SD_OPLUS_CHG:-/sys/class/oplus_chg/battery}"
 
 # 探测方式必须是 mkdir 而不是 `{ : >file; } 2>/dev/null`：
 # dash / mksh 在重定向失败时会让整个 shell 以 rc=2 退出，且不打印任何错误。
@@ -148,6 +151,7 @@ _st_defrev=""
 _st_hz=""
 _st_hz_prev_peak=""
 _st_hz_prev_min=""
+_st_power_scale=""
 
 sd_state_load() {
     _sd_st_loaded=1
@@ -155,7 +159,7 @@ sd_state_load() {
     _st_horae=""; _st_sentinel_limit=""; _st_battery_limit=""; _st_fast_cap=""
     _st_curve_offset=""; _st_wall=""; _st_aggr=""; _st_curr_max=""
     _st_log_level=""; _st_tick=""; _st_defrev=""
-    _st_hz=""; _st_hz_prev_peak=""; _st_hz_prev_min=""
+    _st_hz=""; _st_hz_prev_peak=""; _st_hz_prev_min=""; _st_power_scale=""
     [ -f "$SD_STATE" ] || { _st_log_level=3; _sd_lv=3; return 0; }
     local k v
     while IFS='=' read -r k v; do
@@ -178,6 +182,7 @@ sd_state_load() {
             hz)             _st_hz=$v ;;
             hz_prev_peak)   _st_hz_prev_peak=$v ;;
             hz_prev_min)    _st_hz_prev_min=$v ;;
+            power_scale)    _st_power_scale=$v ;;
         esac
     done 2>/dev/null <"$SD_STATE"
     case "$_st_log_level" in 0|1|2|3|4) _sd_lv=$_st_log_level ;; *) _st_log_level=3; _sd_lv=3 ;; esac
@@ -208,6 +213,7 @@ sd_state_get() {
         hz)             printf '%s' "${_st_hz:-${2:-off}}" ;;
         hz_prev_peak)   printf '%s' "${_st_hz_prev_peak:-${2:-}}" ;;
         hz_prev_min)    printf '%s' "${_st_hz_prev_min:-${2:-}}" ;;
+        power_scale)    printf '%s' "${_st_power_scale:-${2:-100}}" ;;
         *)              printf '%s' "${2:-}" ;;
     esac
 }
@@ -235,6 +241,7 @@ sd_state_set() {
         hz)             _st_hz=$v ;;
         hz_prev_peak)   _st_hz_prev_peak=$v ;;
         hz_prev_min)    _st_hz_prev_min=$v ;;
+        power_scale)    _st_power_scale=$v ;;
     esac
     [ -f "$SD_STATE" ] || : >"$SD_STATE"
     if grep -q "^$k=" "$SD_STATE" 2>/dev/null; then
@@ -1257,25 +1264,82 @@ sd_hz_boot() {
 # ============================================================================
 
 sd_power_json() {
-    local c v st cap t ma mv w neg=""
-    read -r c 2>/dev/null <"$SD_PS/battery/current_now"
-    read -r v 2>/dev/null <"$SD_PS/battery/voltage_now"
+    local c mv w st cap t ma src=ps cells=1 neg="" scale
+    local raw v0 v1 oifs
+
     read -r st 2>/dev/null <"$SD_PS/battery/status"
     read -r cap 2>/dev/null <"$SD_PS/battery/capacity"
     read -r t 2>/dev/null <"$SD_PS/battery/temp"
 
-    case "$c" in ''|*[!0-9-]*) c="" ;; esac
-    if [ -n "$c" ]; then
-        case "$c" in -*) neg=-; c=${c#-} ;; esac
-        # 主流是 µA；少数平台直接给 mA。10000 是两者的分界：
-        # 10mA 以下放电没有意义，10A 以上充电不存在。
-        if [ "$c" -ge 10000 ]; then ma=$((c / 1000)); else ma=$c; fi
-        [ -n "$neg" ] && ma=$((-ma))
+    # ① 欧加真原生 bcc_parms —— 唯一能看到每颗电芯电压的节点。
+    #    双电芯机型里 power_supply/voltage_now 有的只报单芯（4.4V 而非 8.8V），
+    #    功率会正好差一半，这类机器的快充读数一直是错的。
+    #
+    #    格式：逗号分隔 19 个字段
+    #      [6] 电压0 (mV)   [8] 电流 (mA)   [11] 电压1 (mV)
+    #    字段数不是 19 就说明驱动版本不同、索引会错位，宁可退回通用节点
+    #    也不猜位置 —— 猜错会把 8.8V 读成别的数，比读不到更糟。
+    raw=""
+    read -r raw 2>/dev/null <"$SD_OPLUS_CHG/bcc_parms"
+    if [ -n "$raw" ]; then
+        oifs=$IFS
+        IFS=,
+        set -f
+        set -- $raw
+        set +f
+        IFS=$oifs
+        if [ "$#" -eq 19 ]; then
+            # $12 必须写成 ${12}：$12 会被解析成 $1 后面跟字符 2
+            v0=$7; c=$9; v1=${12}
+            case "$v0" in ''|*[!0-9]*) v0=0 ;; esac
+            case "$v1" in ''|*[!0-9]*) v1=0 ;; esac
+            case "$c"  in ''|*[!0-9-]*) c="" ;; esac
+            if [ "$v0" -gt 0 ] && [ -n "$c" ]; then
+                # 1V 以上才当第二颗电芯：单电芯机型这一位是 0 或空
+                if [ "$v1" -gt 1000 ]; then
+                    mv=$((v0 + v1)); cells=2
+                else
+                    mv=$v0
+                fi
+                src=bcc
+            else
+                c=""
+            fi
+        else
+            c=""
+        fi
     fi
 
-    case "$v" in ''|*[!0-9]*) v="" ;; esac
-    if [ -n "$v" ]; then
-        if [ "$v" -ge 100000 ]; then mv=$((v / 1000)); else mv=$v; fi
+    # ② 通用节点。电流主流 µA、少数 mA；电压主流 µV、少数 mV。
+    #    10000 / 100000 是分界：10mA 以下放电没有意义，100V 以上不存在。
+    if [ "$src" = ps ]; then
+        local cv vv
+        cv=""; vv=""
+        read -r cv 2>/dev/null <"$SD_PS/battery/current_now"
+        read -r vv 2>/dev/null <"$SD_PS/battery/voltage_now"
+        case "$cv" in ''|*[!0-9-]*) cv="" ;; esac
+        case "$vv" in ''|*[!0-9]*) vv="" ;; esac
+        if [ -n "$cv" ]; then
+            case "$cv" in -*) neg=1; cv=${cv#-} ;; esac
+            if [ "$cv" -ge 10000 ]; then c=$((cv / 1000)); else c=$cv; fi
+            [ -n "$neg" ] && c=$((-c))
+        fi
+        if [ -n "$vv" ]; then
+            if [ "$vv" -ge 100000 ]; then mv=$((vv / 1000)); else mv=$vv; fi
+        fi
+    fi
+
+    # ③ 符号校正。各平台对"正=充电"的约定相反，以 status 为准统一成
+    #    充电为正、放电为负，否则面板上充电时显示负电流很费解。
+    if [ -n "$c" ]; then
+        case "$st" in
+            Not\ charging|*Discharging*) [ "$c" -gt 0 ] && c=$((-c)) ;;
+            *Charging*|Full)             [ "$c" -lt 0 ] && c=$((-c)) ;;
+        esac
+        # 个别机型电流值本身带固定偏差，用倍率修正（百分比，默认 100）
+        scale=$(sd_state_int power_scale 100 50 200)
+        [ "$scale" -ne 100 ] && c=$((c * scale / 100))
+        ma=$c
     fi
 
     w=""
@@ -1292,8 +1356,9 @@ sd_power_json() {
     # 防止状态字符串把 JSON 撑破，只保留常规字符
     case "$st" in *\"*|*\\*) st="" ;; esac
 
-    printf '{"ma":%s,"mv":%s,"w":%s,"status":"%s","cap":%s,"temp":%s}\n' \
-        "${ma:-null}" "${mv:-null}" "${w:-null}" "${st:-Unknown}" "${cap:-null}" "${t:-null}"
+    printf '{"ma":%s,"mv":%s,"w":%s,"status":"%s","cap":%s,"temp":%s,"cells":%s,"src":"%s"}\n' \
+        "${ma:-null}" "${mv:-null}" "${w:-null}" "${st:-Unknown}" "${cap:-null}" "${t:-null}" \
+        "$cells" "$src"
 }
 
 # ---------- 模块描述同步 ----------

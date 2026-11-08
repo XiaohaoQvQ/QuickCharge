@@ -93,6 +93,7 @@ wall=42
 aggr=10
 curr_max=0
 hz=off
+power_scale=100
 log_level=3
 tick=15"
 

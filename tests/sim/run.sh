@@ -439,7 +439,7 @@ echo "$P" | grep -q '"status":"Discharging"' && ok "状态字段" || ng "状态�
 printf '%s\n' '1200' >/sys/class/power_supply/battery/current_now
 printf '%s\n' '4200' >/sys/class/power_supply/battery/voltage_now
 P2=$(sh /opt/qc/action.sh power 2>/dev/null)
-echo "$P2" | grep -q '"ma":1200' && ok "mA 单位原样保留" || ng "mA 单位误判: $P2"
+echo "$P2" | grep -q '"ma":-1200' && ok "mA 单位保留，放电符号归一为负" || ng "mA 单位误判: $P2"
 echo "$P2" | grep -q '"w":5.04' && ok "mA×mV 功率 5.04W" || ng "mA 功率错误"
 printf 'Charging\n' >/sys/class/power_supply/battery/status
 printf '%s\n' '-1500000' >/sys/class/power_supply/battery/current_now
@@ -496,6 +496,73 @@ eq "$B2" "$B1" "被拒绝的 gear 11 不改描述"
 
 # 管理器列表会截断长描述，档位必须排在最前面
 case "$D" in "QC · 温控档位"*) ok "描述以档位开头，截断时仍可见" ;; *) ng "描述格式异常: $D" ;; esac
+
+echo "===== T14 功耗读取（bcc_parms 双电芯）====="
+mkdir -p /sys/class/oplus_chg/battery
+: >/sys/class/oplus_chg/battery/bcc_parms
+
+# 双电芯串联：每芯 4.4V、电流 3A → 总压 8.8V、26.40W。
+# power_supply 故意只报单芯 4.4V，用来验证确实走了 bcc_parms。
+printf '0,0,0,0,0,0,4400,0,3000,0,0,4400,0,0,0,0,0,0,0\n' >/sys/class/oplus_chg/battery/bcc_parms
+printf 'Charging\n'       >/sys/class/power_supply/battery/status
+printf '4400000\n'        >/sys/class/power_supply/battery/voltage_now
+printf '3000000\n'        >/sys/class/power_supply/battery/current_now
+printf '370\n'            >/sys/class/power_supply/battery/temp
+printf '66\n'             >/sys/class/power_supply/battery/capacity
+P=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh power 2>/dev/null)
+echo "$P"
+echo "$P" | grep -q '"ma":3000'    && ok "bcc 电流原值取用"      || ng "电流错误: $P"
+echo "$P" | grep -q '"mv":8800'    && ok "双电芯电压相加 8.8V"   || ng "电压未相加: $P"
+echo "$P" | grep -q '"w":26.40'    && ok "功率 26.40W"          || ng "功率错误: $P"
+echo "$P" | grep -q '"cells":2'    && ok "标记双电芯"            || ng "cells 错误: $P"
+echo "$P" | grep -q '"src":"bcc"'  && ok "数据来源 bcc"          || ng "来源错误: $P"
+echo "$P" | grep -q '"temp":37'    && ok "温度仍走 power_supply" || ng "温度错误: $P"
+
+# 单电芯：第二位电压为 0，不该相加
+printf '0,0,0,0,0,0,4400,0,3000,0,0,0,0,0,0,0,0,0,0\n' >/sys/class/oplus_chg/battery/bcc_parms
+P=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh power 2>/dev/null)
+echo "$P" | grep -q '"mv":4400'   && ok "单电芯不相加"  || ng "单芯电压错误: $P"
+echo "$P" | grep -q '"w":13.20'   && ok "单芯功率 13.20W" || ng "单芯功率错误: $P"
+echo "$P" | grep -q '"cells":1'   && ok "标记单电芯"    || ng "单芯 cells 错误: $P"
+
+# 字段数不对就必须放弃，不能拿错位的索引去算
+printf '0,0,0,0,0,0,4400,0,3000,0,0,0,0,0,0,0,0,0\n' >/sys/class/oplus_chg/battery/bcc_parms
+P=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh power 2>/dev/null)
+echo "$P" | grep -q '"src":"ps"' && ok "字段数不符时退回通用节点" || ng "未退回: $P"
+echo "$P" | grep -q '"w":13.20'  && ok "退回后按 µV/µA 换算"      || ng "退回功率错误: $P"
+
+# 第一路电压为 0 → 同样放弃
+printf '0,0,0,0,0,0,0,0,3000,0,0,4400,0,0,0,0,0,0,0\n' >/sys/class/oplus_chg/battery/bcc_parms
+P=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh power 2>/dev/null)
+echo "$P" | grep -q '"src":"ps"' && ok "电压为 0 时退回通用节点" || ng "v0=0 未退回: $P"
+
+# 符号校正：充电状态给负电流，应翻正
+printf '0,0,0,0,0,0,4400,0,-3000,0,0,4400,0,0,0,0,0,0,0\n' >/sys/class/oplus_chg/battery/bcc_parms
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+P=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh power 2>/dev/null)
+echo "$P" | grep -q '"ma":3000' && ok "充电时负电流翻正" || ng "符号未校正: $P"
+
+# 放电状态给正电流，应翻负
+printf '0,0,0,0,0,0,4400,0,2000,0,0,4400,0,0,0,0,0,0,0\n' >/sys/class/oplus_chg/battery/bcc_parms
+printf 'Discharging\n' >/sys/class/power_supply/battery/status
+P=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh power 2>/dev/null)
+echo "$P" | grep -q '"ma":-2000' && ok "放电时正电流翻负" || ng "放电符号未校正: $P"
+echo "$P" | grep -q '"w":17.60' && ok "功率用绝对值 17.60W" || ng "放电功率错误: $P"
+
+# 校准倍率
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh pscale 200 >/dev/null 2>&1
+P=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh power 2>/dev/null)
+echo "$P" | grep -q '"ma":-4000' && ok "校准 200% 电流翻倍" || ng "校准未生效: $P"
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh pscale 49 >/dev/null 2>&1
+eq "$?" "1" "pscale 49 被拒绝"
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh pscale 100 >/dev/null 2>&1
+
+rm -rf /sys/class/oplus_chg
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+printf '%s\n' '-1500000' >/sys/class/power_supply/battery/current_now
+printf '%s\n' '4200000' >/sys/class/power_supply/battery/voltage_now
+P=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh power 2>/dev/null)
+echo "$P" | grep -q '"src":"ps"' && ok "无 bcc 节点时走通用路径" || ng "降级失败: $P"
 
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
