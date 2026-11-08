@@ -277,7 +277,9 @@
   function modeText(d) {
     switch (d.mode) {
       case "static": return "任何场景都改写：插电、拔电、游戏、待机都生效";
-      case "charge": return "只在插电时改写，拔掉充电器立即还原真实温度";
+      case "charge": return d.charging
+        ? "插电中 · 自定义温控生效，拔电后 10 秒内还原真实温度"
+        : "未插电 · 当前用系统原温控，插电后自动接管";
       case "off":    return "不改写任何温控节点，读数全部是真实值";
       default:       return "选择改写范围，点一下立即生效";
     }

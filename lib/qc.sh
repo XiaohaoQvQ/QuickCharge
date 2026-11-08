@@ -1215,6 +1215,44 @@ sd_curr_keep() {
 }
 
 # ============================================================================
+# charge 模式：插电才伪装，拔电立刻交回系统
+# ============================================================================
+
+# 每 tick 调用。全部走内建 read 与 sd_shell_target（写全局变量），稳态 0 fork。
+#
+# 注意：这段在 2.6.3 重构时被整段删掉，但 service.sh 仍在调 sd_charge_tick，
+# 结果是「仅充电」档每 tick 报 not found、完全不生效。补回来，并加守护级断言。
+sd_charge_tick() {
+    local st="" cap=0 fast_cap
+
+    read -r st 2>/dev/null <"$SD_PS/battery/status"
+    case "$st" in
+        Charging|Full) ;;
+        *)
+            # 拔电：直接还原，不再走一遍完整的目标温度决策
+            sd_shell_emul 0
+            return 0 ;;
+    esac
+
+    # 电流墙独立于电量段：只要在充电就维持
+    sd_curr_keep
+
+    read -r cap 2>/dev/null <"$SD_PS/battery/capacity"
+    case "$cap" in ''|*[!0-9]*) cap=0 ;; esac
+    _sd_clamp "${_st_fast_cap:-55}" 20 90 55
+    fast_cap=$_sd_rv
+
+    # fast_cap 以上不再伪装，让系统正常进恒压段
+    if [ "$cap" -lt "$fast_cap" ]; then
+        sd_shell_target >/dev/null
+        sd_shell_emul "$_sd_last_out"
+    else
+        sd_shell_emul 0
+    fi
+}
+
+
+# ============================================================================
 # 刷新率
 #
 # 只写系统键不足以保证"不降频"。Android 由 DisplayModeDirector 用固定

@@ -101,6 +101,7 @@ sd_do_status() {
 # 无法读到的字段给 null，前端据此显示"—"而不是 0。
 sd_do_json() {
     local mode c nc wall aggr curmax curtar sz sname real slim bc mt dm bl sl rj blj slj tgt hz hzn
+    local chg=false _bst=
     mode=$(sd_state_get temp_mode off)
     [ "$mode" = "dyn" ] && mode=static
     c=$(sd_state_get core_temp off)
@@ -119,10 +120,15 @@ sd_do_json() {
     bc=0; read -r bc 2>/dev/null <"$SD_DATA/boot.count"
     case "$bc" in ''|*[!0-9]*) bc=0 ;; esac
 
+    # 「仅充电」档在拔电时是不改写的，面板要能说清"现在到底有没有在改"，
+    # 否则用户看到 charge 模式会以为温度一直被改着。
+    read -r _bst 2>/dev/null <"$SD_PS/battery/status"
+    case "$_bst" in Charging|Full) chg=true ;; esac
+
     # 当前决策值：面板显示"上报"必须用真实计算出的目标，不能拿 shell_temp 代替
     # （渐进让步会让 41℃ 真实温度上报 39℃，与基准 30 相差很远）
     tgt=0
-    if [ "$mode" = static ]; then
+    if [ "$mode" = static ] || { [ "$mode" = charge ] && [ "$chg" = true ]; }; then
         sd_shell_target >/dev/null
         tgt=$_sd_last_out
     fi
@@ -149,7 +155,8 @@ sd_do_json() {
     printf '"log_level":%s,"tick":%s,"mounted":%s,"daemon":%s,"boot_count":%s,"safety":%s,' \
         "$(sd_state_int log_level 3 0 4)" "$(sd_state_int tick 15 5 300)" \
         "$mt" "$dm" "$bc" "$([ "$bc" -gt 3 ] && echo true || echo false)"
-    printf '"hz":"%s","hz_now":%s,"hz_hard":%s,"hz_state":"%s"}\n' "$hz" "$hzn" "$hzh" "$hzs"
+    printf '"hz":"%s","hz_now":%s,"hz_hard":%s,"hz_state":"%s","charging":%s}\n' \
+        "$hz" "$hzn" "$hzh" "$hzs" "$chg"
 }
 
 # ---------- 设置 ----------
@@ -166,7 +173,8 @@ sd_set_temp() {
         off)
             sd_shell_emul 0
             sd_state_set temp_mode off
-            sd_state_set shell_temp 0
+            # 不要清零 shell_temp：temp_mode 已经能表达"关闭"，清零会让
+            # 下次开启时 sd_state_int 判定越界、回落 30℃，用户设的温度白丢。
             sd_info cmd "温度模式 → off"
             echo "温度模式 -> off" ;;
         static)

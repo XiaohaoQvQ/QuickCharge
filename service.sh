@@ -40,7 +40,11 @@ sd_apply_state() {
     [ "$mode" = "dyn" ] && { mode=static; sd_state_set temp_mode static; }
     case "$mode" in
         static) sd_horae "$(sd_state_get horae 1)"; sd_shell_emul "$(sd_shell_target)" ;;
-        charge) sd_horae 1 ;;
+        charge)
+            # 开机时若正在充电，别等第一个 tick（最长 300 秒）才伪装
+            sd_horae 1
+            sd_charge_tick ;;
+
     esac
 
     # 核心/非核心是持久 bind mount，重启后必须重建。
@@ -199,7 +203,13 @@ sd_daemon() {
             *)  _hz_n=0 ;;
         esac
 
-        _sd_pause "$tick"
+        # charge 档最关心"拔电后多久还原"，这件事不该被 tick 拖慢：tick 调到
+        # 300 秒时，拔掉充电器还要伪装五分钟，正好是这个模式要避免的情况。
+        # 10 秒一次的成本极低（sd_charge_tick 零 fork），换来拔电后最多 10 秒还原。
+        case "$mode" in
+            charge) _sd_pause 10 ;;
+            *)      _sd_pause "$tick" ;;
+        esac
     done
 
     rm -rf "$SD_RUN/daemon.lock" "$SD_RUN/daemon.pid"

@@ -736,6 +736,83 @@ R=$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_hz_guard; echo $?')
 eq "$R" "0" "soft: 守护不干预"
 eq "$(settings get system peak_refresh_rate)" "60" "soft: 保留系统选择"
 
+echo "===== T16 仅充电模式：守护级验证 ====="
+
+# 这个模式的每 tick 实现曾在 2.6.3 重构时被整段删掉，但 service.sh 仍在调
+# sd_charge_tick —— 结果是每 tick 报 not found，「仅充电」完全不生效。
+# 这里直接跑真守护，不调函数，防的是同一种回归。
+
+: >/sys/class/thermal/thermal_zone0/emul_temp
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+printf '50\n'       >/sys/class/power_supply/battery/capacity
+printf '38000\n'    >/sys/class/thermal/thermal_zone1/temp
+printf '40000\n'    >/sys/class/thermal/thermal_zone2/temp
+printf 'temp_mode=charge\nshell_temp=28\nfast_cap=55\nwall=off\naggr=10\ntick=5\nbattery_limit=48\nsentinel_limit=85\ndefrev=3\n' >"$SDD/state.conf"
+SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d16.log 2>&1 &
+D16=$!
+sleep 4
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "28000" "仅充电+插电：写入伪装"
+grep -q 'sd_charge_tick: not found' /tmp/d16.log && ng "守护调用 sd_charge_tick 失败" || ok "守护无 not found"
+
+# 拔电：下一 tick 必须归零，交回系统真实读数
+printf 'Discharging\n' >/sys/class/power_supply/battery/status
+sleep 7
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "0" "仅充电+拔电：还原真实读数"
+
+# 重新插电：伪装恢复（charge 档内部 10 秒一轮，等待要够两个周期）
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+sleep 12
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "28000" "仅充电+重新插电：恢复伪装"
+
+# 电量过 fast_cap：进恒压段，不再伪装
+printf '60\n' >/sys/class/power_supply/battery/capacity
+sleep 12
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "0" "仅充电+电量过阈值：停止伪装"
+kill -TERM "$D16" 2>/dev/null; sleep 1
+
+# 全局方案：拔电也继续伪装（与仅充电的差别就在这一条）
+: >/sys/class/thermal/thermal_zone0/emul_temp
+printf 'temp_mode=static\nshell_temp=28\nfast_cap=55\nwall=off\naggr=10\ntick=5\nbattery_limit=48\nsentinel_limit=85\ndefrev=3\n' >"$SDD/state.conf"
+printf 'Discharging\n' >/sys/class/power_supply/battery/status
+SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d16b.log 2>&1 &
+D16B=$!
+sleep 4
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "28000" "全局运行+拔电：仍伪装"
+kill -TERM "$D16B" 2>/dev/null; sleep 1
+
+# 关闭再开启不能丢壳温档位（原来 off 会把 shell_temp 清零，再开回落 30℃）
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp static 38 >/dev/null 2>&1
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp off >/dev/null 2>&1
+eq "$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_get shell_temp')" "38" "关闭后保留壳温档位"
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp static >/dev/null 2>&1
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "38000" "重新开启用回 38℃"
+
+# 开机恢复：charge 档在位时不能等第一个 tick（tick=30，3 秒内不可能轮到）。
+# 必须走无参启动：--daemon 会直接进循环，跳过 sd_apply_state。
+: >/sys/class/thermal/thermal_zone0/emul_temp
+printf 'temp_mode=charge\nshell_temp=28\nfast_cap=55\nwall=off\naggr=10\ntick=30\nbattery_limit=48\nsentinel_limit=85\ndefrev=3\n' >"$SDD/state.conf"
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+printf '50\n'     >/sys/class/power_supply/battery/capacity
+SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh >/tmp/d16c.log 2>&1 &
+sleep 3
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "28000" "开机即伪装：不等 tick"
+[ -f "$SDD/run/daemon.pid" ] && kill -TERM "$(cat "$SDD/run/daemon.pid")" 2>/dev/null
+sleep 1
+
+# tick 很大时，仅充电档也必须尽快感知拔电（内部周期固定 10 秒，不受 tick 拖累）
+: >/sys/class/thermal/thermal_zone0/emul_temp
+printf 'temp_mode=charge\nshell_temp=28\nfast_cap=55\nwall=off\naggr=10\ntick=60\nbattery_limit=48\nsentinel_limit=85\ndefrev=3\n' >"$SDD/state.conf"
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+printf '50\n'       >/sys/class/power_supply/battery/capacity
+SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d16d.log 2>&1 &
+D16D=$!
+sleep 4
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "28000" "tick=60 插电仍伪装"
+printf 'Discharging\n' >/sys/class/power_supply/battery/status
+sleep 12
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "0" "tick=60 拔电 12 秒内还原"
+kill -TERM "$D16D" 2>/dev/null; sleep 1
+
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]
