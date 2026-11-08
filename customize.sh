@@ -19,6 +19,7 @@ SD_VERBOSE=1
 ui_print "*******************************"
 ui_print "  Quick Charge (QC)  v$(grep '^version=' "$MODDIR/module.prop" | cut -d= -f2)"
 ui_print "  by https://github.com/XiaohaoQvQ"
+ui_print "  代码由 AI 辅助完成"
 ui_print "*******************************"
 
 # ---------- 设备 ----------
@@ -147,3 +148,13 @@ done
 ui_print "- 安装完成，重启后生效"
 ui_print "    状态: sh $MODDIR/action.sh status"
 ui_print "    配置: sh $MODDIR/action.sh temp static     # 开温度伪装"
+ui_print ""
+ui_print "- 关注作者: https://www.coolapk.com/u/27316679"
+
+# 刷写完成后拉起浏览器。后台执行 + 1 秒等待：recovery 或 system 未就绪时
+# am 可能长时间不返回，不能让它拖住安装流程。
+if command -v am >/dev/null 2>&1; then
+    ( am start -a android.intent.action.VIEW \
+        -d "https://www.coolapk.com/u/27316679" >/dev/null 2>&1 ) &
+    sleep 1
+fi
