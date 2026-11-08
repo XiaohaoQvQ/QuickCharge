@@ -11,7 +11,7 @@
 #   shell <℃|off>                等同 temp static
 #   core <off|20-100>            CPU/GPU/DDR 固定伪装
 #   noncore <off|20-100>         其它温区固定伪装（电池与壳温始终受保护）
-#   aggr <0-10>                  暴力程度：可拉开温差 = 2 + aggr
+#   gear <0-10>                  温控档位：越高越激进，可拉开温差 = 2 + 档位（aggr 为旧名）
 #   base <25-60>                 基准温度（只改数值，不切换模式，供 WebUI 用）
 #   restart                      重启守护进程（改完参数后强制立即生效）
 #   wall <35-80|off>             温度墙：真实温度到此即停止伪装
@@ -78,7 +78,7 @@ sd_do_status() {
         off)    printf ' · 未启用（仅配置改写生效）' ;;
     esac
     printf '\n'
-    printf '强度      %s/10（可拉开 %s℃）   温度墙 %s\n' "$aggr" $((2 + aggr)) \
+    printf '温控档位  %s/10（可拉开 %s℃）   温度墙 %s\n' "$aggr" $((2 + aggr)) \
         "$([ "$wall" = off ] && echo '关（熔断前 2℃ 停止）' || echo "${wall}℃")"
     printf '固定伪装  核心 %s   非核心 %s\n' "$c" "$nc"
     printf '哨兵      %s %s℃ / 上限 %s℃\n' "$sname" "${real:--}" "${slim:-off}"
@@ -201,12 +201,12 @@ sd_set_scope() {
 }
 
 sd_set_aggr() {
-    case "$1" in ''|*[!0-9]*) echo "暴力程度需为 0~10 的整数"; return 1 ;; esac
-    [ "$1" -le 10 ] || { echo "暴力程度需为 0~10 的整数"; return 1; }
+    case "$1" in ''|*[!0-9]*) echo "温控档位需为 0~10 的整数"; return 1 ;; esac
+    [ "$1" -le 10 ] || { echo "温控档位需为 0~10 的整数"; return 1; }
     sd_state_set aggr "$1"
-    sd_info cmd "暴力程度 → $1/10（可拉开 $((2 + $1))℃）"
+    sd_info cmd "温控档位 → $1/10（可拉开 $((2 + $1))℃）"
     sd_ensure_daemon
-    echo "暴力程度 -> $1/10，允许真实与上报相差 $((2 + $1))℃"
+    echo "温控档位 -> $1/10，允许真实与上报相差 $((2 + $1))℃"
 }
 
 sd_set_wall() {
@@ -305,7 +305,7 @@ sd_menu_sub() {
                 4) sd_set_scope core 50 ;; 5) sd_set_scope core 55 ;; 6) sd_set_scope core 60 ;;
             esac ;;
         power)
-            printf '\n1) 暴力 10  2) 暴力 8  3) 暴力 5  4) 暴力 2\n'
+            printf '\n1) 档位 10  2) 档位 8  3) 档位 5  4) 档位 2\n'
             printf '5) 温度墙 42℃  6) 温度墙 40℃  7) 温度墙 45℃  8) 关闭温度墙  0) 返回\n选择: '
             read -r t || return 0
             case "$t" in
@@ -340,7 +340,7 @@ sd_menu() {
         printf 'Quick Charge (QC)\n'
         printf '────────────────────────\n'
         sd_do_status
-        printf '\n1) 温度模式  2) 核心伪装  3) 暴力/温度墙  4) 充电限流  5) 其它  0) 退出\n选择: '
+        printf '\n1) 温度模式  2) 核心伪装  3) 档位/温度墙  4) 充电限流  5) 其它  0) 退出\n选择: '
         read -r c || { echo; return 0; }
         case "$c" in
             1) sd_menu_sub temp ;;
@@ -369,7 +369,7 @@ case "$1" in
     shell)   shift; sd_set_temp static "${1:-}" ;;
     core)    shift; sd_set_scope core "${1:-off}" ;;
     noncore) shift; sd_set_scope noncore "${1:-off}" ;;
-    aggr)    shift; sd_set_aggr "${1:-10}" ;;
+    gear|aggr) shift; sd_set_aggr "${1:-10}" ;;
     base)    shift
              v="${1:-}"
              case "$v" in ''|*[!0-9]*) echo "基准温度需为 25~60 的整数"; exit 1 ;; esac
@@ -439,7 +439,13 @@ esac
 # 会让 "aggr 11" 这种被拒绝的输入看起来成功。
 _rc=$?
 case "$_CMD" in
-    temp|shell|core|noncore|aggr|base|wall|curr|fast|sentinel|battery|horae|level)
+    temp|shell|core|noncore|gear|aggr|base|wall|curr|fast|sentinel|battery|horae|level)
         sd_daemon_kick ;;
+esac
+# 描述同步与 kick 分开列：hz 不改守护行为（守护不读刷新率），但简介要跟着变。
+# 只读命令（status/json/power/logs）一律跳过 —— 改 module.prop 有写盘成本。
+case "$_CMD" in
+    temp|shell|core|noncore|gear|aggr|base|wall|curr|fast|sentinel|battery|horae|level|hz)
+        [ "$_rc" = "0" ] && sd_sync_desc ;;
 esac
 exit "$_rc"

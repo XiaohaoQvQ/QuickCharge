@@ -127,9 +127,9 @@
 <div class="card">
   <h2>核心参数</h2>
 
-  <div class="row"><label for="aggr">暴力程度</label><span class="val" id="aggrV">—</span></div>
+  <div class="row"><label for="aggr">温控档位</label><span class="val" id="aggrV">—</span></div>
   <input type="range" id="aggr" min="0" max="10" step="1">
-  <div class="switch" style="margin-top:2px">可拉开温差 = 2 + 强度，数值越大压得越低</div>
+  <div class="switch" style="margin-top:2px">档位越高压得越狠，可拉开温差 = 2 + 档位</div>
 
   <div class="row" style="margin-top:18px">
     <label for="wall">温度墙</label>
@@ -390,7 +390,7 @@
 
     bindRange("aggr", "aggrV",
       function (v) { return v + "/10 · 温差 " + (Number(v) + 2) + "℃"; },
-      function (v) { return "aggr " + v; });
+      function (v) { return "gear " + v; });
 
     bindRange("wall", "wallV", function (v) { return v + "℃"; },
       function (v) { return "wall " + v; });

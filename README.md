@@ -48,7 +48,7 @@ sh /data/adb/modules/quickcharge/action.sh temp static
 |---|---|---|---|
 | `temp_mode` | `off` | `off` / `static` / `charge` | `static` 全程伪装；`charge` 只在充电且电量低于阈值时伪装 |
 | `shell_temp` | 30 | 25~60 | 伪装基准温度（℃） |
-| `aggr` | 10 | 0~10 | 暴力程度，可拉开温差 = 2 + aggr |
+| `aggr` | 10 | 0~10 | **温控档位**，越高越激进，可拉开温差 = 2 + 档位 |
 | `wall` | 42 | 35~80 / `off` | 温度墙，真实温度到此即停止伪装 |
 | `battery_limit` | 48 | 30~70 / `off` | 电池哨兵熔断阈值 |
 | `sentinel_limit` | 85 | 60~110 / `off` | SoC/主板哨兵熔断阈值 |
@@ -66,7 +66,7 @@ sh /data/adb/modules/quickcharge/action.sh temp static
 sh action.sh status                 # 状态
 sh action.sh temp static 32         # 开启伪装，基准 32℃
 sh action.sh temp off               # 关闭伪装
-sh action.sh aggr 6                 # 降低暴力程度
+sh action.sh gear 6                 # 温控档位降到 6（aggr 是旧名，仍可用）
 sh action.sh wall 45                # 改成 45℃ 收手
 sh action.sh curr 3000              # 限流 3A
 sh action.sh core 55                # CPU/GPU/DDR 固定报 55℃（独立于 temp 模式）
@@ -85,7 +85,7 @@ sh action.sh reset                  # 恢复初始状态
 模块带 `webroot/index.html`，在 **KernelSU / KsuWebUI / MMRL** 里点模块的「打开」即可看到控制面板：
 
 - 实时状态：真实温度、上报温度、挂载文件数、守护是否在跑
-- 暴力程度 0~10（拖动即生效，显示对应温差）
+- 温控档位 0~10（拖动即生效，显示对应温差）
 - 温度墙 35~80℃ 或关闭、基准温度 25~60℃
 - 充电限流 0~8000mA、电池 / 主板熔断阈值
 - 刷新率锁定 90 / 120 / 144Hz，可一键还原
@@ -93,6 +93,29 @@ sh action.sh reset                  # 恢复初始状态
 - 温度模式切换、重挂配置、重启守护
 
 滑块松手才下发命令，避免拖动过程刷屏；参数走的是 `action.sh`，与命令行完全一致，改完立即生效，不需要重启。
+
+## 模块简介显示当前状态
+
+管理器（Magisk / KernelSU）模块列表里那一行简介是 `module.prop` 的 `description`。模块会在运行期把它改写成实时摘要：
+
+```
+QC · 温控档位 8/10 · 高刷 120Hz · 配置 9 项
+```
+
+三种模式写法不同：
+
+| 状态 | 显示 |
+|---|---|
+| 全程伪装 | `QC · 温控档位 8/10 · 高刷 120Hz · 配置 9 项` |
+| 仅充电 | `QC · 温控档位 8/10（仅充电）· 高刷关闭 · 配置 9 项` |
+| 关闭 | `QC · 温度伪装关闭 · 高刷关闭 · 配置 9 项` |
+
+改写时机：开机挂载完成、守护启动、切换模式、改参数、熔断。写入前先与上次内容比对，相同就不碰文件；只替换 `description` 一行，`id` / `version` 等逐字节保留。
+
+两个已知限制：
+
+- 管理器已经停在模块列表页时不会实时刷新，下拉或退出重进才会重新读取。
+- 覆盖安装后、重启前，显示的是安装包里的静态文案（`QC · 欧加真温控与充电改写 …`）。
 
 面板通过 KernelSU 的 `ksu.exec` 执行命令，纯静态页面、无外部依赖。Magisk 用户可装 KsuWebUI 独立应用加载。状态接口是 `sh action.sh json`，输出单行 JSON，也方便元模块或脚本消费。
 
@@ -140,7 +163,7 @@ OTA 后系统指纹（`ro.build.display.id` + 安全补丁）变化，`post-fs-d
 ## 已知限制
 
 - **`curr_max` 只能限流，不能加速。** 充电功率由适配器、协议、电芯内阻决定，改上限无效。真正能提速的是让温度反馈变低（壳温伪装）。
-- **`aggr` 在电池哨兵下会饱和。** 受 48℃ 熔断阈值约束，`aggr > 5` 在电池场景下可能达不到理论温差。
+- **温控档位在电池哨兵下会饱和。** 受 48℃ 熔断阈值约束，档位 `> 5` 在电池场景下可能达不到理论温差。
 - **节点名因机型而异。** `shell-back` / `xo-therm` 这类名字不是所有机型都有；匹配不上时退化为"只挂配置"，日志里会有 `sentinel=none`。
 - **SELinux。** `chcon --reference` 失败会汇总成一条 `W` 日志，接着尝试挂载。若系统服务仍拒绝访问，先查这条。
 - **只骗得过读 `thermal_zone` 的软件层。** 内核级热保护、硬件断电保护不受影响，这是好事——它是最后一道防线。

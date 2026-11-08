@@ -445,6 +445,58 @@ printf 'Charging\n' >/sys/class/power_supply/battery/status
 printf '%s\n' '-1500000' >/sys/class/power_supply/battery/current_now
 printf '%s\n' '4200000' >/sys/class/power_supply/battery/voltage_now
 
+echo "===== T13 模块描述同步 ====="
+SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/uninstall.sh >/dev/null 2>&1
+sleep 1
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
+SD_MODDIR=/opt/qc sh /opt/qc/post-fs-data.sh >/dev/null 2>&1
+
+# 装机默认 temp_mode=off，描述应如实写"关闭"
+D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
+case "$D" in *"温度伪装关闭"*) ok "默认关闭状态写进描述" ;; *) ng "默认状态不符: $D" ;; esac
+case "$D" in *"配置 9 项"*) ok "描述含挂载数" ;; *) ng "描述缺挂载数: $D" ;; esac
+eq "$(grep -c '^description=' /opt/qc/module.prop)" "1" "description 只有一行"
+eq "$(grep '^version=' /opt/qc/module.prop)" "version=2.4.0" "版本行未被改写"
+eq "$(grep '^author=' /opt/qc/module.prop)" "author=https://github.com/XiaohaoQvQ" "作者行未被改写"
+eq "$(grep '^id=' /opt/qc/module.prop)" "id=quickcharge" "id 行未被改写"
+
+# 幂等：状态没变时不该再写盘
+M1=$(md5sum /opt/qc/module.prop | awk '{print $1}')
+MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_sync_desc' >/dev/null 2>&1
+M2=$(md5sum /opt/qc/module.prop | awk '{print $1}')
+eq "$M2" "$M1" "状态未变时不重写 module.prop"
+
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp static >/dev/null 2>&1
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh gear 4 >/dev/null 2>&1
+D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
+case "$D" in *"温控档位 4/10"*) ok "gear 4 同步到描述" ;; *) ng "档位未同步: $D" ;; esac
+
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh aggr 9 >/dev/null 2>&1
+D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
+case "$D" in *"温控档位 9/10"*) ok "旧命令 aggr 仍可用且同步" ;; *) ng "aggr 别名失效: $D" ;; esac
+
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz 120 >/dev/null 2>&1
+D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
+case "$D" in *"高刷 120Hz"*) ok "高刷状态同步" ;; *) ng "高刷未同步: $D" ;; esac
+case "$D" in *"配置 9 项"*) ok "改高刷后挂载数仍在" ;; *) ng "挂载数丢失: $D" ;; esac
+
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp off >/dev/null 2>&1
+D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
+case "$D" in *"温度伪装关闭"*) ok "关闭伪装后描述改为温度伪装关闭" ;; *) ng "关闭状态未同步: $D" ;; esac
+
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp charge >/dev/null 2>&1
+D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
+case "$D" in *"仅充电"*) ok "仅充电模式有标注" ;; *) ng "仅充电未标注: $D" ;; esac
+
+# 越界命令不写盘：描述应保持上一条
+B1=$(md5sum /opt/qc/module.prop | awk '{print $1}')
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh gear 11 >/dev/null 2>&1
+B2=$(md5sum /opt/qc/module.prop | awk '{print $1}')
+eq "$B2" "$B1" "被拒绝的 gear 11 不改描述"
+
+# 管理器列表会截断长描述，档位必须排在最前面
+case "$D" in "QC · 温控档位"*) ok "描述以档位开头，截断时仍可见" ;; *) ng "描述格式异常: $D" ;; esac
+
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]

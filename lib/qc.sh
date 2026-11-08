@@ -1295,3 +1295,67 @@ sd_power_json() {
     printf '{"ma":%s,"mv":%s,"w":%s,"status":"%s","cap":%s,"temp":%s}\n' \
         "${ma:-null}" "${mv:-null}" "${w:-null}" "${st:-Unknown}" "${cap:-null}" "${t:-null}"
 }
+
+# ---------- 模块描述同步 ----------
+# 管理器（Magisk / KernelSU）的模块列表读 module.prop 的 description，
+# 静态文案看不到"现在是什么状态"。这里在运行期把它改写成实时摘要：
+#     QC · 温控档位 8/10 · 高刷 120Hz · 配置 9 项
+#
+# 三条约束：
+#   * 只 replace 掉 description 那一行，其余行逐字节保留；
+#   * 先与上次写入的字符串比对，相同就不碰文件 —— 闪存写入比一次 fork 贵得多；
+#   * 写失败（只读挂载、模块已删）静默跳过，一句文案不能影响守护运行。
+
+SD_DESC_LAST="$SD_RUN/desc.last"
+
+sd_desc_text() {
+    local mode gear hz n t
+    mode=$(sd_state_get temp_mode off)
+    [ "$mode" = dyn ] && mode=static
+    gear=$(sd_state_int aggr 10 0 10)
+
+    case "$mode" in
+        static|charge) t="温控档位 $gear/10" ;;
+        *)             t="温度伪装关闭" ;;
+    esac
+    [ "$mode" = charge ] && t="$t（仅充电）"
+
+    hz=$(sd_state_get hz off)
+    case "$hz" in
+        off|'') t="$t · 高刷关闭" ;;
+        *)      t="$t · 高刷 ${hz}Hz" ;;
+    esac
+
+    n=$(sort -u "$SD_MOUNTS" 2>/dev/null | wc -l | tr -d ' ')
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    if [ "$n" -gt 0 ]; then
+        t="$t · 配置 $n 项"
+    else
+        t="$t · 未挂载"
+    fi
+
+    printf 'QC · %s' "$t"
+}
+
+sd_sync_desc() {
+    [ -n "${MODDIR:-}" ] && [ -f "$MODDIR/module.prop" ] || return 0
+    local d last tmp
+    d=$(sd_desc_text)
+
+    read -r last 2>/dev/null <"$SD_DESC_LAST"
+    [ "$last" = "$d" ] && return 0
+
+    # 临时文件放 /data/adb/quickcharge（与模块目录同分区），mv 是原子的：
+    # 管理器即使正在读 module.prop，也只会读到旧版或新版，不会读到半截。
+    # $$ 后缀：守护与 action.sh 可能同时触发，共用一个临时名会互相截断
+    tmp="$SD_DATA/.module.prop.tmp.$$"
+    awk -v d="$d" '
+        /^description=/ { print "description=" d; seen = 1; next }
+        { print }
+        END { if (!seen) print "description=" d }
+    ' "$MODDIR/module.prop" >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    [ -s "$tmp" ] || { rm -f "$tmp"; return 0; }
+    mv -f "$tmp" "$MODDIR/module.prop" 2>/dev/null || { rm -f "$tmp"; return 0; }
+
+    printf '%s' "$d" >"$SD_DESC_LAST" 2>/dev/null
+}

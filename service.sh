@@ -61,6 +61,7 @@ sd_apply_state() {
 
     # settings 是持久的，正常重启不用重写；这里只处理被系统/OTA 重置的情况
     sd_hz_boot
+    sd_sync_desc
 
     sd_info boot "状态恢复: temp=$mode core=$c noncore=$nc hz=$(sd_state_get hz off)"
 }
@@ -146,7 +147,13 @@ sd_daemon() {
             wall=$(sd_state_get wall off)
             aggr=$(sd_state_int aggr 10 0 10)
             _sd_emul_last=""
+            # 模式变了描述必须跟着变（熔断会把它改成 off）
+            sd_sync_desc
         fi
+
+        # 参数（档位 / 高刷 / 挂载数）改动后描述会变，但没必要每 tick 比一次；
+        # 约 3 分钟对一次，负载可忽略。sd_sync_desc 内部会比对，相同就不写盘。
+        [ $((cnt % 12)) -eq 3 ] && sd_sync_desc
 
         case "$mode" in
             static)
