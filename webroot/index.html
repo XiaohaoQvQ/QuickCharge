@@ -612,7 +612,7 @@
       lines.push(s);
       $("diagPre").textContent = lines.join("\n");
     }
-    push("页面 v" + ($("ver").textContent || "—") + "  " + new Date().toLocaleString());
+    push("页面 " + ($("ver").textContent || "—") + "  " + new Date().toLocaleString());
     push("UA      " + navigator.userAgent);
     push("桥接    " + (bridgeName() || "无（当前不在 KernelSU / APatch / MMRL 的 WebUI 里）"));
     push("通道    " + (CALL || "未建立"));
