@@ -488,6 +488,20 @@ SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp charge >/dev/null 2>&
 D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
 case "$D" in *"仅充电"*) ok "仅充电模式有标注" ;; *) ng "仅充电未标注: $D" ;; esac
 
+# 切到「仅充电」时若没插电，已写入的伪装必须立刻撤掉。
+# 不能等下一个 tick —— tick 调到 300 秒时就是五分钟的高温伪装。
+printf 'Discharging\n' >/sys/class/power_supply/battery/status
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp static 30 >/dev/null 2>&1
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "30000" "static 立即写入伪装"
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp charge >/dev/null 2>&1
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "0" "未插电切仅充电：立即撤掉伪装"
+eq "$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_get temp_mode off')" "charge" "未插电切仅充电：模式已记录"
+
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp static 30 >/dev/null 2>&1
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp charge >/dev/null 2>&1
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "30000" "插电切仅充电：保留伪装"
+
 # 越界命令不写盘：描述应保持上一条
 B1=$(md5sum /opt/qc/module.prop | awk '{print $1}')
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh gear 11 >/dev/null 2>&1

@@ -178,6 +178,13 @@ sd_set_temp() {
             echo "温度模式 -> static ${t}℃" ;;
         charge)
             sd_state_set temp_mode charge
+            # 切到「仅充电」时若没在充电，必须立刻撤掉已经写进去的伪装，
+            # 否则要等下一个 tick 才还原（tick 调到 300 秒时就是 5 分钟）
+            read -r _bst 2>/dev/null <"$SD_PS/battery/status"
+            case "${_bst:-Unknown}" in
+                Charging|Full) sd_shell_emul "$t" ;;
+                *)             sd_shell_emul 0 ;;
+            esac
             sd_info cmd "温度模式 → charge"
             echo "温度模式 -> charge（低于 $(sd_state_int fast_cap 55 20 90)% 生效）" ;;
         *) echo "未知模式: $mode（可选 off|static|charge）"; return 1 ;;
