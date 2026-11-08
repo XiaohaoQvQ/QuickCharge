@@ -596,9 +596,11 @@
   // 手机上没法开控制台，出问题只能靠页面自己说话：
   // 把桥类型、模块路径、每条命令的退出码和原始报错都摆出来，截图就能定位。
   var diagSeq = 0;
-  function diag(reset) {
+  function diag(reset, scroll) {
     var seq = ++diagSeq;
     $("diagCard").style.display = "block";
+    // 从页脚点进来时面板在屏幕上方，不滚过去会像"点了没反应"
+    if (scroll && $("diagCard").scrollIntoView) $("diagCard").scrollIntoView(true);
     var lines = [];
     function push(s) {
       if (seq !== diagSeq) return;
@@ -864,7 +866,7 @@
       apply("restart", "守护已重启");
     });
 
-    bindTap("diagOpen", function () { diag(false); });
+    bindTap("diagOpen", function () { diag(false, true); });
     bindTap("diagRun", function () { diag(false); });
     bindTap("diagHide", function () { $("diagCard").style.display = "none"; });
     bindTap("diagCopy", function () {
