@@ -24,6 +24,9 @@ ui_print "*******************************"
 # ---------- 设备 ----------
 
 DEV_MFR=$(getprop ro.product.odm.manufacturer)
+# 部分机型 odm 属性为空，逐级回退，避免把欧加真误判成"其他厂商"直接拦掉
+[ -n "$DEV_MFR" ] || DEV_MFR=$(getprop ro.product.vendor.manufacturer)
+[ -n "$DEV_MFR" ] || DEV_MFR=$(getprop ro.product.manufacturer)
 DEV_MODEL=$(getprop ro.vendor.oplus.market.name)
 DEV_SOC=$(getprop ro.soc.model | tr 'a-z' 'A-Z')
 
@@ -33,8 +36,13 @@ ui_print "- SoC  : ${DEV_SOC:-未知}"
 ui_print "- 系统 : Android $(getprop ro.build.version.release) / 补丁 $(getprop ro.build.version.security_patch)"
 
 case "$DEV_MFR" in
-    OPPO|OnePlus|realme) ;;
-    *) ui_print "! 非 OPPO/一加/realme 机型，配置改写大概率不匹配（运行时伪装仍可用）" ;;
+    OPPO|oppo|OnePlus|oneplus|realme|Realme) ;;
+    *)
+        ui_print "! 仅支持 OPPO / 一加 / realme（ColorOS / RealmeUI）"
+        ui_print "! 当前厂商: ${DEV_MFR:-未知}"
+        command -v abort >/dev/null 2>&1 && abort "不支持的机型，已中止安装"
+        exit 1
+        ;;
 esac
 
 # ---------- 依赖 ----------
