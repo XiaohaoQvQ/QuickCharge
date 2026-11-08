@@ -138,9 +138,9 @@
     <label for="wall">温度墙</label>
     <span class="val" id="wallV">—</span>
   </div>
-  <input type="range" id="wall" min="35" max="80" step="1">
+  <input type="range" id="wall" min="35" max="80" step="1" value="42">
   <div class="switch" style="margin-top:2px">
-    <input type="checkbox" id="wallOff"><label for="wallOff">关闭（伪装持续到熔断前 2℃）</label>
+    <input type="checkbox" id="wallOff"><label for="wallOff">关闭温度墙（伪装持续到熔断阈值前 2℃）</label>
   </div>
 
   <div class="row" style="margin-top:18px"><label for="shell">基准温度</label><span class="val" id="shellV">—</span></div>
@@ -285,7 +285,8 @@
 
     $("aggr").value = d.aggr;
     $("aggrV").textContent = d.aggr + "/10 · 温差 " + d.gap + "℃";
-    $("wall").value = d.wall === "off" ? 42 : Number(d.wall);
+    // 关闭时保留用户拖到的值，否则「关掉再打开」会悄悄退回 42
+    if (d.wall !== "off") $("wall").value = Number(d.wall);
     $("wallV").textContent = d.wall === "off" ? "关" : d.wall + "℃";
     $("wallOff").checked = d.wall === "off";
     $("wall").disabled = d.wall === "off";
