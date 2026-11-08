@@ -80,6 +80,20 @@ sh action.sh reset                  # 恢复初始状态
 
 `logs` 的来源标记：`boot` / `mount` / `override` / `thermal` / `guard` / `charge` / `daemon` / `cmd`。
 
+## WebUI
+
+模块带 `webroot/index.html`，在 **KernelSU / KsuWebUI / MMRL** 里点模块的「打开」即可看到控制面板：
+
+- 实时状态：真实温度、上报温度、挂载文件数、守护是否在跑
+- 暴力程度 0~10（拖动即生效，显示对应温差）
+- 温度墙 35~80℃ 或关闭、基准温度 25~60℃
+- 充电限流 0~8000mA、电池 / 主板熔断阈值
+- 温度模式切换、重挂配置、重启守护
+
+滑块松手才下发命令，避免拖动过程刷屏；参数走的是 `action.sh`，与命令行完全一致，改完立即生效，不需要重启。
+
+面板通过 KernelSU 的 `ksu.exec` 执行命令，纯静态页面、无外部依赖。Magisk 用户可装 KsuWebUI 独立应用加载。状态接口是 `sh action.sh json`，输出单行 JSON，也方便元模块或脚本消费。
+
 ## 安全设计
 
 **哨兵隔离。** `battery` / `batt*` / `xo-therm` / `xtherm*` 永远不参与伪装，是整个系统里唯一可信的一路读数。把它们一起钉死会让充电 IC 失去温度反馈——这是"充着电死机"的主要来源。

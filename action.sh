@@ -6,11 +6,14 @@
 #
 # 子命令：
 #   status                       当前状态
+#   json                         机器可读状态（JSON，供 WebUI 使用）
 #   temp <off|static|charge> [℃] 温度模式（默认 static 30℃）
 #   shell <℃|off>                等同 temp static
 #   core <off|20-100>            CPU/GPU/DDR 固定伪装
 #   noncore <off|20-100>         其它温区固定伪装（电池与壳温始终受保护）
 #   aggr <0-10>                  暴力程度：可拉开温差 = 2 + aggr
+#   base <25-60>                 基准温度（只改数值，不切换模式，供 WebUI 用）
+#   restart                      重启守护进程（改完参数后强制立即生效）
 #   wall <35-80|off>             温度墙：真实温度到此即停止伪装
 #   curr <300-8000|off>          充电限流（mA），按温度联动降流
 #   fast <20-90>                 快充生效的电量阈值（%）
@@ -85,6 +88,47 @@ sd_do_status() {
     case "$bc" in ''|*[!0-9]*) bc=0 ;; esac
     [ "$bc" -gt 3 ] && printf '⚠ 安全模式：连续 %s 次开机未完成，本次未挂载配置\n' "$bc"
     printf '日志级别  %s\n' "$(sd_state_int log_level 3 0 4)"
+}
+
+# ---------- 机器可读状态 ----------
+
+# 供 WebUI / 元模块消费。所有数值先过一遍夹紧，不会吐越界值；
+# 无法读到的字段给 null，前端据此显示"—"而不是 0。
+sd_do_json() {
+    local mode c nc wall aggr curmax curtar sz sname real slim bc mt dm bl sl rj blj slj
+    mode=$(sd_state_get temp_mode off)
+    [ "$mode" = "dyn" ] && mode=static
+    c=$(sd_state_get core_temp off)
+    nc=$(sd_state_get noncore_temp off)
+    wall=$(sd_state_get wall off)
+    aggr=$(sd_state_int aggr 10 0 10)
+    curmax=$(sd_state_int curr_max 0 0 8000)
+    sz=$(sd_pick_sentinel)
+    sname=${sz##*/}
+    [ -n "$sname" ] || sname=none
+    real=$(sd_sentinel_temp "$sz" 2>/dev/null)
+    slim=$(sd_limit_for_zone "$sz" 2>/dev/null)
+    curtar=$(sd_curr_target 2>/dev/null)
+    mt=$(sort -u "$SD_MOUNTS" 2>/dev/null | wc -l | tr -d ' ')
+    dm=false; sd_daemon_pid >/dev/null && dm=true
+    bc=0; read -r bc 2>/dev/null <"$SD_DATA/boot.count"
+    case "$bc" in ''|*[!0-9]*) bc=0 ;; esac
+
+    bl=$(sd_state_get battery_limit 48);  case "$bl" in off) blj='"off"' ;; *) blj=$bl ;; esac
+    sl=$(sd_state_get sentinel_limit 85); case "$sl" in off) slj='"off"' ;; *) slj=$sl ;; esac
+    case "$real" in ''|*[!0-9]*) rj=null ;; *) rj=$real ;; esac
+
+    printf '{"version":"%s","mode":"%s","shell_temp":%s,"aggr":%s,"gap":%s,' \
+        "$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)" \
+        "$mode" "$(sd_state_int shell_temp 30 25 60)" "$aggr" "$((2 + aggr))"
+    printf '"wall":"%s","core":"%s","noncore":"%s",' "$wall" "$c" "$nc"
+    printf '"sentinel":"%s","real":%s,"limit":"%s",' "$sname" "$rj" "${slim:-off}"
+    printf '"curr_max":%s,"curr_target":%s,"fast_cap":%s,' \
+        "$curmax" "${curtar:-0}" "$(sd_state_int fast_cap 55 20 90)"
+    printf '"battery_limit":%s,"sentinel_limit":%s,' "$blj" "$slj"
+    printf '"log_level":%s,"tick":%s,"mounted":%s,"daemon":%s,"boot_count":%s,"safety":%s}\n' \
+        "$(sd_state_int log_level 3 0 4)" "$(sd_state_int tick 15 5 300)" \
+        "$mt" "$dm" "$bc" "$([ "$bc" -gt 3 ] && echo true || echo false)"
 }
 
 # ---------- 设置 ----------
@@ -302,12 +346,20 @@ sd_menu() {
 
 case "$1" in
     status)  sd_do_status ;;
+    json)    sd_do_json ;;
     env)     sd_dump_env; grep '\[env\]' "$SD_LOG" 2>/dev/null | tail -n 4 ;;
     temp)    shift; sd_set_temp "$@" ;;
     shell)   shift; sd_set_temp static "${1:-}" ;;
     core)    shift; sd_set_scope core "${1:-off}" ;;
     noncore) shift; sd_set_scope noncore "${1:-off}" ;;
     aggr)    shift; sd_set_aggr "${1:-10}" ;;
+    base)    shift
+             v="${1:-}"
+             case "$v" in ''|*[!0-9]*) echo "基准温度需为 25~60 的整数"; exit 1 ;; esac
+             { [ "$v" -ge 25 ] && [ "$v" -le 60 ]; } || { echo "基准温度需为 25~60 的整数"; exit 1; }
+             sd_state_set shell_temp "$v"
+             echo "基准温度 -> ${v}℃" ;;
+    restart) sd_daemon_stop; sd_ensure_daemon; echo "守护已重启" ;;
     wall)    shift; sd_set_wall "${1:-off}" ;;
     curr)    shift; sd_set_curr "${1:-off}" ;;
     fast)    shift; sd_set_fast "${1:-55}" ;;

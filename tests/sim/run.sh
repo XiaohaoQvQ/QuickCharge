@@ -293,6 +293,30 @@ t1=$(date +%s)
 echo "INFO  2000 次决策 $((t1-t0))s（容器 busybox ash，仅供量级参考）"
 [ $((t1-t0)) -le 20 ] && ok "2000 次决策 <20s" || ng "决策循环异常缓慢"
 
+echo "===== T8 WebUI 接口 ====="
+rm -f "$SDD/state.conf"
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
+J=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh json 2>/dev/null)
+echo "$J" | grep -q '^{.*}$' && ok "json 输出为单行对象" || ng "json 输出格式异常"
+echo "$J" | grep -q '"aggr":10' && ok "json aggr=10" || ng "json aggr 错误"
+echo "$J" | grep -q '"gap":12' && ok "json gap=12" || ng "json gap 错误"
+echo "$J" | grep -q '"mode":"off"' && ok "json mode=off" || ng "json mode 错误"
+echo "$J" | grep -q '"mounted":0' && ok "json mounted=0(未挂载)" || ng "json mounted 错误"
+echo "$J" | grep -q '"daemon":false' && ok "json daemon=false" || ng "json daemon 错误"
+echo "$J" | grep -q '"version":"2.1.0"' && ok "json 带版本号" || ng "json 缺版本号"
+
+SD_NO_DAEMON=1 sh /opt/qc/action.sh base 35 >/dev/null 2>&1
+eq "$?" "0" "base 35 执行成功"
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=35" "base 写入 35"
+SD_NO_DAEMON=1 sh /opt/qc/action.sh base 99 >/dev/null 2>&1
+eq "$?" "1" "base 99 被拒绝"
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=35" "拒绝后原值不变"
+
+SD_NO_DAEMON=1 sh /opt/qc/action.sh aggr 4 >/dev/null 2>&1
+eq "$(grep '^aggr=' "$SDD/state.conf")" "aggr=4" "WebUI 可改 aggr"
+SD_NO_DAEMON=1 sh /opt/qc/action.sh aggr 11 >/dev/null 2>&1
+eq "$?" "1" "aggr 11 被拒绝"
+
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="
 [ "$FAIL" -eq 0 ]

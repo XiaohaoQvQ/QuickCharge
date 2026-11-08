@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>Quick Charge</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --line:#232833; --fg:#e8ecf3; --dim:#8b95a8;
+    --accent:#ff6b35; --accent-2:#ffab73; --ok:#3ddc84; --warn:#ffb020; --err:#ff5c5c;
+    --r:16px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f5f6f8; --card:#fff; --line:#e3e6ec; --fg:#15181e; --dim:#6b7280; }
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{
+    margin:0;padding:16px 14px calc(28px + env(safe-area-inset-bottom));
+    background:var(--bg);color:var(--fg);
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif;
+    max-width:560px;margin-inline:auto;
+  }
+  header{display:flex;align-items:baseline;gap:8px;margin:4px 0 16px}
+  header h1{font-size:20px;margin:0;letter-spacing:.2px}
+  header .ver{font-size:12px;color:var(--dim)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--dim);margin-left:auto;align-self:center}
+  .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:12px}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;text-align:center}
+  .grid .k{font-size:11px;color:var(--dim);margin-bottom:3px}
+  .grid .v{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
+  h2{font-size:13px;color:var(--dim);font-weight:600;margin:0 0 10px;letter-spacing:.3px}
+  .row{display:flex;align-items:center;justify-content:space-between;margin:14px 0 6px}
+  .row:first-of-type{margin-top:4px}
+  .row label{font-size:14px}
+  .row .val{font-size:14px;font-weight:600;color:var(--accent-2);font-variant-numeric:tabular-nums}
+  input[type=range]{
+    width:100%;margin:0;accent-color:var(--accent);height:28px;background:transparent
+  }
+  .seg{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:6px}
+  .seg button{
+    padding:11px 0;border-radius:11px;border:1px solid var(--line);background:transparent;
+    color:var(--dim);font-size:14px;font-weight:600
+  }
+  .seg button.on{background:rgba(255,107,53,.14);border-color:var(--accent);color:var(--accent)}
+  .switch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim)}
+  .switch input{width:18px;height:18px;accent-color:var(--accent)}
+  .acts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px}
+  .acts button{
+    padding:12px 0;border-radius:12px;border:1px solid var(--line);background:transparent;
+    color:var(--fg);font-size:13px;font-weight:600
+  }
+  .acts button:active{background:var(--line)}
+  footer{margin-top:18px;text-align:center;font-size:12px;color:var(--dim);line-height:1.9}
+  footer a{color:var(--accent-2);text-decoration:none}
+  #toast{
+    position:fixed;left:50%;bottom:36px;transform:translate(-50%,20px);
+    background:#000d;color:#fff;padding:10px 16px;border-radius:12px;font-size:13px;
+    opacity:0;pointer-events:none;transition:.22s;max-width:86vw;text-align:center;z-index:9
+  }
+  #toast.show{opacity:1;transform:translate(-50%,0)}
+  #toast.bad{background:#7a1d1dee}
+  .banner{display:none;background:rgba(255,92,92,.12);border:1px solid var(--err);color:var(--err);
+    border-radius:12px;padding:10px 12px;font-size:13px;margin-bottom:12px}
+  .safety{display:none;background:rgba(255,176,32,.12);border:1px solid var(--warn);color:var(--warn);
+    border-radius:12px;padding:10px 12px;font-size:13px;margin-bottom:12px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Quick Charge</h1>
+  <span class="ver" id="ver">—</span>
+  <span class="dot" id="dot"></span>
+</header>
+
+<div class="banner" id="banner">未检测到 KernelSU WebUI 环境，页面无法执行命令。</div>
+<div class="safety" id="safety">⚠ 安全模式：连续多次开机未完成，本次未挂载配置。可在下方“重挂”退出。</div>
+
+<div class="card">
+  <div class="grid">
+    <div><div class="k">真实</div><div class="v" id="real">—</div></div>
+    <div><div class="k">上报</div><div class="v" id="out">—</div></div>
+    <div><div class="k">挂载</div><div class="v" id="mounted">—</div></div>
+    <div><div class="k">守护</div><div class="v" id="daemon">—</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>温度模式</h2>
+  <div class="seg" id="modeSeg">
+    <button data-mode="off">关闭</button>
+    <button data-mode="static">全程</button>
+    <button data-mode="charge">仅充电</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>核心参数</h2>
+
+  <div class="row"><label for="aggr">暴力程度</label><span class="val" id="aggrV">—</span></div>
+  <input type="range" id="aggr" min="0" max="10" step="1">
+  <div class="switch" style="margin-top:2px">可拉开温差 = 2 + 强度，数值越大压得越低</div>
+
+  <div class="row" style="margin-top:18px">
+    <label for="wall">温度墙</label>
+    <span class="val" id="wallV">—</span>
+  </div>
+  <input type="range" id="wall" min="35" max="80" step="1">
+  <div class="switch" style="margin-top:2px">
+    <input type="checkbox" id="wallOff"><label for="wallOff">关闭（伪装持续到熔断前 2℃）</label>
+  </div>
+
+  <div class="row" style="margin-top:18px"><label for="shell">基准温度</label><span class="val" id="shellV">—</span></div>
+  <input type="range" id="shell" min="25" max="60" step="1">
+
+  <div class="row" style="margin-top:18px"><label for="curr">充电限流</label><span class="val" id="currV">—</span></div>
+  <input type="range" id="curr" min="0" max="8000" step="500">
+</div>
+
+<div class="card">
+  <h2>熔断阈值</h2>
+  <div class="row"><label for="batt">电池</label><span class="val" id="battV">—</span></div>
+  <input type="range" id="batt" min="30" max="70" step="1">
+  <div class="row" style="margin-top:14px"><label for="soc">主板 / SoC</label><span class="val" id="socV">—</span></div>
+  <input type="range" id="soc" min="60" max="110" step="1">
+</div>
+
+<div class="card">
+  <h2>操作</h2>
+  <div class="acts">
+    <button id="refresh">刷新</button>
+    <button id="rebuild">重挂</button>
+    <button id="restart">重启守护</button>
+  </div>
+</div>
+
+<footer>
+  作者 <a href="https://github.com/XiaohaoQvQ" target="_blank" rel="noopener">XiaohaoQvQ</a>
+  · <a href="https://www.coolapk.com/u/27316679" target="_blank" rel="noopener">酷安</a><br>
+  代码由 AI 辅助完成
+</footer>
+
+<div id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+  var MOD = null, S = null, timer = null;
+
+  function $(id) { return document.getElementById(id); }
+
+  function exec(cmd) {
+    return new Promise(function (resolve) {
+      var settled = false;
+      function done(code, out, err) {
+        if (settled) return;
+        settled = true;
+        resolve({ code: Number(code) || 0, out: out || "", err: err || "" });
+      }
+      try {
+        if (window.ksu && typeof window.ksu.exec === "function") {
+          var ret = window.ksu.exec(cmd, "{}", function (c, o, e) { done(c, o, e); });
+          if (ret && typeof ret.then === "function") {
+            ret.then(function (v) {
+              if (typeof v === "string") { try { v = JSON.parse(v); } catch (x) {} }
+              done(v && (v.errno !== undefined ? v.errno : v.code), v && v.stdout, v && v.stderr);
+            }).catch(function () { done(-1, "", "exec rejected"); });
+          } else if (ret && typeof ret === "object") {
+            done(ret.errno, ret.stdout, ret.stderr);
+          }
+        } else if (window.mmrl && typeof window.mmrl.exec === "function") {
+          window.mmrl.exec(cmd).then(function (v) {
+            done(v.errno, v.stdout, v.stderr);
+          }).catch(function () { done(-1, "", "mmrl exec failed"); });
+        } else if (typeof window.exec === "function") {
+          window.exec(cmd, "{}", function (c, o, e) { done(c, o, e); });
+        } else {
+          done(-1, "", "no bridge");
+        }
+      } catch (e) {
+        done(-1, "", String(e));
+      }
+    });
+  }
+
+  function toast(msg, bad) {
+    var t = $("toast");
+    t.textContent = msg;
+    t.className = "show" + (bad ? " bad" : "");
+    clearTimeout(t._h);
+    t._h = setTimeout(function () { t.className = ""; }, 2200);
+  }
+
+  function detect() {
+    var probe = 'for d in /data/adb/modules/*/ /data/adb/modules_update/*/; do ' +
+      '[ -f "$d/module.prop" ] && grep -qx "id=quickcharge" "$d/module.prop" 2>/dev/null && ' +
+      '{ echo "${d%/}"; break; }; done';
+    return exec(probe).then(function (r) {
+      var p = (r.out || "").trim().split("\n")[0];
+      if (p) { MOD = p; return true; }
+      return false;
+    });
+  }
+
+  function parseJSON(out) {
+    var lines = (out || "").trim().split("\n");
+    for (var i = lines.length - 1; i >= 0; i--) {
+      var s = lines[i].trim();
+      if (s.charAt(0) === "{") {
+        try { return JSON.parse(s); } catch (e) {}
+      }
+    }
+    return null;
+  }
+
+  function load() {
+    if (!MOD) return Promise.resolve();
+    return exec('sh "' + MOD + '/action.sh" json').then(function (r) {
+      var d = parseJSON(r.out);
+      if (!d) { toast("读取状态失败", true); return; }
+      S = d;
+      render(d);
+    });
+  }
+
+  function render(d) {
+    $("ver").textContent = "v" + (d.version || "—");
+    $("dot").className = "dot" + (d.daemon ? " on" : "");
+    $("real").textContent = d.real === null ? "—" : d.real + "℃";
+    $("out").textContent = d.mode === "off" ? "原始" : (d.shell_temp + "℃");
+    $("mounted").textContent = d.mounted;
+    $("daemon").textContent = d.daemon ? "运行" : "停止";
+    $("safety").style.display = d.safety ? "block" : "none";
+
+    Array.prototype.forEach.call($("modeSeg").children, function (b) {
+      b.className = b.dataset.mode === d.mode ? "on" : "";
+    });
+
+    $("aggr").value = d.aggr;
+    $("aggrV").textContent = d.aggr + "/10 · 温差 " + d.gap + "℃";
+    $("wall").value = d.wall === "off" ? 42 : Number(d.wall);
+    $("wallV").textContent = d.wall === "off" ? "关" : d.wall + "℃";
+    $("wallOff").checked = d.wall === "off";
+    $("wall").disabled = d.wall === "off";
+    $("shell").value = d.shell_temp;
+    $("shellV").textContent = d.shell_temp + "℃";
+    $("curr").value = d.curr_max;
+    $("currV").textContent = d.curr_max > 0 ? d.curr_max + "mA" : "不限";
+    $("batt").value = d.battery_limit === "off" ? 48 : d.battery_limit;
+    $("battV").textContent = d.battery_limit === "off" ? "关" : d.battery_limit + "℃";
+    $("soc").value = d.sentinel_limit === "off" ? 85 : d.sentinel_limit;
+    $("socV").textContent = d.sentinel_limit === "off" ? "关" : d.sentinel_limit + "℃";
+  }
+
+  function apply(cmd, okMsg) {
+    if (!MOD) return Promise.resolve();
+    return exec('sh "' + MOD + '/action.sh" ' + cmd).then(function (r) {
+      var msg = (r.out || r.err || "").trim().split("\n").pop();
+      toast(r.code === 0 ? okMsg : (msg || "设置失败"), r.code !== 0);
+      return load();
+    });
+  }
+
+  function bindRange(id, labelId, fmt, cmd) {
+    var el = $(id);
+    el.addEventListener("input", function () {
+      $(labelId).textContent = fmt(el.value);
+    });
+    el.addEventListener("change", function () {
+      apply(cmd(el.value), "已更新");
+    });
+  }
+
+  function boot() {
+    detect().then(function (ok) {
+      if (!ok) { $("banner").style.display = "block"; return; }
+      load();
+      timer = setInterval(load, 30000);
+    });
+
+    $("modeSeg").addEventListener("click", function (e) {
+      var b = e.target.closest("button");
+      if (!b || !MOD) return;
+      var m = b.dataset.mode;
+      apply(m === "static" ? "temp static" : (m === "charge" ? "temp charge" : "temp off"), "模式已切换");
+    });
+
+    bindRange("aggr", "aggrV",
+      function (v) { return v + "/10 · 温差 " + (Number(v) + 2) + "℃"; },
+      function (v) { return "aggr " + v; });
+
+    bindRange("wall", "wallV", function (v) { return v + "℃"; },
+      function (v) { return "wall " + v; });
+
+    bindRange("shell", "shellV", function (v) { return v + "℃"; },
+      function (v) { return "base " + v; });
+
+    bindRange("curr", "currV", function (v) { return Number(v) > 0 ? v + "mA" : "不限"; },
+      function (v) { return "curr " + (Number(v) > 0 ? v : "off"); });
+
+    bindRange("batt", "battV", function (v) { return v + "℃"; },
+      function (v) { return "battery " + v; });
+
+    bindRange("soc", "socV", function (v) { return v + "℃"; },
+      function (v) { return "sentinel " + v; });
+
+    $("wallOff").addEventListener("change", function () {
+      var off = this.checked;
+      $("wall").disabled = off;
+      apply(off ? "wall off" : ("wall " + $("wall").value), off ? "温度墙已关闭" : "温度墙已开启");
+    });
+
+    $("refresh").addEventListener("click", function () { load().then(function () { toast("已刷新"); }); });
+    $("rebuild").addEventListener("click", function () {
+      toast("正在重挂…");
+      apply("rebuild", "已重新挂载");
+    });
+    $("restart").addEventListener("click", function () {
+      apply("restart", "守护已重启");
+    });
+
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) { clearInterval(timer); timer = null; }
+      else if (!timer && MOD) { load(); timer = setInterval(load, 30000); }
+    });
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+})();
+</script>
+</body>
+</html>
