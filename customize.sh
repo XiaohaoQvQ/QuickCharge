@@ -80,7 +80,7 @@ fi
 #   aggr=10        可拉开温差 = 2 + 10 = 12℃
 #   wall=42        真实温度到达即关闭模拟，交还系统
 # 三者关系：42℃ 以下实际温差 = min(12, 42 - 真实)，30℃ 时已顶满 12℃。
-SD_DEFAULTS="temp_mode=off
+SD_DEFAULTS="temp_mode=charge
 shell_temp=30
 core_temp=off
 noncore_temp=off
@@ -94,6 +94,7 @@ aggr=10
 curr_max=0
 hz=off
 power_scale=100
+off_manual=0
 log_level=3
 tick=15"
 
@@ -127,6 +128,17 @@ if [ "$defrev" -lt 2 ]; then
     sd_state_set defrev 2
     [ -n "$migrated" ] && ui_print "- 切换到新默认: 42℃ 以下最猛（$migrated）"
 fi
+# defrev 3：默认从"关"改为"仅充电时自动生效"。
+# 只迁移从未手动关过的用户（off_manual 缺省 0）；手动关过的不动。
+if [ "$defrev" -lt 3 ]; then
+    if [ "$(sd_state_get temp_mode off)" = "off" ] \
+        && [ "$(sd_state_get off_manual 0)" = "0" ]; then
+        sd_state_set temp_mode charge
+        ui_print "- 默认改为「仅充电」自动生效，插电即改写、拔电即还原"
+    fi
+    sd_state_set defrev 3
+fi
+
 # 旧版的 dyn 模式依赖每 tick dumpsys，已并入 static
 [ "$(sd_state_get temp_mode off)" = "dyn" ] && {
     sd_state_set temp_mode static
@@ -134,6 +146,12 @@ fi
 }
 
 ui_print "- 参数: aggr=$(sd_state_get aggr 10) wall=$(sd_state_get wall 42) curr_max=$(sd_state_get curr_max 0)"
+# 告诉用户重启后会发生什么，避免装完发现"没反应"又不知道去哪开
+case "$(sd_state_get temp_mode off)" in
+    charge) ui_print "- 温度改写: 仅充电时生效，重启后自动启动，无需手动开启" ;;
+    static) ui_print "- 温度改写: 全场景生效，重启后自动启动" ;;
+    off)    ui_print "- 温度改写: 已关闭（手动关过），可在 WebUI 打开" ;;
+esac
 
 printf '%s\n' "$MODDIR" 2>/dev/null >"$SD_DATA/moddir"
 
