@@ -59,7 +59,10 @@ sd_apply_state() {
            else sd_warn state "noncore_temp 非法($nc)，重置 off"; sd_state_set noncore_temp off; fi ;;
     esac
 
-    sd_info boot "状态恢复: temp=$mode core=$c noncore=$nc"
+    # settings 是持久的，正常重启不用重写；这里只处理被系统/OTA 重置的情况
+    sd_hz_boot
+
+    sd_info boot "状态恢复: temp=$mode core=$c noncore=$nc hz=$(sd_state_get hz off)"
 }
 
 # ---------- 守护 ----------

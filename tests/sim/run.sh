@@ -29,6 +29,33 @@ printf '#!/bin/sh\nexit 0\n' >/usr/local/bin/start
 printf '#!/bin/sh\nexit 0\n' >/usr/local/bin/stop
 printf '#!/bin/sh\nexit 1\n' >/usr/local/bin/chcon   # 无 SELinux，模拟失败
 printf '#!/bin/sh\necho "$@" >/tmp/am.args\n' >/usr/local/bin/am
+cat >/usr/local/bin/settings <<'EOS'
+#!/bin/sh
+DB=/tmp/settings.db
+case "$1" in
+  get)    grep "^$3=" "$DB" 2>/dev/null | cut -d= -f2- ;;
+  put)    k=$3; v=$4
+          grep -v "^$k=" "$DB" 2>/dev/null >"$DB.t"
+          printf '%s=%s\n' "$k" "$v" >>"$DB.t"
+          mv -f "$DB.t" "$DB" ;;
+  delete) grep -v "^$3=" "$DB" 2>/dev/null >"$DB.t"; mv -f "$DB.t" "$DB" ;;
+esac
+EOS
+cat >/usr/local/bin/cmd <<'EOS'
+#!/bin/sh
+case "$2" in
+  get-supported-modes)
+    printf 'Supported modes for display 0:\n'
+    printf '  Mode ID: 1, Resolution: 1264x2780, Refresh Rate: 60.00 Hz\n'
+    printf '  Mode ID: 2, Resolution: 1264x2780, Refresh Rate: 90.00 Hz\n'
+    printf '  Mode ID: 3, Resolution: 1264x2780, Refresh Rate: 120.00 Hz\n'
+    printf '  Mode ID: 4, Resolution: 1264x2780, Refresh Rate: 144.00 Hz\n' ;;
+  get-active-mode)
+    r=$(settings get system peak_refresh_rate 2>/dev/null)
+    case "$r" in ''|null) r=60 ;; esac
+    printf 'Active mode for display 0: Mode ID: 3, Resolution: 1264x2780, Refresh Rate: %s.00 Hz\n' "$r" ;;
+esac
+EOS
 chmod +x /usr/local/bin/*
 
 # ---------------------------------------------------------------- 假 sysfs
@@ -303,7 +330,8 @@ echo "$J" | grep -q '"gap":12' && ok "json gap=12" || ng "json gap 错误"
 echo "$J" | grep -q '"mode":"off"' && ok "json mode=off" || ng "json mode 错误"
 echo "$J" | grep -q '"mounted":0' && ok "json mounted=0(未挂载)" || ng "json mounted 错误"
 echo "$J" | grep -q '"daemon":false' && ok "json daemon=false" || ng "json daemon 错误"
-echo "$J" | grep -q '"version":"2.1.1"' && ok "json 带版本号" || ng "json 缺版本号"
+V=$(grep '^version=' /opt/qc/module.prop | cut -d= -f2)
+echo "$J" | grep -q "\"version\":\"$V\"" && ok "json 带版本号" || ng "json 缺版本号"
 echo "$J" | grep -q '"target":0' && ok "json 关闭模式 target=0" || ng "json target 异常"
 printf 'temp_mode=static\nshell_temp=30\nwall=42\naggr=10\n' >"$SDD/state.conf"
 printf '41000\n' >/sys/class/thermal/thermal_zone1/temp
@@ -368,6 +396,54 @@ eq "$(grep '^fast_cap=' "$SDD/state.conf")" "fast_cap=70" "升级保留 fast_cap
 eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=static" "升级保留 temp_mode"
 eq "$(grep '^curve_offset=' "$SDD/state.conf")" "curve_offset=200" "升级保留 curve_offset"
 eq "$(head -1 /opt/qc/files/vendor/etc/charging_0.txt)" "550,3000,4500" "覆盖层按用户 curve_offset 重建"
+
+echo "===== T11 刷新率 ====="
+rm -f /tmp/settings.db
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
+printf 'peak_refresh_rate=90\n' >/tmp/settings.db
+SD_MODDIR=/opt/qc sh /opt/qc/action.sh hz 120 >/tmp/hz.log 2>&1
+eq "$?" "0" "hz 120 执行成功"
+eq "$(settings get system peak_refresh_rate)" "120" "peak 写入 120"
+eq "$(settings get system min_refresh_rate)" "120" "min 写入 120"
+eq "$(grep '^hz=' "$SDD/state.conf")" "hz=120" "state 记录 hz=120"
+eq "$(grep '^hz_prev_peak=' "$SDD/state.conf")" "hz_prev_peak=90" "备份原值 90"
+J=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh json 2>/dev/null)
+echo "$J" | grep -q '"hz":"120"' && ok "json hz=120" || ng "json hz 错误"
+echo "$J" | grep -q '"hz_now":120' && ok "json hz_now=120" || ng "json hz_now 错误"
+SD_MODDIR=/opt/qc sh /opt/qc/action.sh hz 75 >/dev/null 2>&1
+eq "$?" "1" "不支持的 75Hz 被拒绝"
+eq "$(settings get system peak_refresh_rate)" "120" "拒绝后原值不变"
+SD_MODDIR=/opt/qc sh /opt/qc/action.sh hz off >/dev/null 2>&1
+eq "$(settings get system peak_refresh_rate)" "90" "关闭后还原到 90"
+eq "$(grep '^hz=' "$SDD/state.conf")" "hz=off" "state hz=off"
+
+rm -f /tmp/settings.db
+SD_MODDIR=/opt/qc sh /opt/qc/action.sh hz 144 >/dev/null 2>&1
+eq "$(grep '^hz_prev_peak=' "$SDD/state.conf")" "hz_prev_peak=" "原值为空时备份为空"
+SD_MODDIR=/opt/qc sh /opt/qc/action.sh hz off >/dev/null 2>&1
+eq "$(settings get system peak_refresh_rate)" "" "原值为空时关闭即删除"
+
+echo "===== T12 功耗读数 ====="
+printf '%s\n' '-1500000' >/sys/class/power_supply/battery/current_now
+printf '%s\n' '4200000' >/sys/class/power_supply/battery/voltage_now
+printf 'Discharging\n' >/sys/class/power_supply/battery/status
+printf '80\n' >/sys/class/power_supply/battery/capacity
+printf '380\n' >/sys/class/power_supply/battery/temp
+P=$(sh /opt/qc/action.sh power 2>/dev/null)
+echo "$P" | grep -q '"ma":-1500' && ok "电流 µA→mA" || ng "电流换算错误: $P"
+echo "$P" | grep -q '"mv":4200' && ok "电压 µV→mV" || ng "电压换算错误: $P"
+echo "$P" | grep -q '"w":6.30' && ok "功率 6.30W" || ng "功率计算错误: $P"
+echo "$P" | grep -q '"temp":38' && ok "温度 380→38℃" || ng "温度换算错误"
+echo "$P" | grep -q '"cap":80' && ok "电量 80" || ng "电量错误"
+echo "$P" | grep -q '"status":"Discharging"' && ok "状态字段" || ng "状态字段错误"
+printf '%s\n' '1200' >/sys/class/power_supply/battery/current_now
+printf '%s\n' '4200' >/sys/class/power_supply/battery/voltage_now
+P2=$(sh /opt/qc/action.sh power 2>/dev/null)
+echo "$P2" | grep -q '"ma":1200' && ok "mA 单位原样保留" || ng "mA 单位误判: $P2"
+echo "$P2" | grep -q '"w":5.04' && ok "mA×mV 功率 5.04W" || ng "mA 功率错误"
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+printf '%s\n' '-1500000' >/sys/class/power_supply/battery/current_now
+printf '%s\n' '4200000' >/sys/class/power_supply/battery/voltage_now
 
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="

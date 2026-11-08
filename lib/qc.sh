@@ -145,6 +145,9 @@ _st_curr_max=""
 _st_log_level=""
 _st_tick=""
 _st_defrev=""
+_st_hz=""
+_st_hz_prev_peak=""
+_st_hz_prev_min=""
 
 sd_state_load() {
     _sd_st_loaded=1
@@ -152,6 +155,7 @@ sd_state_load() {
     _st_horae=""; _st_sentinel_limit=""; _st_battery_limit=""; _st_fast_cap=""
     _st_curve_offset=""; _st_wall=""; _st_aggr=""; _st_curr_max=""
     _st_log_level=""; _st_tick=""; _st_defrev=""
+    _st_hz=""; _st_hz_prev_peak=""; _st_hz_prev_min=""
     [ -f "$SD_STATE" ] || { _st_log_level=3; _sd_lv=3; return 0; }
     local k v
     while IFS='=' read -r k v; do
@@ -171,6 +175,9 @@ sd_state_load() {
             log_level)      _st_log_level=$v ;;
             tick)           _st_tick=$v ;;
             defrev)         _st_defrev=$v ;;
+            hz)             _st_hz=$v ;;
+            hz_prev_peak)   _st_hz_prev_peak=$v ;;
+            hz_prev_min)    _st_hz_prev_min=$v ;;
         esac
     done 2>/dev/null <"$SD_STATE"
     case "$_st_log_level" in 0|1|2|3|4) _sd_lv=$_st_log_level ;; *) _st_log_level=3; _sd_lv=3 ;; esac
@@ -198,6 +205,9 @@ sd_state_get() {
         log_level)      printf '%s' "${_st_log_level:-${2:-3}}" ;;
         tick)           printf '%s' "${_st_tick:-${2:-15}}" ;;
         defrev)         printf '%s' "${_st_defrev:-${2:-2}}" ;;
+        hz)             printf '%s' "${_st_hz:-${2:-off}}" ;;
+        hz_prev_peak)   printf '%s' "${_st_hz_prev_peak:-${2:-}}" ;;
+        hz_prev_min)    printf '%s' "${_st_hz_prev_min:-${2:-}}" ;;
         *)              printf '%s' "${2:-}" ;;
     esac
 }
@@ -222,6 +232,9 @@ sd_state_set() {
                         case "$v" in 0|1|2|3|4) _sd_lv=$v ;; esac ;;
         tick)           _st_tick=$v ;;
         defrev)         _st_defrev=$v ;;
+        hz)             _st_hz=$v ;;
+        hz_prev_peak)   _st_hz_prev_peak=$v ;;
+        hz_prev_min)    _st_hz_prev_min=$v ;;
     esac
     [ -f "$SD_STATE" ] || : >"$SD_STATE"
     if grep -q "^$k=" "$SD_STATE" 2>/dev/null; then
@@ -1123,4 +1136,162 @@ sd_charge_tick() {
     else
         sd_shell_emul 0
     fi
+}
+
+# ============================================================================
+# 刷新率
+#
+# AOSP 的显示策略读 system 库里的两个键：peak_refresh_rate 是上限，
+# min_refresh_rate 是下限。两个写成同一个值，可变刷新率就被钉死在该档。
+# ColorOS / RealmeUI 的"屏幕刷新率"开关写的正是这两个键，所以这是厂商
+# 自己的路径 —— 重启会保留，关闭时能原样还原。
+#
+# 不走 SurfaceFlinger setDisplayMode：它绕过 DisplayManager 的分辨率与
+# 亮度策略，部分机型会黑屏，而且没有可靠的"取消"接口。
+# cmd display 只用来读当前实际刷新率，用于面板回显与校验。
+# ============================================================================
+
+sd_hz_supported() {
+    local out=""
+    if command -v cmd >/dev/null 2>&1; then
+        out=$(cmd display get-supported-modes 0 2>/dev/null \
+              | sed -n 's/.*Refresh Rate: \([0-9][0-9.]*\) Hz.*/\1/p')
+    fi
+    [ -n "$out" ] || out=$(dumpsys display 2>/dev/null \
+        | grep -oE 'fps=[0-9]+(\.[0-9]+)?' | cut -d= -f2)
+    printf '%s\n' "$out" | awk 'NF { printf "%d\n", $1 + 0.5 }' | sort -n | uniq
+}
+
+sd_hz_now() {
+    local v=""
+    if command -v cmd >/dev/null 2>&1; then
+        v=$(cmd display get-active-mode 0 2>/dev/null \
+            | sed -n 's/.*Refresh Rate: \([0-9][0-9.]*\) Hz.*/\1/p')
+    fi
+    [ -n "$v" ] || v=$(dumpsys display 2>/dev/null \
+        | grep -oE 'fps=[0-9]+(\.[0-9]+)?' | head -n 1 | cut -d= -f2)
+    case "$v" in ''|*[!0-9.]*) return 1 ;; esac
+    awk -v v="$v" 'BEGIN { printf "%d", v + 0.5 }'
+}
+
+# 把系统键还原成开启前的值。原值为 null 时用 delete，交还给系统默认策略。
+sd_hz_restore() {
+    local p m
+    p=$(sd_state_get hz_prev_peak "")
+    m=$(sd_state_get hz_prev_min "")
+    case "$p" in
+        ''|null|*[!0-9.]*) settings delete system peak_refresh_rate 2>/dev/null ;;
+        *) settings put system peak_refresh_rate "$p" 2>/dev/null ;;
+    esac
+    case "$m" in
+        ''|null|*[!0-9.]*) settings delete system min_refresh_rate 2>/dev/null ;;
+        *) settings put system min_refresh_rate "$m" 2>/dev/null ;;
+    esac
+    sd_state_set hz off
+    sd_state_set hz_prev_peak ""
+    sd_state_set hz_prev_min ""
+    return 0
+}
+
+sd_hz_set() {
+    local v="$1" sup now cur
+    if [ "$v" = "off" ]; then
+        sd_hz_restore
+        now=$(sd_hz_now 2>/dev/null)
+        sd_info cmd "刷新率 → 系统默认${now:+（当前 ${now}Hz）}"
+        echo "刷新率 -> 系统默认${now:+（当前显示 ${now}Hz）}"
+        return 0
+    fi
+    case "$v" in ''|*[!0-9]*) echo "刷新率需为 60~165 的整数或 off"; return 1 ;; esac
+    [ "$v" -ge 60 ] && [ "$v" -le 165 ] || { echo "刷新率需为 60~165 的整数或 off"; return 1; }
+    command -v settings >/dev/null 2>&1 || { echo "没有 settings 命令，当前环境无法改刷新率"; return 1; }
+
+    sup=$(sd_hz_supported)
+    if [ -n "$sup" ] && ! printf '%s\n' "$sup" | grep -qx "$v"; then
+        echo "本机未报告 ${v}Hz 模式（支持: $(printf '%s' "$sup" | tr '\n' ' ')Hz）"
+        return 1
+    fi
+
+    # 第一次开启前记下系统原值。不能等到关闭时再读 —— 那时读到的
+    # 已经是自己写进去的 120，还原就成了"还原成 120"。
+    if [ "$(sd_state_get hz off)" = "off" ]; then
+        sd_state_set hz_prev_peak "$(settings get system peak_refresh_rate 2>/dev/null | tr -d '\r')"
+        sd_state_set hz_prev_min  "$(settings get system min_refresh_rate 2>/dev/null | tr -d '\r')"
+    fi
+
+    settings put system peak_refresh_rate "$v" 2>/dev/null
+    settings put system min_refresh_rate "$v" 2>/dev/null
+
+    # settings put 不报错不代表写进去了：部分机型会立刻把值改回去
+    cur=$(settings get system peak_refresh_rate 2>/dev/null | tr -d '\r' | cut -d. -f1)
+    if [ "$cur" != "$v" ]; then
+        echo "写入失败：系统拒绝修改刷新率（厂商可能锁定了显示策略）"
+        return 1
+    fi
+
+    sd_state_set hz "$v"
+    now=$(sd_hz_now 2>/dev/null)
+    sd_info cmd "刷新率 → ${v}Hz"
+    echo "刷新率 -> ${v}Hz${now:+（当前显示 ${now}Hz）}"
+}
+
+# 开机补写一次。settings 本身是持久的，只有被系统重置或 OTA 后才需要，
+# 所以先比对，值一致就什么都不做，避免每次开机触发一堆监听。
+sd_hz_boot() {
+    local v cur
+    v=$(sd_state_get hz off)
+    case "$v" in ''|off) return 0 ;; esac
+    case "$v" in *[!0-9]*) sd_state_set hz off; return 0 ;; esac
+    cur=$(settings get system peak_refresh_rate 2>/dev/null | tr -d '\r' | cut -d. -f1)
+    [ "$cur" = "$v" ] && return 0
+    settings put system peak_refresh_rate "$v" 2>/dev/null
+    settings put system min_refresh_rate "$v" 2>/dev/null
+    sd_info boot "刷新率被系统重置，已补写 ${v}Hz"
+}
+
+# ============================================================================
+# 功耗读数
+#
+# 只做"读一次、算一次"，不写日志、不起进程。采样节奏完全由 WebUI 决定：
+# 面板关掉就没有任何读取，不会为了一根曲线让模块常年跑后台。
+# ============================================================================
+
+sd_power_json() {
+    local c v st cap t ma mv w neg=""
+    read -r c 2>/dev/null <"$SD_PS/battery/current_now"
+    read -r v 2>/dev/null <"$SD_PS/battery/voltage_now"
+    read -r st 2>/dev/null <"$SD_PS/battery/status"
+    read -r cap 2>/dev/null <"$SD_PS/battery/capacity"
+    read -r t 2>/dev/null <"$SD_PS/battery/temp"
+
+    case "$c" in ''|*[!0-9-]*) c="" ;; esac
+    if [ -n "$c" ]; then
+        case "$c" in -*) neg=-; c=${c#-} ;; esac
+        # 主流是 µA；少数平台直接给 mA。10000 是两者的分界：
+        # 10mA 以下放电没有意义，10A 以上充电不存在。
+        if [ "$c" -ge 10000 ]; then ma=$((c / 1000)); else ma=$c; fi
+        [ -n "$neg" ] && ma=$((-ma))
+    fi
+
+    case "$v" in ''|*[!0-9]*) v="" ;; esac
+    if [ -n "$v" ]; then
+        if [ "$v" -ge 100000 ]; then mv=$((v / 1000)); else mv=$v; fi
+    fi
+
+    w=""
+    if [ -n "$ma" ] && [ -n "$mv" ]; then
+        w=$(awk -v a="$ma" -v b="$mv" 'BEGIN { printf "%.2f", (a < 0 ? -a : a) * b / 1000000 }')
+    fi
+
+    case "$t" in ''|*[!0-9-]*) t="" ;; esac
+    if [ -n "$t" ]; then
+        case "$t" in -*) t="" ;; *) [ "$t" -gt 200 ] && t=$(((t + 5) / 10)) ;; esac
+    fi
+
+    case "$cap" in ''|*[!0-9]*) cap="" ;; esac
+    # 防止状态字符串把 JSON 撑破，只保留常规字符
+    case "$st" in *\"*|*\\*) st="" ;; esac
+
+    printf '{"ma":%s,"mv":%s,"w":%s,"status":"%s","cap":%s,"temp":%s}\n' \
+        "${ma:-null}" "${mv:-null}" "${w:-null}" "${st:-Unknown}" "${cap:-null}" "${t:-null}"
 }

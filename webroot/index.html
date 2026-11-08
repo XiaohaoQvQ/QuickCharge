@@ -39,11 +39,18 @@
     width:100%;margin:0;accent-color:var(--accent);height:28px;background:transparent
   }
   .seg{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:6px}
-  .seg button{
+  .seg4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px}
+  .seg button,.seg4 button{
     padding:11px 0;border-radius:11px;border:1px solid var(--line);background:transparent;
     color:var(--dim);font-size:14px;font-weight:600
   }
-  .seg button.on{background:rgba(255,107,53,.14);border-color:var(--accent);color:var(--accent)}
+  .seg button.on,.seg4 button.on{background:rgba(255,107,53,.14);border-color:var(--accent);color:var(--accent)}
+  .tag{float:right;font-size:10px;font-weight:400;color:var(--dim);border:1px solid var(--line);
+    border-radius:6px;padding:1px 6px;letter-spacing:0}
+  .pwr{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;text-align:center;margin:2px 0 8px}
+  .pwr .k{font-size:11px;color:var(--dim);margin-bottom:3px}
+  .pwr .v{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+  #spark{width:100%;height:56px;display:block}
   .switch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim)}
   .switch input{width:18px;height:18px;accent-color:var(--accent)}
   .acts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px}
@@ -88,12 +95,33 @@
 </div>
 
 <div class="card">
+  <h2>实时功耗 <span class="tag">仅页面打开时采样</span></h2>
+  <div class="pwr">
+    <div><div class="k">电流</div><div class="v" id="pma">—</div></div>
+    <div><div class="k">功率</div><div class="v" id="pw">—</div></div>
+    <div><div class="k">电池</div><div class="v" id="ptemp">—</div></div>
+  </div>
+  <canvas id="spark"></canvas>
+</div>
+
+<div class="card">
   <h2>温度模式</h2>
   <div class="seg" id="modeSeg">
     <button data-mode="off">关闭</button>
     <button data-mode="static">全程</button>
     <button data-mode="charge">仅充电</button>
   </div>
+</div>
+
+<div class="card">
+  <h2>刷新率 <span class="tag" id="hzNow">当前 —</span></h2>
+  <div class="seg4" id="hzSeg">
+    <button data-hz="off">关闭</button>
+    <button data-hz="90">90Hz</button>
+    <button data-hz="120">120Hz</button>
+    <button data-hz="144">144Hz</button>
+  </div>
+  <div class="switch" style="margin-top:8px">写系统 peak / min_refresh_rate，立即生效，关闭即还原</div>
 </div>
 
 <div class="card">
@@ -148,6 +176,7 @@
 (function () {
   "use strict";
   var MOD = null, S = null, timer = null;
+  var pwr = [], pwrTimer = null;
 
   function $(id) { return document.getElementById(id); }
 
@@ -252,6 +281,77 @@
     $("battV").textContent = d.battery_limit === "off" ? "关" : d.battery_limit + "℃";
     $("soc").value = d.sentinel_limit === "off" ? 85 : d.sentinel_limit;
     $("socV").textContent = d.sentinel_limit === "off" ? "关" : d.sentinel_limit + "℃";
+
+    $("hzNow").textContent = "当前 " + (d.hz_now || 0) + "Hz";
+    Array.prototype.forEach.call($("hzSeg").children, function (b) {
+      b.className = b.dataset.hz === (d.hz || "off") ? "on" : "";
+    });
+  }
+
+  // ---- 实时功耗 ----
+  // 只在页面可见时采样，页面一关就停：不写文件、不留后台进程，
+  // 不会为了这根曲线让模块常年多跑一个循环。
+  function drawSpark() {
+    var c = $("spark");
+    if (!c) return;
+    var dpr = window.devicePixelRatio || 1;
+    var w = c.clientWidth || 320, h = c.clientHeight || 56;
+    if (c.width !== Math.round(w * dpr)) {
+      c.width = Math.round(w * dpr);
+      c.height = Math.round(h * dpr);
+    }
+    var g = c.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    if (pwr.length < 2) return;
+    var max = Math.max.apply(null, pwr), min = Math.min.apply(null, pwr);
+    if (max === min) { max += 1; min -= 1; }
+    var pad = 3, i, x, y;
+    g.beginPath();
+    for (i = 0; i < pwr.length; i++) {
+      x = pad + (w - pad * 2) * i / (pwr.length - 1);
+      y = h - pad - (h - pad * 2) * (pwr[i] - min) / (max - min);
+      if (i) g.lineTo(x, y); else g.moveTo(x, y);
+    }
+    var accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#ff6b35";
+    g.strokeStyle = accent;
+    g.lineWidth = 2;
+    g.lineJoin = "round";
+    g.stroke();
+    g.lineTo(w - pad, h - pad);
+    g.lineTo(pad, h - pad);
+    g.closePath();
+    g.fillStyle = "rgba(255,107,53,.12)";
+    g.fill();
+  }
+
+  function samplePower() {
+    if (!MOD || document.hidden) return;
+    exec('sh "' + MOD + '/action.sh" power').then(function (r) {
+      var d = parseJSON(r.out);
+      if (!d) return;
+      $("pma").textContent = d.ma === null ? "—" : d.ma + " mA";
+      $("pw").textContent = d.w === null ? "—" : d.w + " W";
+      $("ptemp").textContent = d.temp === null ? "—" : d.temp + "℃";
+      if (d.w !== null && d.w !== undefined) {
+        pwr.push(Number(d.w));
+        if (pwr.length > 60) pwr.shift();
+        drawSpark();
+      }
+    });
+  }
+
+  function startPower() {
+    if (pwrTimer || !MOD) return;
+    samplePower();
+    pwrTimer = setInterval(samplePower, 2000);
+  }
+
+  function stopPower() {
+    if (pwrTimer) { clearInterval(pwrTimer); pwrTimer = null; }
+    pwr = [];
+    var c = $("spark");
+    if (c) c.getContext("2d").clearRect(0, 0, c.width, c.height);
   }
 
   function apply(cmd, okMsg) {
@@ -278,6 +378,7 @@
       if (!ok) { $("banner").style.display = "block"; return; }
       load();
       timer = setInterval(load, 30000);
+      startPower();
     });
 
     $("modeSeg").addEventListener("click", function (e) {
@@ -312,6 +413,13 @@
       apply(off ? "wall off" : ("wall " + $("wall").value), off ? "温度墙已关闭" : "温度墙已开启");
     });
 
+    $("hzSeg").addEventListener("click", function (e) {
+      var b = e.target.closest("button");
+      if (!b || !MOD) return;
+      var v = b.dataset.hz;
+      apply("hz " + v, v === "off" ? "已还原系统刷新率" : "已锁定 " + v + "Hz");
+    });
+
     $("refresh").addEventListener("click", function () { load().then(function () { toast("已刷新"); }); });
     $("rebuild").addEventListener("click", function () {
       toast("正在重挂…");
@@ -322,8 +430,14 @@
     });
 
     document.addEventListener("visibilitychange", function () {
-      if (document.hidden) { clearInterval(timer); timer = null; }
-      else if (!timer && MOD) { load(); timer = setInterval(load, 30000); }
+      if (document.hidden) {
+        clearInterval(timer); timer = null;
+        stopPower();
+      } else if (MOD) {
+        load();
+        if (!timer) timer = setInterval(load, 30000);
+        startPower();
+      }
     });
   }
 

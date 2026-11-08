@@ -92,6 +92,7 @@ curve_offset=120
 wall=42
 aggr=10
 curr_max=0
+hz=off
 log_level=3
 tick=15"
 

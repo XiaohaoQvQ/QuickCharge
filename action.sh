@@ -16,6 +16,8 @@
 #   restart                      重启守护进程（改完参数后强制立即生效）
 #   wall <35-80|off>             温度墙：真实温度到此即停止伪装
 #   curr <300-8000|off>          充电限流（mA），按温度联动降流
+#   hz <60-165|off>              锁定刷新率（写 peak/min_refresh_rate），off 还原
+#   power                        电流 / 电压 / 功率读数（JSON，供面板采样）
 #   fast <20-90>                 快充生效的电量阈值（%）
 #   sentinel <60-110|off>        SoC/主板哨兵熔断阈值
 #   battery <30-70|off>          电池哨兵熔断阈值
@@ -39,7 +41,8 @@ fi
 . "$MODDIR/lib/qc.sh"
 
 sd_state_load
-sd_zone_scan
+# power 只读电池节点，不需要温区表；每 2 秒采样一次时省掉整轮目录扫描
+[ "${1:-}" = "power" ] || sd_zone_scan
 
 sd_ensure_daemon() {
     # SD_NO_DAEMON=1 时不拉起：供元模块自己管理进程，也让离线测试不留后台
@@ -95,7 +98,7 @@ sd_do_status() {
 # 供 WebUI / 元模块消费。所有数值先过一遍夹紧，不会吐越界值；
 # 无法读到的字段给 null，前端据此显示"—"而不是 0。
 sd_do_json() {
-    local mode c nc wall aggr curmax curtar sz sname real slim bc mt dm bl sl rj blj slj tgt
+    local mode c nc wall aggr curmax curtar sz sname real slim bc mt dm bl sl rj blj slj tgt hz hzn
     mode=$(sd_state_get temp_mode off)
     [ "$mode" = "dyn" ] && mode=static
     c=$(sd_state_get core_temp off)
@@ -121,6 +124,9 @@ sd_do_json() {
         sd_shell_target >/dev/null
         tgt=$_sd_last_out
     fi
+    hz=$(sd_state_get hz off)
+    hzn=0
+    case "$hz" in off|'') hz=off ;; *) hzn=$(sd_hz_now 2>/dev/null || echo 0) ;; esac
     bl=$(sd_state_get battery_limit 48);  case "$bl" in off) blj='"off"' ;; *) blj=$bl ;; esac
     sl=$(sd_state_get sentinel_limit 85); case "$sl" in off) slj='"off"' ;; *) slj=$sl ;; esac
     case "$real" in ''|*[!0-9]*) rj=null ;; *) rj=$real ;; esac
@@ -133,9 +139,10 @@ sd_do_json() {
     printf '"curr_max":%s,"curr_target":%s,"fast_cap":%s,' \
         "$curmax" "${curtar:-0}" "$(sd_state_int fast_cap 55 20 90)"
     printf '"battery_limit":%s,"sentinel_limit":%s,' "$blj" "$slj"
-    printf '"log_level":%s,"tick":%s,"mounted":%s,"daemon":%s,"boot_count":%s,"safety":%s}\n' \
+    printf '"log_level":%s,"tick":%s,"mounted":%s,"daemon":%s,"boot_count":%s,"safety":%s,' \
         "$(sd_state_int log_level 3 0 4)" "$(sd_state_int tick 15 5 300)" \
         "$mt" "$dm" "$bc" "$([ "$bc" -gt 3 ] && echo true || echo false)"
+    printf '"hz":"%s","hz_now":%s}\n' "$hz" "$hzn"
 }
 
 # ---------- 设置 ----------
@@ -372,6 +379,8 @@ case "$1" in
     restart) sd_daemon_stop; sd_ensure_daemon; echo "守护已重启" ;;
     wall)    shift; sd_set_wall "${1:-off}" ;;
     curr)    shift; sd_set_curr "${1:-off}" ;;
+    hz)      shift; sd_hz_set "${1:-}" ;;
+    power)   sd_power_json ;;
     fast)    shift; sd_set_fast "${1:-55}" ;;
     sentinel) shift; sd_set_limit sentinel_limit "${1:-85}" 60 110 "SoC 哨兵" 85 ;;
     battery)  shift; sd_set_limit battery_limit  "${1:-48}" 30 70  "电池哨兵" 48 ;;
