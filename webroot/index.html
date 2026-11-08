@@ -121,7 +121,10 @@
     <button data-hz="120">120Hz</button>
     <button data-hz="144">144Hz</button>
   </div>
-  <div class="switch" style="margin-top:8px">写系统 peak / min_refresh_rate，立即生效，关闭即还原</div>
+  <div class="switch" style="margin-top:10px">
+    <input type="checkbox" id="hzHard"><label for="hzHard">强制锁定（不接受内容帧率切换）</label>
+  </div>
+  <div class="switch" id="hzHint" style="margin-top:4px">写 peak / min_refresh_rate，立即生效，关闭即还原</div>
 </div>
 
 <div class="card">
@@ -175,7 +178,7 @@
 <script>
 (function () {
   "use strict";
-  var MOD = null, S = null, timer = null;
+  var MOD = null, S = null, timer = null, hzHard = false;
   var pwr = [], pwrTimer = null;
 
   function $(id) { return document.getElementById(id); }
@@ -254,6 +257,19 @@
     });
   }
 
+  // 一句话解释当前处在哪一档，比"已开启"更诚实：键写进去了不等于真的跑在目标帧率。
+  function hzText(d) {
+    if (!d.hz || d.hz === "off") return "关闭时完全交回系统，不写任何键";
+    switch (d.hz_state) {
+      case "drift":     return "键已被系统改回，锁定未生效";
+      case "low_power": return "省电模式开启，系统会强制 60Hz，锁定无效";
+      case "ok":        return hzHard
+        ? "强制锁定 " + d.hz + "Hz · 每 15 秒回读补写"
+        : d.hz + "Hz 已写入 · 系统仍可按内容降频";
+      default:          return "写入 " + d.hz + "Hz";
+    }
+  }
+
   function render(d) {
     $("ver").textContent = "v" + (d.version || "—");
     $("dot").className = "dot" + (d.daemon ? " on" : "");
@@ -286,6 +302,10 @@
     Array.prototype.forEach.call($("hzSeg").children, function (b) {
       b.className = b.dataset.hz === (d.hz || "off") ? "on" : "";
     });
+    hzHard = d.hz_hard === 1;
+    $("hzHard").checked = hzHard;
+    $("hzHard").disabled = (d.hz || "off") === "off";
+    $("hzHint").textContent = hzText(d);
   }
 
   // ---- 实时功耗 ----
@@ -418,7 +438,20 @@
       var b = e.target.closest("button");
       if (!b || !MOD) return;
       var v = b.dataset.hz;
-      apply("hz " + v, v === "off" ? "已还原系统刷新率" : "已锁定 " + v + "Hz");
+      if (v === "off") { apply("hz off", "已还原系统刷新率"); return; }
+      apply("hz " + v + " " + (hzHard ? "hard" : "soft"),
+        hzHard ? "已强制锁定 " + v + "Hz" : "已设置 " + v + "Hz");
+    });
+
+    $("hzHard").addEventListener("change", function () {
+      var on = this.checked;
+      if (!MOD) return;
+      if (on && !confirm("强制锁定会关闭系统的内容帧率匹配（视频会自动降到 24/30fps 省电）。\n开启后耗电与发热会上升，确认开启？")) {
+        this.checked = false; return;
+      }
+      hzHard = on;
+      apply("hzguard " + (on ? "on" : "off"),
+        on ? "已开启强制锁定" : "已关闭强制锁定");
     });
 
     $("refresh").addEventListener("click", function () { load().then(function () { toast("已刷新"); }); });

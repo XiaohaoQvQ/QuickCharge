@@ -456,7 +456,7 @@ D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
 case "$D" in *"温度伪装关闭"*) ok "默认关闭状态写进描述" ;; *) ng "默认状态不符: $D" ;; esac
 case "$D" in *"配置 9 项"*) ok "描述含挂载数" ;; *) ng "描述缺挂载数: $D" ;; esac
 eq "$(grep -c '^description=' /opt/qc/module.prop)" "1" "description 只有一行"
-eq "$(grep '^version=' /opt/qc/module.prop)" "version=2.4.0" "版本行未被改写"
+eq "$(grep '^version=' /opt/qc/module.prop)" "$(grep '^version=' /mod/module.prop)" "版本行未被改写"
 eq "$(grep '^author=' /opt/qc/module.prop)" "author=https://github.com/XiaohaoQvQ" "作者行未被改写"
 eq "$(grep '^id=' /opt/qc/module.prop)" "id=quickcharge" "id 行未被改写"
 
@@ -563,6 +563,161 @@ printf '%s\n' '-1500000' >/sys/class/power_supply/battery/current_now
 printf '%s\n' '4200000' >/sys/class/power_supply/battery/voltage_now
 P=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh power 2>/dev/null)
 echo "$P" | grep -q '"src":"ps"' && ok "无 bcc 节点时走通用路径" || ng "降级失败: $P"
+
+echo "===== T15 全局高刷：稳定性 / 覆盖场景 / 安全边界 ====="
+
+# 升级 settings 桩：区分 system / secure / global 命名空间（真机就是这样），
+# 并加两个开关：reject 模拟厂商锁死写入，writes 记录实际尝试写入的次数。
+cat >/usr/local/bin/settings <<'EOS'
+#!/bin/sh
+DB=/tmp/settings.db
+ns=$2; k=$3; v=$4
+key="$ns/$k"
+case "$1" in
+  get)
+    r=$(grep "^$key=" "$DB" 2>/dev/null | cut -d= -f2-)
+    printf '%s\n' "${r:-null}" ;;
+  put)
+    printf '%s\n' "$key" >>/tmp/settings.writes
+    [ -f /tmp/settings.reject ] && exit 0
+    grep -v "^$key=" "$DB" 2>/dev/null >"$DB.t"
+    printf '%s=%s\n' "$key" "$v" >>"$DB.t"
+    mv -f "$DB.t" "$DB" ;;
+  delete)
+    grep -v "^$key=" "$DB" 2>/dev/null >"$DB.t"; mv -f "$DB.t" "$DB" ;;
+esac
+EOS
+chmod +x /usr/local/bin/settings
+
+# 清掉 T13 留下的高刷状态，重置成"系统原本 120Hz 智能切换"
+sed -i '/^hz=/d;/^hz_hard=/d;/^hz_prev_/d' "$SDD/state.conf" 2>/dev/null
+printf 'system/peak_refresh_rate=120\nsystem/min_refresh_rate=60\nsecure/match_content_frame_rate=3\nglobal/low_power=0\n' >/tmp/settings.db
+rm -f /tmp/settings.reject /tmp/settings.writes
+
+cat >/tmp/hzenv <<'EOS'
+. /opt/qc/lib/qc.sh
+EOS
+
+# --- soft 档：只表达偏好
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz 144 >/dev/null 2>&1
+eq "$(settings get system peak_refresh_rate)" "144" "soft: peak 写 144"
+eq "$(settings get system min_refresh_rate)" "144" "soft: min 写 144"
+eq "$(settings get secure match_content_frame_rate)" "3" "soft: 不碰内容帧率策略"
+eq "$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_get hz_hard 0')" "0" "soft: hz_hard=0"
+
+# --- hard 档：额外的内容帧率锁定
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz 144 hard >/dev/null 2>&1
+eq "$(settings get secure match_content_frame_rate)" "1" "hard: 内容帧率置 NEVER"
+eq "$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_get hz_hard 0')" "1" "hard: hz_hard=1"
+eq "$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_get hz_prev_mcfr')" "3" "hard: 记住原始偏好 3"
+
+# --- 系统把键改回 60：看护必须补写
+settings put system peak_refresh_rate 60
+settings put system min_refresh_rate 60
+R=$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_hz_guard; echo $?')
+eq "$R" "1" "hard: 检测到改回并补写"
+eq "$(settings get system peak_refresh_rate)" "144" "hard: peak 补回 144"
+eq "$(settings get system min_refresh_rate)" "144" "hard: min 补回 144"
+
+R=$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_hz_guard; echo $?')
+eq "$R" "0" "hard: 键值正确时零写入"
+
+# --- 省电模式：投票优先级高于用户设置，主动退让
+settings put global low_power 1
+settings put system peak_refresh_rate 60
+R=$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_hz_guard; echo $?')
+eq "$R" "3" "省电模式: 返回 3 并退让"
+eq "$(settings get system peak_refresh_rate)" "60" "省电模式: 不与系统抢写"
+settings put global low_power 0
+
+# --- 厂商锁死写入：连续失败后必须停手，不能每 tick 打一次架
+settings put system peak_refresh_rate 60
+rm -f /tmp/settings.writes
+touch /tmp/settings.reject
+R=$(SD_MODDIR=/opt/qc sh -c '
+    . /opt/qc/lib/qc.sh
+    sd_hz_guard; a=$?
+    sd_hz_guard; b=$?
+    sd_hz_guard; c=$?
+    sd_hz_guard; d=$?
+    echo "$a$b$c$d"')
+eq "$R" "2222" "写不进去: 始终报 2"
+eq "$(grep -c 'system/peak_refresh_rate' /tmp/settings.writes)" "3" "写不进去: 第 4 次起停止写入"
+rm -f /tmp/settings.reject
+
+# --- 状态文本
+settings put system peak_refresh_rate 144
+settings put system min_refresh_rate 144
+eq "$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_hz_state_text')" "ok" "状态: ok"
+settings put system peak_refresh_rate 60
+eq "$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_hz_state_text')" "drift" "状态: drift"
+settings put system peak_refresh_rate 144
+settings put global low_power 1
+eq "$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_hz_state_text')" "low_power" "状态: low_power"
+settings put global low_power 0
+
+# --- JSON 契约
+J=$(SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh json)
+echo "$J" | grep -q '"hz":"144"'        && ok "JSON: hz=144"       || ng "JSON hz: $J"
+echo "$J" | grep -q '"hz_hard":1'       && ok "JSON: hz_hard=1"    || ng "JSON hz_hard: $J"
+echo "$J" | grep -q '"hz_state":"ok"'   && ok "JSON: hz_state=ok"  || ng "JSON hz_state: $J"
+
+# --- 描述
+D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
+case "$D" in *"高刷 144Hz 锁定"*) ok "描述标注「锁定」" ;; *) ng "描述缺锁定: $D" ;; esac
+
+# --- 关闭强制锁定：档位保留，内容帧率交还系统
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hzguard off >/dev/null 2>&1
+eq "$(settings get secure match_content_frame_rate)" "3" "关闭锁定: 内容帧率还原 3"
+eq "$(settings get system peak_refresh_rate)" "144" "关闭锁定: 档位仍是 144Hz"
+D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
+case "$D" in *"锁定"*) ng "关闭锁定后描述仍写锁定" ;; *) ok "关闭锁定后描述不再写锁定" ;; esac
+
+# --- 完全关闭：逐键还原
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz off >/dev/null 2>&1
+eq "$(settings get system peak_refresh_rate)" "120" "关闭: peak 还原 120"
+eq "$(settings get system min_refresh_rate)" "60" "关闭: min 还原 60"
+eq "$(settings get secure match_content_frame_rate)" "3" "关闭: 内容帧率还原 3"
+eq "$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_get hz off')" "off" "关闭: 状态 off"
+
+# --- 原本没有该键：关闭必须是 delete，不能留下 "null" 字符串
+printf 'global/low_power=0\n' >/tmp/settings.db
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz 120 >/dev/null 2>&1
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz off >/dev/null 2>&1
+eq "$(settings get system peak_refresh_rate)" "null" "原值为空: 关闭后回到 null"
+
+# --- 写失败必须回滚，不留"显示已开、实际没开"的半套状态
+printf 'system/peak_refresh_rate=120\nsystem/min_refresh_rate=60\nglobal/low_power=0\n' >/tmp/settings.db
+touch /tmp/settings.reject
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz 144 >/tmp/hzset.log 2>&1
+eq "$?" "1" "写失败: 退出码 1"
+grep -q "写入失败" /tmp/hzset.log && ok "写失败: 有明确提示" || ng "写失败: 无提示"
+eq "$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_get hz off')" "off" "写失败: 状态未开启"
+rm -f /tmp/settings.reject
+
+# --- 非法档位
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz 30 >/dev/null 2>&1
+eq "$?" "1" "30Hz 被拒绝"
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz 200 >/dev/null 2>&1
+eq "$?" "1" "200Hz 被拒绝"
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz abc >/dev/null 2>&1
+eq "$?" "1" "非数字被拒绝"
+
+# --- 重启后 hard 档要连内容帧率一起补
+printf 'system/peak_refresh_rate=60\nsystem/min_refresh_rate=60\nsecure/match_content_frame_rate=2\nglobal/low_power=0\n' >/tmp/settings.db
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz 144 hard >/dev/null 2>&1
+settings put system peak_refresh_rate 60
+settings put secure match_content_frame_rate 2
+SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_hz_boot'
+eq "$(settings get system peak_refresh_rate)" "144" "开机: peak 补写"
+eq "$(settings get secure match_content_frame_rate)" "1" "开机: 内容帧率策略补写"
+
+# --- soft 档守护零干预
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hzguard off >/dev/null 2>&1
+settings put system peak_refresh_rate 60
+R=$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_hz_guard; echo $?')
+eq "$R" "0" "soft: 守护不干预"
+eq "$(settings get system peak_refresh_rate)" "60" "soft: 保留系统选择"
 
 echo
 echo "===== 结果: PASS=$PASS FAIL=$FAIL ====="

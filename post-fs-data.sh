@@ -78,6 +78,10 @@ fi
 # sd_mount_overrides 内部会先解挂旧的，避免重复条目
 sd_mount_overrides
 
+# 模块列表的简介改写成当前状态（温控档位 / 高刷 / 挂载数）。
+# 放在挂载之后，否则描述里永远是"未挂载"。
+sd_sync_desc
+
 # 这里 sysfs 已就绪但多数系统服务还没起，zone 列表与 later 阶段可能不同，各记一份
 sd_dump_env
 

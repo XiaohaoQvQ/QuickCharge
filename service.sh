@@ -70,7 +70,7 @@ sd_apply_state() {
 
 sd_daemon() {
     local lock="$SD_RUN/daemon.lock" holder tick wall aggr
-    local mode last_mode="" cnt=0
+    local mode last_mode="" cnt=0 _hzr=0 _hz_n=0
     _sd_sp=""
     _sd_reload=0
 
@@ -170,6 +170,22 @@ sd_daemon() {
             charge)
                 sd_charge_tick
                 ;;
+        esac
+
+        # 高刷看护。soft 档在 sd_hz_guard 里第一行就返回，不产生任何 fork；
+        # hard 档每 tick 两次 settings get，约 80ms/15s。
+        sd_hz_guard; _hzr=$?
+        case "$_hzr" in
+            1)  _hz_n=$((_hz_n + 1))
+                if [ $((_hz_n % 4)) -eq 1 ]; then
+                    sd_info daemon "刷新率被系统改回，已补写（累计 ${_hz_n} 次）"
+                    sd_sync_desc
+                fi ;;
+            2)  [ $((cnt % 40)) -eq 0 ] && \
+                    sd_info daemon "刷新率写入被拒绝，已暂停补写（厂商锁定显示策略）" ;;
+            3)  [ $((cnt % 40)) -eq 0 ] && \
+                    sd_info daemon "省电模式开启，刷新率交回系统管理" ;;
+            *)  _hz_n=0 ;;
         esac
 
         _sd_pause "$tick"

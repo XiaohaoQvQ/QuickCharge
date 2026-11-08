@@ -16,7 +16,8 @@
 #   restart                      重启守护进程（改完参数后强制立即生效）
 #   wall <35-80|off>             温度墙：真实温度到此即停止伪装
 #   curr <300-8000|off>          充电限流（mA），按温度联动降流
-#   hz <60-165|off>              锁定刷新率（写 peak/min_refresh_rate），off 还原
+#   hz <60-165|off> [soft|hard]  设置刷新率；hard 额外锁定内容帧率匹配
+#   hzguard <on|off>             开关强制锁定（档位不变，只切换力度）
 #   power                        电流 / 电压 / 功率读数（JSON，供面板采样）
 #   pscale <50-200>              电流校准百分比，读数偏低/偏高时微调（默认 100）
 #   fast <20-90>                 快充生效的电量阈值（%）
@@ -126,8 +127,13 @@ sd_do_json() {
         tgt=$_sd_last_out
     fi
     hz=$(sd_state_get hz off)
-    hzn=0
-    case "$hz" in off|'') hz=off ;; *) hzn=$(sd_hz_now 2>/dev/null || echo 0) ;; esac
+    hzn=0; hzh=0; hzs=off
+    case "$hz" in
+        off|'') hz=off ;;
+        *) hzn=$(sd_hz_now 2>/dev/null || echo 0)
+           hzh=$(sd_state_get hz_hard 0)
+           hzs=$(sd_hz_state_text) ;;
+    esac
     bl=$(sd_state_get battery_limit 48);  case "$bl" in off) blj='"off"' ;; *) blj=$bl ;; esac
     sl=$(sd_state_get sentinel_limit 85); case "$sl" in off) slj='"off"' ;; *) slj=$sl ;; esac
     case "$real" in ''|*[!0-9]*) rj=null ;; *) rj=$real ;; esac
@@ -143,7 +149,7 @@ sd_do_json() {
     printf '"log_level":%s,"tick":%s,"mounted":%s,"daemon":%s,"boot_count":%s,"safety":%s,' \
         "$(sd_state_int log_level 3 0 4)" "$(sd_state_int tick 15 5 300)" \
         "$mt" "$dm" "$bc" "$([ "$bc" -gt 3 ] && echo true || echo false)"
-    printf '"hz":"%s","hz_now":%s}\n' "$hz" "$hzn"
+    printf '"hz":"%s","hz_now":%s,"hz_hard":%s,"hz_state":"%s"}\n' "$hz" "$hzn" "$hzh" "$hzs"
 }
 
 # ---------- 设置 ----------
@@ -391,7 +397,24 @@ case "$1" in
     restart) sd_daemon_stop; sd_ensure_daemon; echo "守护已重启" ;;
     wall)    shift; sd_set_wall "${1:-off}" ;;
     curr)    shift; sd_set_curr "${1:-off}" ;;
-    hz)      shift; sd_hz_set "${1:-}" ;;
+    hz)      shift; sd_hz_set "${1:-}" "${2:-}" ;;
+    hzguard) shift
+             case "${1:-}" in
+                 on|hard|1)  v=$(sd_hz_want) || { echo "先选一个刷新率档位"; exit 1; }
+                             sd_state_set hz_hard 1
+                             sd_hz_write "$v"; sd_hz_mcfr_on
+                             cur=$(sd_hz_read peak); cur=${cur%%.*}
+                             if [ "$cur" != "$v" ]; then
+                                 sd_state_set hz_hard 0; sd_hz_mcfr_relax
+                                 echo "写入失败：系统拒绝修改刷新率"
+                                 exit 1
+                             fi
+                             echo "强制锁定已开启（${v}Hz）" ;;
+                 off|soft|0) sd_state_set hz_hard 0
+                             sd_hz_mcfr_relax
+                             echo "强制锁定已关闭，交回系统策略" ;;
+                 *)          echo "用法: hzguard on|off"; exit 1 ;;
+             esac ;;
     power)   sd_power_json ;;
     pscale)  shift; sd_set_pscale "${1:-100}" ;;
     fast)    shift; sd_set_fast "${1:-55}" ;;
@@ -451,14 +474,16 @@ esac
 # 退出码必须沿用命令本身的结果：WebUI 靠它判断成败，kick 把它覆盖成 0
 # 会让 "aggr 11" 这种被拒绝的输入看起来成功。
 _rc=$?
+# hz / hzguard 也要 kick：守护的高刷看护只在 hard 档工作，开关切换后要立刻
+# 进入/退出看护，否则最长要等一个 tick 才生效。
 case "$_CMD" in
-    temp|shell|core|noncore|gear|aggr|base|wall|curr|fast|sentinel|battery|horae|level)
+    temp|shell|core|noncore|gear|aggr|base|wall|curr|fast|sentinel|battery|horae|level|hz|hzguard)
         sd_daemon_kick ;;
 esac
-# 描述同步与 kick 分开列：hz 不改守护行为（守护不读刷新率），但简介要跟着变。
-# 只读命令（status/json/power/logs）一律跳过 —— 改 module.prop 有写盘成本。
+# 描述同步与 kick 分开列。只读命令（status/json/power/logs）一律跳过 ——
+# 改 module.prop 有写盘成本。
 case "$_CMD" in
-    temp|shell|core|noncore|gear|aggr|base|wall|curr|fast|sentinel|battery|horae|level|hz)
+    temp|shell|core|noncore|gear|aggr|base|wall|curr|fast|sentinel|battery|horae|level|hz|hzguard)
         [ "$_rc" = "0" ] && sd_sync_desc ;;
 esac
 exit "$_rc"

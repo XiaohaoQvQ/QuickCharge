@@ -151,6 +151,8 @@ _st_defrev=""
 _st_hz=""
 _st_hz_prev_peak=""
 _st_hz_prev_min=""
+_st_hz_hard=""
+_st_hz_prev_mcfr=""
 _st_power_scale=""
 
 sd_state_load() {
@@ -159,7 +161,7 @@ sd_state_load() {
     _st_horae=""; _st_sentinel_limit=""; _st_battery_limit=""; _st_fast_cap=""
     _st_curve_offset=""; _st_wall=""; _st_aggr=""; _st_curr_max=""
     _st_log_level=""; _st_tick=""; _st_defrev=""
-    _st_hz=""; _st_hz_prev_peak=""; _st_hz_prev_min=""; _st_power_scale=""
+    _st_hz=""; _st_hz_prev_peak=""; _st_hz_prev_min=""; _st_hz_hard=""; _st_hz_prev_mcfr=""; _st_power_scale=""
     [ -f "$SD_STATE" ] || { _st_log_level=3; _sd_lv=3; return 0; }
     local k v
     while IFS='=' read -r k v; do
@@ -182,6 +184,8 @@ sd_state_load() {
             hz)             _st_hz=$v ;;
             hz_prev_peak)   _st_hz_prev_peak=$v ;;
             hz_prev_min)    _st_hz_prev_min=$v ;;
+            hz_hard)        _st_hz_hard=$v ;;
+            hz_prev_mcfr)   _st_hz_prev_mcfr=$v ;;
             power_scale)    _st_power_scale=$v ;;
         esac
     done 2>/dev/null <"$SD_STATE"
@@ -213,6 +217,8 @@ sd_state_get() {
         hz)             printf '%s' "${_st_hz:-${2:-off}}" ;;
         hz_prev_peak)   printf '%s' "${_st_hz_prev_peak:-${2:-}}" ;;
         hz_prev_min)    printf '%s' "${_st_hz_prev_min:-${2:-}}" ;;
+        hz_hard)        printf '%s' "${_st_hz_hard:-${2:-0}}" ;;
+        hz_prev_mcfr)   printf '%s' "${_st_hz_prev_mcfr:-${2:-}}" ;;
         power_scale)    printf '%s' "${_st_power_scale:-${2:-100}}" ;;
         *)              printf '%s' "${2:-}" ;;
     esac
@@ -241,6 +247,8 @@ sd_state_set() {
         hz)             _st_hz=$v ;;
         hz_prev_peak)   _st_hz_prev_peak=$v ;;
         hz_prev_min)    _st_hz_prev_min=$v ;;
+        hz_hard)        _st_hz_hard=$v ;;
+        hz_prev_mcfr)   _st_hz_prev_mcfr=$v ;;
         power_scale)    _st_power_scale=$v ;;
     esac
     [ -f "$SD_STATE" ] || : >"$SD_STATE"
@@ -1148,15 +1156,33 @@ sd_charge_tick() {
 # ============================================================================
 # 刷新率
 #
-# AOSP 的显示策略读 system 库里的两个键：peak_refresh_rate 是上限，
-# min_refresh_rate 是下限。两个写成同一个值，可变刷新率就被钉死在该档。
-# ColorOS / RealmeUI 的"屏幕刷新率"开关写的正是这两个键，所以这是厂商
-# 自己的路径 —— 重启会保留，关闭时能原样还原。
+# 只写系统键不足以保证"不降频"。Android 由 DisplayModeDirector 用固定
+# 优先级的投票决定刷新率，高优先级会直接裁掉低优先级的区间：
+#
+#    3  min_refresh_rate（用户下限）
+#    4  应用 Window.setFrameRate / preferredMin-MaxRefreshRate
+#    5  preferredDisplayModeId
+#    7  peak_refresh_rate（用户上限）
+#    8  省电模式                 → 强制 [0,60]
+#   10  皮肤温度 CRITICAL        → 强制 [0,60]
+#   12  UDFPS 屏下指纹解锁       → 临时锁帧
+#
+# 所以 peak/min 只能"表达偏好"：挡不住 8/10/12，也挡不住 app 的逐层帧率
+# 请求。本模块按两档实现，并如实上报当前实际处在哪一档：
+#
+#   soft（默认）只写 peak/min，系统仍可按内容与场景降频
+#   hard         额外把 match_content_frame_rate 置 1（不接受内容帧率
+#                匹配），再由守护每 tick 回读，键被系统改回就立即补写
+#
+# 即便 hard 也绕不过 8/10/12 —— 那是系统级的安全与体验策略，硬顶只是
+# 把发热推给面板。检测到省电模式、或连续三次写不进去时主动退让并上报
+# 原因，而不是每 15 秒和系统打一次架。
 #
 # 不走 SurfaceFlinger setDisplayMode：它绕过 DisplayManager 的分辨率与
-# 亮度策略，部分机型会黑屏，而且没有可靠的"取消"接口。
-# cmd display 只用来读当前实际刷新率，用于面板回显与校验。
+# 亮度策略，部分机型会黑屏，也没有可靠的"取消"接口。
 # ============================================================================
+
+SD_MCFR_KEY=match_content_frame_rate
 
 sd_hz_supported() {
     local out=""
@@ -1181,7 +1207,66 @@ sd_hz_now() {
     awk -v v="$v" 'BEGIN { printf "%d", v + 0.5 }'
 }
 
-# 把系统键还原成开启前的值。原值为 null 时用 delete，交还给系统默认策略。
+# 目标档位。off 或非法值返回非 0，调用方据此跳过全部刷新率开销。
+sd_hz_want() {
+    local v
+    v=$(sd_state_get hz off)
+    case "$v" in ''|off|*[!0-9]*) return 1 ;; esac
+    printf '%s' "$v"
+}
+
+sd_hz_hard() { [ "$(sd_state_get hz_hard 0)" = "1" ]; }
+
+sd_hz_read() {
+    local k
+    case "$1" in peak|max) k=peak_refresh_rate ;; *) k=min_refresh_rate ;; esac
+    settings get system "$k" 2>/dev/null | tr -d '\r'
+}
+
+sd_hz_write() {
+    settings put system peak_refresh_rate "$1" 2>/dev/null
+    settings put system min_refresh_rate "$1" 2>/dev/null
+    return 0
+}
+
+# 省电模式在投票里是第 8 级，高于用户的 peak(7)，写键一定无效。
+# 只读标准键：ColorOS 的省电/超级省电最终都会落到 low_power。
+sd_hz_lowpower() {
+    local v
+    v=$(settings get global low_power 2>/dev/null | tr -d '\r')
+    [ "$v" = "1" ] && { echo 1; return 0; }
+    echo 0
+}
+
+# 1=NEVER：不接受按内容帧率切换。secure 键与 cmd 双写，部分 ROM 只认其中一条。
+sd_hz_mcfr_on() {
+    if [ -z "$(sd_state_get hz_prev_mcfr "")" ]; then
+        sd_state_set hz_prev_mcfr \
+            "$(settings get secure "$SD_MCFR_KEY" 2>/dev/null | tr -d '\r')"
+    fi
+    settings put secure "$SD_MCFR_KEY" 1 2>/dev/null
+    command -v cmd >/dev/null 2>&1 && \
+        cmd display set-match-content-frame-rate-policy 1 >/dev/null 2>&1
+    return 0
+}
+
+sd_hz_mcfr_off() {
+    local prev p
+    prev=$(sd_state_get hz_prev_mcfr "")
+    case "$prev" in 1|2|3) p=$prev ;; *) p=2 ;; esac
+    settings put secure "$SD_MCFR_KEY" "$p" 2>/dev/null
+    command -v cmd >/dev/null 2>&1 && \
+        cmd display set-match-content-frame-rate-policy "$p" >/dev/null 2>&1
+    sd_state_set hz_prev_mcfr ""
+    return 0
+}
+
+# 只有真的开过 hard 才需要还原，避免把用户原本的 3(always) 写成 2。
+sd_hz_mcfr_relax() {
+    [ -n "$(sd_state_get hz_prev_mcfr "")" ] && sd_hz_mcfr_off
+    return 0
+}
+
 sd_hz_restore() {
     local p m
     p=$(sd_state_get hz_prev_peak "")
@@ -1194,14 +1279,16 @@ sd_hz_restore() {
         ''|null|*[!0-9.]*) settings delete system min_refresh_rate 2>/dev/null ;;
         *) settings put system min_refresh_rate "$m" 2>/dev/null ;;
     esac
+    sd_hz_mcfr_relax
     sd_state_set hz off
+    sd_state_set hz_hard 0
     sd_state_set hz_prev_peak ""
     sd_state_set hz_prev_min ""
     return 0
 }
 
 sd_hz_set() {
-    local v="$1" sup now cur
+    local v="$1" force="${2:-}" sup now cur prev_p prev_m prev_hard
     if [ "$v" = "off" ]; then
         sd_hz_restore
         now=$(sd_hz_now 2>/dev/null)
@@ -1219,40 +1306,115 @@ sd_hz_set() {
         return 1
     fi
 
-    # 第一次开启前记下系统原值。不能等到关闭时再读 —— 那时读到的
-    # 已经是自己写进去的 120，还原就成了"还原成 120"。
+    # 第一次开启前记下系统原值。不能等关闭时再读 —— 那时读到的已经是
+    # 自己写进去的 120，还原就成了"还原成 120"。切换档位时不要重采。
     if [ "$(sd_state_get hz off)" = "off" ]; then
         sd_state_set hz_prev_peak "$(settings get system peak_refresh_rate 2>/dev/null | tr -d '\r')"
         sd_state_set hz_prev_min  "$(settings get system min_refresh_rate 2>/dev/null | tr -d '\r')"
+        sd_state_set hz_prev_mcfr ""
     fi
 
-    settings put system peak_refresh_rate "$v" 2>/dev/null
-    settings put system min_refresh_rate "$v" 2>/dev/null
+    # 力度必须在写 mcfr 之前定好：写不写内容帧率锁定取决于它。
+    prev_hard=$(sd_state_get hz_hard 0)
+    case "$force" in soft) sd_state_set hz_hard 0 ;; hard) sd_state_set hz_hard 1 ;; esac
 
-    # settings put 不报错不代表写进去了：部分机型会立刻把值改回去
-    cur=$(settings get system peak_refresh_rate 2>/dev/null | tr -d '\r' | cut -d. -f1)
+    sd_hz_write "$v"
+    if sd_hz_hard; then
+        sd_hz_mcfr_on
+    else
+        sd_hz_mcfr_relax
+    fi
+
+    # settings put 不报错不代表写进去了：部分机型会立刻把值改回去。
+    # 写不进就回滚，不留下"状态显示已开启、实际没生效"的半套配置。
+    cur=$(sd_hz_read peak); cur=${cur%%.*}
     if [ "$cur" != "$v" ]; then
+        prev_p=$(sd_state_get hz_prev_peak "")
+        prev_m=$(sd_state_get hz_prev_min "")
+        case "$prev_p" in
+            ''|null|*[!0-9.]*) settings delete system peak_refresh_rate 2>/dev/null ;;
+            *) settings put system peak_refresh_rate "$prev_p" 2>/dev/null ;;
+        esac
+        case "$prev_m" in
+            ''|null|*[!0-9.]*) settings delete system min_refresh_rate 2>/dev/null ;;
+            *) settings put system min_refresh_rate "$prev_m" 2>/dev/null ;;
+        esac
+        sd_hz_mcfr_relax
+        sd_state_set hz_hard "$prev_hard"
         echo "写入失败：系统拒绝修改刷新率（厂商可能锁定了显示策略）"
         return 1
     fi
 
     sd_state_set hz "$v"
     now=$(sd_hz_now 2>/dev/null)
-    sd_info cmd "刷新率 → ${v}Hz"
-    echo "刷新率 -> ${v}Hz${now:+（当前显示 ${now}Hz）}"
+    sd_info cmd "刷新率 → ${v}Hz$(sd_hz_hard && echo '（强制）')"
+    echo "刷新率 -> ${v}Hz${now:+（当前显示 ${now}Hz）}$(sd_hz_hard && echo ' 强制模式')"
+}
+
+# 守护每 tick 调用。soft 档直接返回，零开销。
+#   0 = 键值正确（或无需干预）
+#   1 = 检测到被改回并已补写
+#   2 = 写不进去（已被压制）
+#   3 = 省电模式，主动退让
+_hz_bad=0
+_hz_reason=""
+sd_hz_guard() {
+    local v peak min
+    # 直接用内存里的状态，避免守护每 tick 为了判断"要不要管"fork 两个子 shell
+    [ "$_sd_st_loaded" = "1" ] || sd_state_load
+    [ "$_st_hz_hard" = "1" ] || return 0
+    case "$_st_hz" in ''|off|*[!0-9]*) return 0 ;; esac
+    v=$_st_hz
+    peak=$(sd_hz_read peak); peak=${peak%%.*}
+    min=$(sd_hz_read min);   min=${min%%.*}
+    if [ "$peak" = "$v" ] && [ "$min" = "$v" ]; then
+        _hz_bad=0; _hz_reason=""
+        return 0
+    fi
+    if [ "$(sd_hz_lowpower)" = "1" ]; then
+        _hz_bad=0; _hz_reason=low_power
+        return 3
+    fi
+    # 连续三次写不回目标值，说明是硬压制，再写也是白耗 IO（也会刷日志）
+    if [ "$_hz_bad" -ge 3 ]; then
+        _hz_reason=blocked
+        return 2
+    fi
+    sd_hz_write "$v"
+    sd_hz_mcfr_on
+    peak=$(sd_hz_read peak); peak=${peak%%.*}
+    if [ "$peak" = "$v" ]; then
+        _hz_bad=0; _hz_reason=""
+        return 1
+    fi
+    _hz_bad=$((_hz_bad + 1)); _hz_reason=blocked
+    return 2
+}
+
+# 给面板/简介用的一句话状态
+#   off 未开启 / ok 生效中 / drift 键被系统改回 / low_power 被省电模式压制
+sd_hz_state_text() {
+    local v peak min
+    v=$(sd_hz_want) || { echo off; return 0; }
+    peak=$(sd_hz_read peak); peak=${peak%%.*}
+    min=$(sd_hz_read min);   min=${min%%.*}
+    [ "$peak" = "$v" ] && [ "$min" = "$v" ] || { echo drift; return 0; }
+    [ "$(sd_hz_lowpower)" = "1" ] && { echo low_power; return 0; }
+    echo ok
 }
 
 # 开机补写一次。settings 本身是持久的，只有被系统重置或 OTA 后才需要，
 # 所以先比对，值一致就什么都不做，避免每次开机触发一堆监听。
 sd_hz_boot() {
     local v cur
-    v=$(sd_state_get hz off)
-    case "$v" in ''|off) return 0 ;; esac
-    case "$v" in *[!0-9]*) sd_state_set hz off; return 0 ;; esac
-    cur=$(settings get system peak_refresh_rate 2>/dev/null | tr -d '\r' | cut -d. -f1)
-    [ "$cur" = "$v" ] && return 0
-    settings put system peak_refresh_rate "$v" 2>/dev/null
-    settings put system min_refresh_rate "$v" 2>/dev/null
+    v=$(sd_hz_want) || return 0
+    cur=$(sd_hz_read peak); cur=${cur%%.*}
+    if [ "$cur" = "$v" ]; then
+        if sd_hz_hard; then sd_hz_mcfr_on; fi
+        return 0
+    fi
+    sd_hz_write "$v"
+    if sd_hz_hard; then sd_hz_mcfr_on; fi
     sd_info boot "刷新率被系统重置，已补写 ${v}Hz"
 }
 
@@ -1388,7 +1550,11 @@ sd_desc_text() {
     hz=$(sd_state_get hz off)
     case "$hz" in
         off|'') t="$t · 高刷关闭" ;;
-        *)      t="$t · 高刷 ${hz}Hz" ;;
+        *)      if [ "$(sd_state_get hz_hard 0)" = "1" ]; then
+                    t="$t · 高刷 ${hz}Hz 锁定"
+                else
+                    t="$t · 高刷 ${hz}Hz"
+                fi ;;
     esac
 
     n=$(sort -u "$SD_MOUNTS" 2>/dev/null | wc -l | tr -d ' ')
