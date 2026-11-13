@@ -1,39 +1,50 @@
 #!/system/bin/sh
-# Quick Charge (QC) 控制入口。
-#
-#   无参数     交互菜单（有终端时）；非交互环境直接打印状态
-#   带子命令   供元模块 / 脚本调用
-#
-# 子命令：
-#   status                       当前状态
-#   json                         机器可读状态（JSON，供 WebUI 使用）
-#   temp <off|static|charge> [℃] 温度模式（默认 static 30℃）
-#   shell <℃|off>                等同 temp static
-#   core <off|20-100>            CPU/GPU/DDR 固定伪装
-#   noncore <off|20-100>         其它温区固定伪装（电池与壳温始终受保护）
-#   gear <0-10>                  温控档位：越高越激进，可拉开温差 = 2 + 档位（aggr 为旧名）
-#   base <25-60>                 基准温度（只改数值，不切换模式，供 WebUI 用）
-#   restart                      重启守护进程（改完参数后强制立即生效）
-#   wall <35-80|off>             温度墙：真实温度到此即停止伪装
-#   curr <300-8000|off>          充电限流（mA），按温度联动降流
-#   hz <60-165|off> [soft|hard]  设置刷新率；hard 额外锁定内容帧率匹配
-#   hzguard <on|off>             开关强制锁定（档位不变，只切换力度）
-#   power                        电流 / 电压 / 功率读数（JSON，供面板采样）
-#   pscale <50-200>              电流校准百分比，读数偏低/偏高时微调（默认 100）
-#   fast <20-90>                 快充生效的电量阈值（%）
-#   sentinel <60-110|off>        SoC/主板哨兵熔断阈值
-#   battery <30-70|off>          电池哨兵熔断阈值
-#   horae <0|1>                  OPPO 热管理服务开关
-#   level <0-4>                  日志级别 0关 1E 2W 3I 4D
-#   logs [e|w|i|d|boot|daemon|N] 查看日志
-#   mount | umount               手动挂载 / 卸载配置覆盖层
-#   rebuild                      重新生成并挂载（OTA 后一般不用，开机自会处理）
-#   reboot-safe                  退出安全模式并立即重挂
-#   reset                        恢复初始状态（清空全部参数）
+sd_usage() {
+    cat <<'EOF'
+Quick Charge (QC) 控制入口。
 
-# WebUI 的执行环境 PATH 经常是空的或不含 busybox 目录（管理器不同、注入时机不同），
-# 这时 grep / awk / sort / tr 全都找不到，脚本会"跑得通但什么都不输出"。
-# 显式补齐，比在网页里排查一堆空字段省事。
+  无参数     打印状态（不进入菜单：管理器里执行时没有终端）
+  带子命令   供元模块 / 脚本 / WebUI 调用
+
+子命令：
+  help                         显示这段帮助
+  status                       当前状态
+  json                         机器可读状态（JSON，供 WebUI 使用）
+  probe                        温度读取自检（温区/电池节点/缓存/决策现场）
+  zones                        温区判定全表：type / 语义类 / 是否 core 候选
+  check                        适配检查：一次采样，直接给出能用哪些功能
+  diag [秒] [间隔]             现场诊断采样（默认 120s/2s），排查掉功率用
+  temp <off|static|charge> [℃] 温度模式（默认 static 30℃）
+  shell <℃|off>                等同 temp static
+  core <off|20-100>            CPU/GPU/DDR 固定伪装
+  noncore <off|20-100>         其它温区固定伪装（电池 NTC 要单独用 batt 开）
+  batt <off|20-45>             电池 NTC 伪装（默认关；真实 ≥46℃ 自动撤销并冷却）
+  gear <0-10>                  温控档位：越高越激进，可拉开温差 = 2 + 档位（aggr 为旧名）
+  base <25-60>                 基准温度（只改数值，不切换模式，供 WebUI 用）
+  restart                      重启守护进程（改完参数后强制立即生效）
+  wall <35-80|off>             温度墙：真实温度到此即停止伪装
+  curr <300-8000|off>          充电限流（mA），按温度联动降流
+  curredge <0-6>               限流距墙几度开始降：0=顶到墙才降，4=默认
+  boost <on|off>               暴力模式：顶墙才降流 + 档位 10 + 快充阈值 85%
+  hz <60-185|off> [soft|hard]  设置刷新率；hard 额外锁定内容帧率匹配
+  hzguard <on|off>             开关强制锁定（档位不变，只切换力度）
+  power                        电流 / 电压 / 功率读数（JSON，供面板采样）
+  pscale <50-200>              电流校准百分比，读数偏低/偏高时微调（默认 100）
+  fast <20-90>                 快充生效的电量阈值（%）
+  sentinel <60-110|off>        SoC/主板哨兵熔断阈值
+  battery <30-70|off>          电池哨兵熔断阈值
+  cells <auto|1|2>             电芯数：自动判断 / 强制单芯 / 强制双芯
+  horae <0|1>                  OPPO 热管理服务开关（thermal on|off 为同义）
+  thermal <on|off>             系统热管理总开关：off 停 horae，不再按温度降频
+  level <0-4>                  日志级别 0关 1E 2W 3I 4D
+  logs [e|w|i|d|boot|daemon|N] 查看日志
+  mount | umount               手动挂载 / 卸载配置覆盖层
+  rebuild                      重新生成并挂载（OTA 后一般不用，开机自会处理）
+  reboot-safe                  退出安全模式并立即重挂
+  reset                        恢复初始状态（清空全部参数）
+  menu                         交互菜单（仅限有终端的终端模拟器里使用）
+EOF
+}
 PATH="/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/system/bin:/system/xbin:${PATH:-/system/bin}"
 export PATH
 
@@ -51,21 +62,15 @@ fi
 . "$MODDIR/lib/qc.sh"
 
 sd_state_load
-# power 只读电池节点，不需要温区表；每 2 秒采样一次时省掉整轮目录扫描
 [ "${1:-}" = "power" ] || sd_zone_scan
 
 sd_ensure_daemon() {
-    # SD_NO_DAEMON=1 时不拉起：供元模块自己管理进程，也让离线测试不留后台
     [ -n "${SD_NO_DAEMON:-}" ] && return 0
-    sd_daemon_pid >/dev/null && return 0
-    nohup sh "$MODDIR/service.sh" --daemon >/dev/null 2>&1 &
-    sleep 1
+    sd_daemon_launch
 }
 
-# ---------- 状态 ----------
-
 sd_do_status() {
-    local mode c nc wall aggr curmax curtar sz sname real slim bc mt
+    local mode c nc wall aggr curmax curtar sz real slim bc mt src dpid nmn _ce _sb bs
     mode=$(sd_state_get temp_mode off)
     [ "$mode" = "dyn" ] && mode=static
     c=$(sd_state_get core_temp off)
@@ -73,11 +78,12 @@ sd_do_status() {
     wall=$(sd_state_get wall off)
     aggr=$(sd_state_int aggr 10 0 10)
     curmax=$(sd_state_int curr_max 0 0 8000)
-    sz=$(sd_pick_sentinel)
-    sname=${sz##*/}
-    [ -n "$sname" ] || sname=none
-    real=$(sd_sentinel_temp "$sz" 2>/dev/null)
-    slim=$(sd_limit_for_zone "$sz" 2>/dev/null)
+    sd_read_real
+    sz=${_sd_rr_zone:-none}
+    real=$_sd_rr_real
+    slim=$_sd_rr_lim
+    src=$_sd_rr_src
+    [ -n "$sz" ] || sz=none
     curtar=$(sd_curr_target 2>/dev/null)
     mt=$(sort -u "$SD_MOUNTS" 2>/dev/null | wc -l | tr -d ' ')
 
@@ -91,10 +97,52 @@ sd_do_status() {
     printf '温控档位  %s/10（可拉开 %s℃）   温度墙 %s\n' "$aggr" $((2 + aggr)) \
         "$([ "$wall" = off ] && echo '关（熔断前 2℃ 停止）' || echo "${wall}℃")"
     printf '固定伪装  核心 %s   非核心 %s\n' "$c" "$nc"
-    printf '哨兵      %s %s℃ / 上限 %s℃\n' "$sname" "${real:--}" "${slim:-off}"
-    printf '电流上限  %s\n' "$([ "$curmax" -gt 0 ] && echo "${curmax}mA（当前允许 ${curtar}mA）" || echo '关闭')"
-    printf '配置挂载  %s 个文件   守护 %s\n' "$mt" \
-        "$(sd_daemon_pid >/dev/null && echo 运行中 || echo 未运行)"
+    bs=$(sd_state_get batt_spoof off)
+    if [ "$bs" != off ]; then
+        if sd_batt_real_v; then
+            printf '电池伪装  %s℃ · 真实 %s℃（≥46℃ 自动撤销）\n' "$bs" "$_sd_rv"
+        else
+            printf '电池伪装  %s℃ · 真实温度读不到\n' "$bs"
+        fi
+    else
+        printf '电池伪装  关闭（电池 NTC 真实）\n'
+    fi
+    printf '热管理    %s\n' "$([ "$(sd_state_get horae 1)" = 0 ] && echo '已停用（horae 停止）' || echo '系统默认')"
+    printf '哨兵      %s %s℃ / 上限 %s℃  [%s]\n' "$sz" "${real:--}" "${slim:-off}" "${src:-未读到}"
+    _ce=$(sd_state_int curr_edge 4 0 6)
+    printf '电流上限  %s\n' "$([ "$curmax" -gt 0 ] && echo "${curmax}mA（当前允许 ${curtar}mA，$([ "$_ce" -eq 0 ] && echo '顶墙才降' || echo "距墙 ${_ce}℃ 开始降")）" || echo '关闭')"
+    [ "$_sd_screen_ticks" -gt 0 ] || sd_screen_tick
+    case "$(sd_scr_state)" in
+        kernel) printf '亮屏快充  已接管（内核 ignore_screen_state）\n' ;;
+        fcc)    printf '亮屏快充  已接管（回写 FCC）\n' ;;
+        none)   printf '亮屏快充  本机不支持（无屏幕状态参数）\n' ;;
+        disabled) printf '亮屏快充  当前「关闭」模式，不接管\n' ;;
+        *)      if [ "$_sd_screen_on" = 0 ]; then
+                    printf '亮屏快充  已记基准，亮屏后接管\n'
+                else
+                    printf '亮屏快充  等待充电\n'
+                fi ;;
+    esac
+    dpid=$(sd_daemon_pid 2>/dev/null)
+    case "$(sd_mount_mode)" in
+        nomount)      nmn=$(wc -l <"$SD_NM_LIST" 2>/dev/null | tr -d ' ')
+                      printf '配置      %s（NoMount 注入，无挂载）\n' "注入 ${nmn:-0} 个文件" ;;
+        nomount-idle) printf '配置      NoMount 在位，但没有注入文件\n' ;;
+        meta)         nmn=$(wc -l <"$SD_NM_LIST" 2>/dev/null | tr -d ' ')
+                      printf '配置      %s（%s 托管，开机挂载）\n' "${nmn:-0} 个文件" "$(sd_mm_name)" ;;
+        meta-idle)    printf '配置      %s 在位，但没有交付文件\n' "$(sd_mm_name)" ;;
+        bind)         printf '配置      挂载 %s 个文件\n' "$mt" ;;
+        *)            printf '配置      未生效（0 个文件）\n' ;;
+    esac
+    if [ -n "$dpid" ]; then
+        if sd_hb_age; then
+            printf '守护      运行中 pid=%s（%s 秒前心跳）\n' "$dpid" "$_sd_rv"
+        else
+            printf '守护      运行中 pid=%s（尚未写心跳）\n' "$dpid"
+        fi
+    else
+        printf '守护      未运行\n'
+    fi
 
     bc=0
     read -r bc 2>/dev/null <"$SD_DATA/boot.count"
@@ -103,12 +151,8 @@ sd_do_status() {
     printf '日志级别  %s\n' "$(sd_state_int log_level 3 0 4)"
 }
 
-# ---------- 机器可读状态 ----------
-
-# 供 WebUI / 元模块消费。所有数值先过一遍夹紧，不会吐越界值；
-# 无法读到的字段给 null，前端据此显示"—"而不是 0。
 sd_do_json() {
-    local mode c nc wall aggr curmax curtar sz sname real slim bc mt dm bl sl rj blj slj tgt hz hzn zc _e
+    local mode c nc wall aggr curmax curtar sz sname real slim bc mt dm bl sl rj blj slj tgt hz hzn zc _e src rage dage shv shset _cacheout mmn
     local chg=false _bst=
     mode=$(sd_state_get temp_mode off)
     [ "$mode" = "dyn" ] && mode=static
@@ -117,29 +161,38 @@ sd_do_json() {
     wall=$(sd_state_get wall off)
     aggr=$(sd_state_int aggr 10 0 10)
     curmax=$(sd_state_int curr_max 0 0 8000)
-    sz=$(sd_pick_sentinel)
-    sname=${sz##*/}
+    _sd_lv=3
+    sd_read_real
+    sname=${_sd_rr_zone:-none}
     [ -n "$sname" ] || sname=none
-    real=$(sd_sentinel_temp "$sz" 2>/dev/null)
-    slim=$(sd_limit_for_zone "$sz" 2>/dev/null)
+    real=$_sd_rr_real
+    slim=$_sd_rr_lim
+    src=$_sd_rr_src
+    rage=-1
+    [ "$src" = "cache" ] && rage=$_sd_tl_age
     curtar=$(sd_curr_target 2>/dev/null)
     mt=$(sort -u "$SD_MOUNTS" 2>/dev/null | wc -l | tr -d ' ')
     dm=false; sd_daemon_pid >/dev/null && dm=true
+    dage=-1
+    sd_hb_age && dage=$_sd_rv
     bc=0; read -r bc 2>/dev/null <"$SD_DATA/boot.count"
     case "$bc" in ''|*[!0-9]*) bc=0 ;; esac
 
-    # 「仅充电」档在拔电时是不改写的，面板要能说清"现在到底有没有在改"，
-    # 否则用户看到 charge 模式会以为温度一直被改着。
-    read -r _bst 2>/dev/null <"$SD_PS/battery/status"
-    case "$_bst" in Charging|Full) chg=true ;; esac
+    sd_batt_status_v
+    case "$_sd_rv" in Charging|Full) chg=true ;; esac
 
-    # 当前决策值：面板显示"上报"必须用真实计算出的目标，不能拿 shell_temp 代替
-    # （渐进让步会让 41℃ 真实温度上报 39℃，与基准 30 相差很远）
     tgt=0
+    _cacheout=""
+    if [ "$src" = "cache" ] && [ -n "$_sd_tl_out" ] && [ "$_sd_tl_out" != "-" ]; then
+        _cacheout=$_sd_tl_out
+    fi
     if [ "$mode" = static ] || { [ "$mode" = charge ] && [ "$chg" = true ]; }; then
         sd_shell_target >/dev/null
-        tgt=$_sd_last_out
+        if [ -n "$_cacheout" ]; then tgt=$_cacheout; else tgt=$_sd_last_out; fi
     fi
+    shv=$(sd_state_int shell_temp 30 25 60)
+    shset=$shv
+    [ -n "$_sd_last_base" ] && shv=$_sd_last_base
     hz=$(sd_state_get hz off)
     hzn=0; hzh=0; hzs=off
     case "$hz" in
@@ -152,23 +205,41 @@ sd_do_json() {
     sl=$(sd_state_get sentinel_limit 85); case "$sl" in off) slj='"off"' ;; *) slj=$sl ;; esac
     case "$real" in ''|*[!0-9]*) rj=null ;; *) rj=$real ;; esac
 
-    printf '{"version":"%s","mode":"%s","shell_temp":%s,"target":%s,"aggr":%s,"gap":%s,' \
+    printf '{"version":"%s","mode":"%s","shell_temp":%s,"shell_set":%s,"target":%s,"aggr":%s,"gap":%s,' \
         "$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)" \
-        "$mode" "$(sd_state_int shell_temp 30 25 60)" "$tgt" "$aggr" "$((2 + aggr))"
+        "$mode" "$shv" "$shset" "$tgt" "$aggr" "$((2 + aggr))"
     printf '"wall":"%s","core":"%s","noncore":"%s",' "$wall" "$c" "$nc"
-    printf '"sentinel":"%s","real":%s,"limit":"%s",' "$sname" "$rj" "${slim:-off}"
-    printf '"curr_max":%s,"curr_target":%s,"fast_cap":%s,' \
-        "$curmax" "${curtar:-0}" "$(sd_state_int fast_cap 55 20 90)"
+    printf '"sentinel":"%s","real":%s,"limit":"%s","real_src":"%s","real_age":%s,"real_why":"%s","emul_ok":%s,' \
+        "$sname" "$rj" "${slim:-off}" "$src" "$rage" "${_sd_rr_why:-}" "${_sd_rr_emul:--1}"
+    printf '"curr_max":%s,"curr_target":%s,"curr_edge":%s,"fast_cap":%s,' \
+        "$curmax" "${curtar:-0}" "$(sd_state_int curr_edge 4 0 6)" "$(sd_state_int fast_cap 55 20 90)"
+    [ "$_sd_screen_ticks" -gt 0 ] || sd_screen_tick
+    _sbase=0
+    [ -f "$SD_FCC_NORM" ] && _sbase=$(tr -d '\r\n' <"$SD_FCC_NORM" 2>/dev/null)
+    case "$_sbase" in ''|*[!0-9]*) _sbase=0 ;; esac
+    printf '"screen":%s,"screen_mode":"%s","screen_base":%s,' \
+        "$([ "$_sd_screen_on" = 0 ] && echo 0 || echo 1)" \
+        "$(sd_scr_state)" "$_sbase"
+    printf '"batt_spoof":"%s","batt_real":%s,"thermal":"%s",' \
+        "$(sd_state_get batt_spoof off)" \
+        "$(sd_batt_real_v && printf '%s' "$_sd_rv" || printf 'null')" \
+        "$([ "$(sd_state_get horae 1)" = 0 ] && echo off || echo on)"
     printf '"battery_limit":%s,"sentinel_limit":%s,' "$blj" "$slj"
-    printf '"log_level":%s,"tick":%s,"mounted":%s,"daemon":%s,"boot_count":%s,"safety":%s,' \
+    printf '"log_level":%s,"tick":%s,"mounted":%s,"daemon":%s,"daemon_age":%s,"boot_count":%s,"safety":%s,' \
         "$(sd_state_int log_level 3 0 4)" "$(sd_state_int tick 15 5 300)" \
-        "$mt" "$dm" "$bc" "$([ "$bc" -gt 3 ] && echo true || echo false)"
+        "$mt" "$dm" "$dage" "$bc" "$([ "$bc" -gt 3 ] && echo true || echo false)"
     zc=0; for _e in $_sd_zones; do zc=$((zc + 1)); done
-    printf '"hz":"%s","hz_now":%s,"hz_hard":%s,"hz_state":"%s","charging":%s,"zones":%s}\n' \
-        "$hz" "$hzn" "$hzh" "$hzs" "$chg" "$zc"
+    nmn=0
+    [ -s "$SD_NM_LIST" ] && nmn=$(wc -l <"$SD_NM_LIST" 2>/dev/null | tr -d ' ')
+    case "$nmn" in ''|*[!0-9]*) nmn=0 ;; esac
+    printf '"hz":"%s","hz_now":%s,"hz_hard":%s,"hz_state":"%s","hz_list":"%s","charging":%s,"zones":%s,' \
+        "$hz" "$hzn" "$hzh" "$hzs" "$(_sd_hz_list)" "$chg" "$zc"
+    mmn=""
+    sd_mm_active && mmn=$(sd_mm_name)
+    printf '"mount_mode":"%s","mm_name":"%s","nm_files":%s,"barrier":%s,"base_clamped":%s}\n' \
+        "$(sd_mount_mode)" "$mmn" "$nmn" "${_sd_last_barrier:-0}" \
+        "$([ "$_sd_base_clamped" = 1 ] && echo true || echo false)"
 }
-
-# ---------- 设置 ----------
 
 sd_set_temp() {
     local mode="$1" t="${2:-}"
@@ -182,10 +253,7 @@ sd_set_temp() {
         off)
             sd_shell_emul 0
             sd_state_set temp_mode off
-            # 标记"用户亲手关的"，升级时不再自动打开
             sd_state_set off_manual 1
-            # 不要清零 shell_temp：temp_mode 已经能表达"关闭"，清零会让
-            # 下次开启时 sd_state_int 判定越界、回落 30℃，用户设的温度白丢。
             sd_info cmd "温度模式 → off"
             echo "温度模式 -> off" ;;
         static)
@@ -199,10 +267,8 @@ sd_set_temp() {
         charge)
             sd_state_set temp_mode charge
             sd_state_set off_manual 0
-            # 切到「仅充电」时若没在充电，必须立刻撤掉已经写进去的伪装，
-            # 否则要等下一个 tick 才还原（tick 调到 300 秒时就是 5 分钟）
-            read -r _bst 2>/dev/null <"$SD_PS/battery/status"
-            case "${_bst:-Unknown}" in
+            sd_batt_status_v
+            case "$_sd_rv" in
                 Charging|Full) sd_shell_emul "$t" ;;
                 *)             sd_shell_emul 0 ;;
             esac
@@ -213,26 +279,48 @@ sd_set_temp() {
     sd_ensure_daemon
 }
 
-# 参数先校验再落地。apply 失败还照写 state 会出现"状态显示已设、实际没挂"，
-# 重启后还会再试一次。
 sd_set_scope() {
-    local scope="$1" v="$2" label
+    local scope="$1" v="$2" label e zn
     [ "$scope" = core ] && label=核心 || label=非核心
     if [ "$v" = "off" ]; then
         sd_spoof_clear_scope "$scope"
         sd_state_set "${scope}_temp" off
+        rm -f "$SD_SPOOF_FLAG" 2>/dev/null
         sd_info cmd "$label 伪装 → off"
         echo "$label 伪装 -> 关闭"
         return 0
     fi
     sd_valid_temp "$v" || { echo "温度需为 20~100 的整数，收到: $v"; return 1; }
-    if ! sd_spoof_apply "$scope" "$v"; then
-        echo "没有节点被伪装：本机可能没有匹配节点，或内核不允许 bind mount"
-        echo "  详情: sh $MODDIR/action.sh logs w"
-        return 1
+    if sd_spoof_apply "$scope" "$v"; then
+        sd_state_set "${scope}_temp" "$v"
+        rm -f "$SD_SPOOF_FLAG" 2>/dev/null
+        if [ "${_sd_spoof_fallback:-0}" = 1 ]; then
+            echo "$label 伪装 -> ${v}℃（分类未命中，按节点兜底 ${_sd_spoof_total} 个）"
+        else
+            echo "$label 伪装 -> ${v}℃"
+        fi
+        return 0
     fi
-    sd_state_set "${scope}_temp" "$v"
-    echo "$label 伪装 -> ${v}℃"
+    if [ -z "$_sd_zones" ] || { [ "${_sd_spoof_total:-0}" -eq 0 ] && [ "${_sd_spoof_need:-0}" -gt 0 ]; }; then
+        sd_state_set "${scope}_temp" "$v"
+        sd_spoof_request
+        sd_info cmd "$label 伪装 → ${v}℃（待守护应用，本通道读不到温度节点）"
+        echo "$label 伪装 -> ${v}℃（当前通道读不到温度节点，已交给守护应用）"
+        return 0
+    fi
+    if [ "${_sd_spoof_total:-0}" -eq 0 ]; then
+        zn=0
+        for e in $_sd_zones; do zn=$((zn + 1)); done
+        echo "全表判定: sh $MODDIR/action.sh zones"
+        if [ -n "${_sd_spoof_sample:-}" ]; then
+            echo "$label 伪装失败：本机 $zn 个温区里没有 $scope 类型（样例${_sd_spoof_sample}）"
+        else
+            echo "$label 伪装失败：本机 $zn 个温区里没有 $scope 类型"
+        fi
+    else
+        echo "$label 伪装失败：${_sd_spoof_total} 个候选温区全部被拒（内核禁止 bind mount）"
+    fi
+    return 1
 }
 
 sd_set_aggr() {
@@ -256,7 +344,7 @@ sd_set_pscale() {
 }
 
 sd_set_wall() {
-    local v="$1" bl
+    local v="$1" bl base nb
     if [ "$v" = "off" ] || [ "$v" = "0" ]; then
         sd_state_set wall off
         sd_info cmd "温度墙 → off"
@@ -267,6 +355,15 @@ sd_set_wall() {
     [ "$v" -ge 35 ] && [ "$v" -le 80 ] || { echo "温度墙需为 35~80 的整数或 off"; return 1; }
     bl=$(sd_state_int battery_limit 48 30 70)
     [ "$v" -ge "$bl" ] && echo "注意：墙 ${v}℃ ≥ 电池熔断 ${bl}℃，墙不会生效（熔断先触发）"
+
+    base=$(sd_state_int shell_temp 30 25 60)
+    if [ "$base" -ge "$v" ]; then
+        nb=$((v - 2))
+        [ "$nb" -lt 25 ] && nb=25
+        sd_state_set shell_temp "$nb"
+        sd_info cmd "墙 ${v}℃ ≤ 基准 ${base}℃，基准自动下调 → ${nb}℃"
+        echo "基准 ${base}℃ 不低于墙 ${v}℃，已自动调到 ${nb}℃（否则整个伪装区间为空）"
+    fi
     sd_state_set wall "$v"
     sd_info cmd "温度墙 → ${v}℃"
     echo "温度墙 -> ${v}℃（真实温度达到即停止伪装）"
@@ -275,9 +372,10 @@ sd_set_wall() {
 sd_set_curr() {
     local v="$1" applied
     if [ "$v" = "off" ] || [ "$v" = "0" ]; then
+        sd_curr_restore
         sd_state_set curr_max 0
         sd_info cmd "电流墙 → off"
-        echo "电流墙 -> 关闭"
+        echo "电流墙 -> 关闭，限流节点已还原"
         return 0
     fi
     case "$v" in ''|*[!0-9]*) echo "电流需为 300~8000 的整数（mA）或 off"; return 1 ;; esac
@@ -286,9 +384,6 @@ sd_set_curr() {
     applied=$(sd_curr_target)
     sd_info cmd "电流墙 → ${v}mA（当前允许 ${applied}mA）"
     if [ "$(sd_batt_status)" = "Charging" ]; then
-        # 之前这里调用了一个不存在的 sd_curr_apply，命令直接 "not found"，
-        # 于是面板显示"已更新"但节点一次都没被写过 —— 要等 15~60 秒后
-        # 守护 tick 里的 sd_curr_keep 才可能压回，用户看到的就是"调节无效"。
         if sd_curr_apply "$applied"; then
             echo "电流墙 -> ${v}mA，已写入（当前温度下允许 ${applied}mA）"
         else
@@ -308,6 +403,45 @@ sd_set_fast() {
     echo "快充阈值 -> $1%"
 }
 
+
+sd_set_batt() {
+    local v="$1" real
+    case "$v" in
+        off|0)
+            sd_state_set batt_spoof off
+            sd_spoof_batt_off
+            sd_info cmd "电池 NTC 伪装 → 关闭"
+            echo "电池 NTC 伪装 -> 关闭（电池温度恢复真实）"
+            return 0 ;;
+    esac
+    case "$v" in
+        ''|*[!0-9]*) echo "用法: batt off|20-45"; return 1 ;;
+    esac
+    if [ "$v" -lt 20 ] || [ "$v" -gt 45 ]; then
+        echo "电池伪装只能 20-45℃（上限 45，再高既无意义又危险）"
+        return 1
+    fi
+    if ! sd_batt_real_v; then
+        echo "读不到真实电池温度（power_supply），拒绝开启电池伪装"
+        return 1
+    fi
+    real=$_sd_rv
+    if [ "$real" -ge "$SD_BATT_HARD" ]; then
+        echo "真实电池 ${real}℃ 已 ≥ ${SD_BATT_HARD}℃，先降温再开"
+        return 1
+    fi
+    sd_state_set batt_spoof "$v"
+    if sd_spoof_apply batt "$v" >/dev/null 2>&1; then
+        sd_info cmd "电池 NTC 伪装 → ${v}℃（真实 ${real}℃）"
+        echo "电池 NTC 伪装 -> ${v}℃（真实 ${real}℃；≥${SD_BATT_HARD}℃ 自动撤销）"
+    else
+        echo "电池伪装写入失败：本机电池温区没有可挂载的 temp 节点"
+        sd_state_set batt_spoof off
+        return 1
+    fi
+    return 0
+}
+
 sd_set_limit() {
     local key="$1" v="$2" lo="$3" hi="$4" label="$5" dflt="$6"
     if [ "$v" = "off" ]; then
@@ -322,8 +456,6 @@ sd_set_limit() {
     echo "$label -> ${v}℃（默认 ${dflt}）"
 }
 
-# ---------- 日志 ----------
-
 sd_do_logs() {
     local arg="$1" n="${2:-60}"
     case "$arg" in
@@ -337,8 +469,6 @@ sd_do_logs() {
         *) tail -n "$arg" "$SD_LOG" 2>/dev/null ;;
     esac
 }
-
-# ---------- 交互菜单 ----------
 
 sd_menu_sub() {
     local t
@@ -407,17 +537,18 @@ sd_menu() {
     done
 }
 
-# ---------- 入口 ----------
-
 [ -n "${1:-}" ] && sd_session cmd "命令行: $*"
 
-# 保存命令名：各分支会 shift，末尾判断该不该叫醒守护时 $1 已经变成参数值了
 _CMD="${1:-}"
 
 case "$1" in
     status)  sd_do_status ;;
     json)    sd_do_json ;;
     env)     sd_dump_env; grep '\[env\]' "$SD_LOG" 2>/dev/null | tail -n 4 ;;
+    probe)   sd_probe ;;
+    zones)   sd_zones_report ;;
+    check)   sd_check ;;
+    diag)    shift; sd_diag "${1:-120}" "${2:-2}" ;;
     temp)    shift; sd_set_temp "$@" ;;
     shell)   shift; sd_set_temp static "${1:-}" ;;
     core)    shift; sd_set_scope core "${1:-off}" ;;
@@ -427,11 +558,53 @@ case "$1" in
              v="${1:-}"
              case "$v" in ''|*[!0-9]*) echo "基准温度需为 25~60 的整数"; exit 1 ;; esac
              { [ "$v" -ge 25 ] && [ "$v" -le 60 ]; } || { echo "基准温度需为 25~60 的整数"; exit 1; }
+             w=$(sd_state_get wall off)
+             case "$w" in
+                 off|''|0) ;;
+                 *)
+                     if [ "$v" -ge "$w" ]; then
+                         nb=$((w - 2)); [ "$nb" -lt 25 ] && nb=25
+                         sd_info cmd "基准 ${v}℃ ≥ 墙 ${w}℃，收敛 → ${nb}℃"
+                         echo "基准 ${v}℃ 不低于温度墙 ${w}℃，按 ${nb}℃ 生效（基准必须低于墙，否则全程不改写）"
+                         v=$nb
+                     fi ;;
+             esac
              sd_state_set shell_temp "$v"
              echo "基准温度 -> ${v}℃" ;;
-    restart) sd_daemon_stop; sd_ensure_daemon; echo "守护已重启" ;;
+    restart) sd_daemon_stop
+             if sd_ensure_daemon; then
+                 echo "守护已重启"
+             else
+                 echo "守护启动失败（残留锁已清）。再执行一次 restart；仍失败用 sh action.sh logs e 20 查看原因"
+                 exit 1
+             fi ;;
     wall)    shift; sd_set_wall "${1:-off}" ;;
     curr)    shift; sd_set_curr "${1:-off}" ;;
+    curredge) shift
+             case "${1:-}" in
+                 ''|*[!0-9]*) echo "用法: curredge 0-6（0=顶到墙才降流）"; exit 1 ;;
+             esac
+             [ "$1" -le 6 ] || { echo "用法: curredge 0-6（0=顶到墙才降流）"; exit 1; }
+             sd_state_set curr_edge "$1"
+             if [ "$1" -eq 0 ]; then
+                 echo "限流 -> 顶到墙才降"
+             else
+                 echo "限流 -> 距墙 $1℃ 开始降"
+             fi ;;
+    boost)   shift
+             case "${1:-on}" in
+                 on|1)
+                     sd_state_set curr_edge 0
+                     sd_state_set aggr 10
+                     sd_state_set fast_cap 85
+                     echo "暴力模式 -> 开启（顶墙才降流 · 档位 10 · 快充阈值 85%）" ;;
+                 off|0)
+                     sd_state_set curr_edge 4
+                     sd_state_set aggr 10
+                     sd_state_set fast_cap 55
+                     echo "暴力模式 -> 关闭（距墙 4℃ 降流 · 档位 10 · 快充阈值 55%）" ;;
+                 *)  echo "用法: boost on|off"; exit 1 ;;
+             esac ;;
     hz)      shift; sd_hz_set "${1:-}" "${2:-}" ;;
     hzguard) shift
              case "${1:-}" in
@@ -456,26 +629,41 @@ case "$1" in
     fast)    shift; sd_set_fast "${1:-55}" ;;
     sentinel) shift; sd_set_limit sentinel_limit "${1:-85}" 60 110 "SoC 哨兵" 85 ;;
     battery)  shift; sd_set_limit battery_limit  "${1:-48}" 30 70  "电池哨兵" 48 ;;
-    horae)   shift; sd_horae "$1"; sd_state_set horae "$1" ;;
+    batt)     shift; sd_set_batt "${1:-off}" ;;
+    thermal)  shift
+              case "${1:-}" in
+                  on|1)  sd_horae 1; sd_state_set horae 1; echo "系统热管理 -> 开启" ;;
+                  off|0) sd_horae 0; sd_state_set horae 0; echo "系统热管理 -> 停止（horae 已关，温度不再触发系统降频）" ;;
+                  *)     echo "用法: thermal on|off"; exit 1 ;;
+              esac ;;
+    cells)    shift
+              case "${1:-auto}" in
+                  auto|1|2) sd_state_set cells_mode "${1:-auto}"
+                            echo "电芯数: ${1:-auto}（auto=按 bcc_parms 自动判断）" ;;
+                  *)        echo "用法: cells auto|1|2"; exit 1 ;;
+              esac ;;
+    horae)   shift
+             case "${1:-}" in
+                 0|1) sd_horae "$1"; sd_state_set horae "$1"
+                       echo "horae -> $([ "$1" = 1 ] && echo 开启 || echo 停止)" ;;
+                 *)   echo "用法: horae 0|1"; exit 1 ;;
+             esac ;;
     level)   shift
              case "${1:-3}" in
                  0|1|2|3|4) sd_state_set log_level "$1"; echo "日志级别 -> $1" ;;
                  *) echo "级别需为 0~4"; exit 1 ;;
              esac ;;
     logs)    shift; sd_do_logs "${1:-i}" "${2:-60}" ;;
-    charge-force) sd_charge_renegotiate ;;
     mount)   sd_mount_overrides ;;
-    umount)  sd_umount_overrides ;;
+    umount)  sd_umount_overrides purge ;;
     reboot-safe)
         printf '0\n' >"$SD_DATA/boot.count"
-        sd_umount_overrides      # 必须先解挂，否则下面读到的是上次的假文件
+        sd_umount_overrides
         sd_build_overrides
         sd_mount_overrides
         sd_info cmd "已退出安全模式并重新挂载"
         echo "已退出安全模式并重新挂载" ;;
     rebuild)
-        # 关键顺序：先解挂再重建。挂载状态下重建会读到自己上次生成的假文件，
-        # 把改动叠加一次（充电曲线 +120 会变成 +240）。
         sd_umount_overrides
         rm -f "$SD_BUILT"
         sd_build_overrides
@@ -484,42 +672,42 @@ case "$1" in
         sd_daemon_stop
         sd_spoof_clear
         sd_shell_emul 0
-        sd_umount_overrides
+        sd_umount_overrides purge
         sd_horae 1
         printf '0\n' 2>/dev/null >"$SD_DATA/boot.count"
         rm -f "$SD_STATE"
         sd_info cmd "已恢复初始状态"
         echo "已恢复初始状态，建议重启" ;;
     "")
-        if [ -t 0 ]; then
-            sd_menu
-        else
-            sd_do_status
-            echo
-            echo "非交互环境：用 sh action.sh <命令> 配置，sh action.sh 查看帮助"
-        fi ;;
+        sd_do_status
+        echo
+        echo "配置请打开模块的 WebUI（管理器里点模块 → 打开）。"
+        echo "命令行：sh action.sh <命令>，全部命令见 sh action.sh help"
+        ;;
+    menu)    [ -t 0 ] && sd_menu || {
+        echo "当前环境没有终端，交互菜单不可用。"
+        echo "请用 WebUI，或 sh action.sh <命令> 直接设置。"
+        exit 1
+    } ;;
+    help)
+        sd_usage
+        ;;
     *)
         echo "未知命令: $1"
         echo
-        awk 'NR>=3 { if (/^#/) { print; next } if ($0 == "") next; exit }' "$0"
+        sd_usage
         exit 1 ;;
 esac
 
-# 参数类命令写完后立刻叫醒守护，不必等下一个 tick（最长 15 秒）。
-# 守护没在跑时 sd_daemon_kick 静默返回。
-# 退出码必须沿用命令本身的结果：WebUI 靠它判断成败，kick 把它覆盖成 0
-# 会让 "aggr 11" 这种被拒绝的输入看起来成功。
 _rc=$?
-# hz / hzguard 也要 kick：守护的高刷看护只在 hard 档工作，开关切换后要立刻
-# 进入/退出看护，否则最长要等一个 tick 才生效。
 case "$_CMD" in
-    temp|shell|core|noncore|gear|aggr|base|wall|curr|fast|sentinel|battery|horae|level|hz|hzguard)
+    temp|shell|core|noncore|gear|aggr|base|wall|curr|curredge|boost|fast|screen|sentinel|battery|horae|level|hz|hzguard)
+        sd_ensure_daemon >/dev/null 2>&1
         sd_daemon_kick ;;
 esac
-# 描述同步与 kick 分开列。只读命令（status/json/power/logs）一律跳过 ——
-# 改 module.prop 有写盘成本。
 case "$_CMD" in
-    temp|shell|core|noncore|gear|aggr|base|wall|curr|fast|sentinel|battery|horae|level|hz|hzguard)
+    temp|shell|core|noncore|gear|aggr|base|wall|curr|curredge|boost|fast|screen|sentinel|battery|horae|level|hz|hzguard|\
+    mount|umount|rebuild|reboot-safe|reset)
         [ "$_rc" = "0" ] && sd_sync_desc ;;
 esac
 exit "$_rc"

@@ -1,5 +1,4 @@
 #!/system/bin/sh
-# 安装脚本。只做设备检测、生成覆盖层、初始化参数，不做交互（菜单在 action.sh）。
 
 SKIPMOUNT=true
 PROPFILE=false
@@ -14,27 +13,24 @@ fi
 [ -f "$MODDIR/lib/qc.sh" ] || { echo "找不到 lib/qc.sh" >&2; exit 1; }
 . "$MODDIR/lib/qc.sh"
 
-SD_VERBOSE=1
+SD_VERBOSE=
+
+SD_QQ_URL="https://qun.qq.com/universal-share/share?ac=1&authKey=sxretTuuUbT6DSq6WUsRcAhqpzEtEmLdUgjcJW5EFkih769NPI7mFOtBWBsiLb56&busi_data=eyJncm91cENvZGUiOiIxMDAzNDgxNjYwIiwidG9rZW4iOiJnaGZRMVVNSCtOZFNyWUV4cEk2bU9Jd05neVpwUmVkOTIxV3VpcVRwS2Iram1rNC81TmtnNUJ3MjRxYm9JcGJEIiwidWluIjoiMjExMTgzNTIyMCJ9&data=Gr9CwynFwy41T0Lgv3epv7_E3bgXVe1lKsqwWOnF338a3I7veanebrcFNu2aJI8_5AZAHr7NXTdhgkf2iFtq-g&svctype=4&tempid=h5_group_info"
 
 ui_print "*******************************"
 ui_print "  Quick Charge (QC)  v$(grep '^version=' "$MODDIR/module.prop" | cut -d= -f2)"
-ui_print "  by https://github.com/XiaohaoQvQ"
+ui_print "  by Xiaohao"
 ui_print "  代码由 AI 辅助完成"
 ui_print "*******************************"
 
-# ---------- 设备 ----------
-
 DEV_MFR=$(getprop ro.product.odm.manufacturer)
-# 部分机型 odm 属性为空，逐级回退，避免把欧加真误判成"其他厂商"直接拦掉
 [ -n "$DEV_MFR" ] || DEV_MFR=$(getprop ro.product.vendor.manufacturer)
 [ -n "$DEV_MFR" ] || DEV_MFR=$(getprop ro.product.manufacturer)
 DEV_MODEL=$(getprop ro.vendor.oplus.market.name)
 DEV_SOC=$(getprop ro.soc.model | tr 'a-z' 'A-Z')
 
-ui_print "- 机型 : ${DEV_MODEL:-未知} ($(getprop ro.product.model))"
-ui_print "- 厂商 : ${DEV_MFR:-未知}"
-ui_print "- SoC  : ${DEV_SOC:-未知}"
-ui_print "- 系统 : Android $(getprop ro.build.version.release) / 补丁 $(getprop ro.build.version.security_patch)"
+ui_print "- 机型: ${DEV_MODEL:-未知} ($(getprop ro.product.model))"
+ui_print "- 平台: ${DEV_SOC:-未知} · Android $(getprop ro.build.version.release) · 补丁 $(getprop ro.build.version.security_patch)"
 
 case "$DEV_MFR" in
     OPPO|oppo|OnePlus|oneplus|realme|Realme) ;;
@@ -46,17 +42,11 @@ case "$DEV_MFR" in
         ;;
 esac
 
-# ---------- 依赖 ----------
-
 for bin in mount umount sed awk; do
     command -v "$bin" >/dev/null 2>&1 || { ui_print "! 缺少 $bin，中止安装"; exit 1; }
 done
 
-# ---------- 生成覆盖层 ----------
-
 ui_print "- 扫描并改写系统温控/充电配置…"
-# 覆盖安装时上一版挂载可能还在，必须先解挂再读，否则把改过一次的文件
-# 当原件再改一遍（充电曲线会叠加成 +240）
 sd_state_load
 sd_zone_scan
 sd_umount_overrides
@@ -69,17 +59,29 @@ if [ "$n" -eq 0 ]; then
     ui_print "! 模块仍会安装，但只有运行时温度伪装可用"
 else
     ui_print "- 已生成 $n 个覆盖文件"
-    find "$SD_OVERRIDES" -type f 2>/dev/null | sed "s|$SD_OVERRIDES||" | while IFS= read -r f; do
-        ui_print "    $f"
-    done
 fi
 
-# ---------- 默认参数 ----------
-# 默认策略：42℃ 以下全力伪装，到 42℃ 立即收手。
-#   shell_temp=30  基准压到允许值，温差才有空间拉开
-#   aggr=10        可拉开温差 = 2 + 10 = 12℃
-#   wall=42        真实温度到达即关闭模拟，交还系统
-# 三者关系：42℃ 以下实际温差 = min(12, 42 - 真实)，30℃ 时已顶满 12℃。
+if sd_nm_active; then
+    sd_nm_mirror
+    rc=$?
+    if [ "$rc" -ne 2 ]; then
+        nl=$(wc -l <"$SD_NM_LIST" 2>/dev/null | tr -d ' ')
+        ui_print "- NoMount 注入文件 ${nl:-0} 个（无挂载）"
+    else
+        ui_print "! NoMount 镜像写入失败，重启后会改用 bind mount"
+    fi
+elif sd_mm_active; then
+    mmn=$(sd_mm_name)
+    sd_nm_mirror
+    rc=$?
+    if [ "$rc" -ne 2 ]; then
+        nl=$(wc -l <"$SD_NM_LIST" 2>/dev/null | tr -d ' ')
+        ui_print "- $mmn 交付文件 ${nl:-0} 个（重启后由它挂载）"
+    else
+        ui_print "! $mmn 镜像写入失败，重启后会改用 bind mount"
+    fi
+fi
+
 SD_DEFAULTS="temp_mode=charge
 shell_temp=30
 core_temp=off
@@ -94,11 +96,11 @@ aggr=10
 curr_max=0
 hz=off
 power_scale=100
+cells_mode=auto
 off_manual=0
 log_level=3
 tick=15"
 
-# 逐键补齐，不整文件覆盖 —— 后者会把用户调好的参数全清掉
 [ -f "$SD_STATE" ] || : >"$SD_STATE"
 OLD_IFS=$IFS
 IFS='
@@ -112,24 +114,22 @@ for kv in $SD_DEFAULTS; do
 done
 IFS=$OLD_IFS
 
-# ---------- 默认值迁移 ----------
-# 逐键补齐只补"缺失的键"。老用户升级时 wall/aggr/shell_temp 已存在，
-# 永远拿不到新默认，所以按旧默认精确识别后升级一次。
-# 只改"仍等于旧默认"的键，用户手动调过的一律保留。
 _sd_st_loaded=0
-defrev=$(sd_state_get defrev 1)
-case "$defrev" in ''|*[!0-9]*) defrev=1 ;; esac
+if grep -q '^defrev=' "$SD_STATE" 2>/dev/null; then
+    defrev=$(sd_state_get defrev 3)
+    case "$defrev" in ''|*[!0-9]*) defrev=3 ;; esac
+else
+    sd_state_set defrev 3
+    defrev=3
+fi
 if [ "$defrev" -lt 2 ]; then
     migrated=""
     [ "$(sd_state_get wall off)" = "off" ] && { sd_state_set wall 42; migrated="$migrated wall"; }
     [ "$(sd_state_get aggr 5)" = "5" ] && { sd_state_set aggr 10; migrated="$migrated aggr"; }
-    # 只迁 0（从未设置）。38 是旧菜单首项，视为用户主动选择，保留。
     [ "$(sd_state_get shell_temp 0)" = "0" ] && { sd_state_set shell_temp 30; migrated="$migrated shell_temp"; }
     sd_state_set defrev 2
     [ -n "$migrated" ] && ui_print "- 切换到新默认: 42℃ 以下最猛（$migrated）"
 fi
-# defrev 3：默认从"关"改为"仅充电时自动生效"。
-# 只迁移从未手动关过的用户（off_manual 缺省 0）；手动关过的不动。
 if [ "$defrev" -lt 3 ]; then
     if [ "$(sd_state_get temp_mode off)" = "off" ] \
         && [ "$(sd_state_get off_manual 0)" = "0" ]; then
@@ -139,23 +139,20 @@ if [ "$defrev" -lt 3 ]; then
     sd_state_set defrev 3
 fi
 
-# 旧版的 dyn 模式依赖每 tick dumpsys，已并入 static
 [ "$(sd_state_get temp_mode off)" = "dyn" ] && {
     sd_state_set temp_mode static
     ui_print "- 旧 dyn 模式已并入 static"
 }
 
-ui_print "- 参数: aggr=$(sd_state_get aggr 10) wall=$(sd_state_get wall 42) curr_max=$(sd_state_get curr_max 0)"
-# 告诉用户重启后会发生什么，避免装完发现"没反应"又不知道去哪开
 case "$(sd_state_get temp_mode off)" in
-    charge) ui_print "- 温度改写: 仅充电时生效，重启后自动启动，无需手动开启" ;;
+    charge) ui_print "- 温度改写: 仅充电时生效，重启后自动启动" ;;
     static) ui_print "- 温度改写: 全场景生效，重启后自动启动" ;;
-    off)    ui_print "- 温度改写: 已关闭（手动关过），可在 WebUI 打开" ;;
+    off)    ui_print "- 温度改写: 已关闭，可在 WebUI 打开" ;;
 esac
 
-printf '%s\n' "$MODDIR" 2>/dev/null >"$SD_DATA/moddir"
+ui_print "- 亮屏快充: 内置常开，亮屏不再按屏幕状态降档；息屏保留 +2℃"
 
-# ---------- 冲突提示 ----------
+printf '%s\n' "$MODDIR" 2>/dev/null >"$SD_DATA/moddir"
 
 for m in /data/adb/modules/*; do
     [ -f "$m/module.prop" ] || continue
@@ -165,16 +162,16 @@ for m in /data/adb/modules/*; do
     fi
 done
 
+sd_sync_desc
+
 ui_print "- 安装完成，重启后生效"
 ui_print "    状态: sh $MODDIR/action.sh status"
 ui_print "    配置: sh $MODDIR/action.sh temp static     # 开温度伪装"
-ui_print ""
-ui_print "- 关注作者: https://www.coolapk.com/u/27316679"
+ui_print "- 作者: Xiaohao ｜ QQ群: 点击链接加入群聊【Quick Charge】"
+sd_dbg install "QQ群 $SD_QQ_URL"
 
-# 刷写完成后拉起浏览器。后台执行 + 1 秒等待：recovery 或 system 未就绪时
-# am 可能长时间不返回，不能让它拖住安装流程。
 if command -v am >/dev/null 2>&1; then
     ( am start -a android.intent.action.VIEW \
-        -d "https://www.coolapk.com/u/27316679" >/dev/null 2>&1 ) &
+        -d "$SD_QQ_URL" >/dev/null 2>&1 ) &
     sleep 1
 fi

@@ -1,8 +1,4 @@
 #!/system/bin/sh
-# 卸载脚本。目标：卸载后系统回到安装前的样子，不留挂载、不留进程、不留数据。
-#
-# 本脚本不引用 lib/ —— 那时模块目录可能已被 Magisk 移走，
-# 所以路径常量和卸载逻辑都在这里自带一份。
 
 SD_DATA="${SD_DATA:-/data/adb/quickcharge}"
 case "$SD_DATA" in ""|/|/data|/data/adb|/data/adb/) SD_DATA=/data/adb/quickcharge ;; esac
@@ -10,52 +6,41 @@ case "$SD_DATA" in ""|/|/data|/data/adb|/data/adb/) SD_DATA=/data/adb/quickcharg
 SD_MOUNTS="$SD_DATA/mounts.list"
 SD_RUN="$SD_DATA/run"
 
-# 模块目录：优先用安装时记录的位置，其次按本脚本自身路径推导
 MODDIR=""
 read -r MODDIR 2>/dev/null <"$SD_DATA/moddir"
 if [ -z "$MODDIR" ] || [ ! -d "$MODDIR/files" ]; then
     MODDIR=$(cd "${0%/*}" 2>/dev/null && pwd)
 fi
 
-# ---------- 1. 停守护 ----------
-# 必须校验 pid：daemon.pid 损坏成 1 时会直接杀掉 init，表现为"卸载模块导致重启"。
 pid=""
 read -r pid 2>/dev/null <"$SD_RUN/daemon.pid"
 case "$pid" in
     ''|*[!0-9]*) ;;
     *)
         if [ "$pid" -gt 1 ] && kill -0 "$pid" 2>/dev/null; then
-            kill -TERM "$pid" 2>/dev/null
-            i=0
-            while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
-                sleep 0.1
-                i=$((i + 1))
-            done
-            kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+            if [ -r "/proc/$pid/cmdline" ] && ! grep -q "service\.sh" "/proc/$pid/cmdline" 2>/dev/null; then
+                :
+            else
+                kill -TERM "$pid" 2>/dev/null
+                i=0
+                while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+                    sleep 0.1
+                    i=$((i + 1))
+                done
+                kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+            fi
         fi
         ;;
 esac
 rm -rf "$SD_RUN/daemon.lock" "$SD_RUN/daemon.pid" 2>/dev/null
 
-# ---------- 2. 卸配置覆盖 ----------
-# 两个来源：
-#   a) mounts.list —— 挂载记录
-#   b) 覆盖层目录反推 —— 清单丢失/截断时的兜底，否则不知道往哪卸，只能重启
-#
-# 反推按「目标路径精确匹配」，不看挂载源：源列在不同存储栈上表示不一致
-# （overlay 环境直接显示 overlay），不可依赖。
-# 只卸确实出现在 /proc/mounts 里的路径，不会误动其它模块的挂载。
 unmount_one() {
     [ -n "$1" ] || return 0
-    # 普通 umount 优先。lazy 不立即生效，随后的 rm -rf 会让挂载点指向
-    # 已删除的 inode，表现就是"模块已卸载但配置还是改过的"。
     umount "$1" 2>/dev/null || umount -l "$1" 2>/dev/null
 }
 
 if [ -s "$SD_MOUNTS" ]; then
     sort -u "$SD_MOUNTS" 2>/dev/null | while IFS= read -r p; do
-        # 清单只应记录文件型挂载点。被写入 /vendor、/data 这类目录时，
-        # umount 会卸掉整个分区 —— 卸载脚本反而成了破坏源。
         case "$p" in /*) [ -f "$p" ] || continue ;; *) continue ;; esac
         unmount_one "$p"
     done
@@ -70,15 +55,20 @@ if [ -n "$MODDIR" ] && [ -d "$MODDIR/files" ]; then
       done )
 fi
 
-# ---------- 3. 撤销温度伪装 ----------
-# emul_temp 写 0 = 关闭模拟；temp 节点的 bind mount 逐个卸掉。
 for z in /sys/class/thermal/thermal_zone*; do
     [ -d "$z" ] || continue
     [ -e "$z/emul_temp" ] && printf '0\n' 2>/dev/null >"$z/emul_temp"
     unmount_one "$z/temp"
 done
 
-# OPPO 私有节点：10 个壳温通道全部归零
+for d in /dev/qc "${SD_SPOOF_DIR:-}"; do
+    [ -n "$d" ] && [ -d "$d" ] || continue
+    for f in "$d"/*.temp; do
+        [ -f "$f" ] && rm -f "$f" 2>/dev/null
+    done
+    rmdir "$d" 2>/dev/null
+done
+
 if [ -e /proc/shell-temp ]; then
     t=0
     while [ "$t" -le 9 ]; do
@@ -87,8 +77,78 @@ if [ -e /proc/shell-temp ]; then
     done
 fi
 
-# ---------- 4. 清理数据 ----------
-# 备份目录一并删除。想保留原始配置做排查，注释掉这一行。
+if [ -d /data/adb/modules/meta-nomount ] || [ -d /data/adb/modules/nomount ]; then
+    for b in \
+        /data/adb/modules/meta-nomount/bin/arm64-v8a/nomount \
+        /data/adb/modules/nomount/bin/arm64-v8a/nomount
+    do
+        [ -x "$b" ] || continue
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 20 "$b" reload >/dev/null 2>&1
+        else
+            "$b" reload >/dev/null 2>&1
+        fi
+        break
+    done
+fi
+
+ST="$SD_DATA/state.conf"
+if [ -f "$ST" ]; then
+    sget() { sed -n "s/^$1=//p" "$ST" | tail -n 1; }
+    if command -v settings >/dev/null 2>&1; then
+        p=$(sget hz_prev_peak)
+        m=$(sget hz_prev_min)
+        case "$p" in
+            ''|null|*[!0-9.]*) settings delete system peak_refresh_rate 2>/dev/null ;;
+            *)                  settings put system peak_refresh_rate "$p" 2>/dev/null ;;
+        esac
+        case "$m" in
+            ''|null|*[!0-9.]*) settings delete system min_refresh_rate 2>/dev/null ;;
+            *)                  settings put system min_refresh_rate "$m" 2>/dev/null ;;
+        esac
+        pm=$(sget hz_prev_mcfr)
+        case "$pm" in
+            ''|none)
+                settings delete secure match_content_frame_rate 2>/dev/null
+                command -v cmd >/dev/null 2>&1 && \
+                    cmd display set-match-content-frame-rate-policy 2 >/dev/null 2>&1 ;;
+            1|2|3)
+                settings put secure match_content_frame_rate "$pm" 2>/dev/null
+                command -v cmd >/dev/null 2>&1 && \
+                    cmd display set-match-content-frame-rate-policy "$pm" >/dev/null 2>&1 ;;
+            *)
+                settings put secure match_content_frame_rate 2 2>/dev/null
+                command -v cmd >/dev/null 2>&1 && \
+                    cmd display set-match-content-frame-rate-policy 2 >/dev/null 2>&1 ;;
+        esac
+    fi
+    if [ "$(sget horae)" = "0" ] && command -v setprop >/dev/null 2>&1; then
+        setprop persist.sys.horae.enable 1 2>/dev/null
+        command -v start >/dev/null 2>&1 && start horae 2>/dev/null
+    fi
+fi
+
+if [ -f "$SD_RUN/curr.orig" ]; then
+    while IFS='|' read -r p o; do
+        [ -n "$p" ] && [ -e "$p" ] || continue
+        printf '%s\n' "$o" 2>/dev/null >"$p"
+    done <"$SD_RUN/curr.orig"
+fi
+
+# 亮屏快充：屏幕状态参数先复位，再按 scr.orig 还原被回写过的节点
+for p in /sys/module/oplus_chg/parameters/ignore_screen_state \
+         /sys/module/oplus_chg_v2/parameters/ignore_screen_state \
+         /sys/module/oplus_charge/parameters/ignore_screen_state \
+         /sys/module/oplus_chg/parameters/chg_ignore_screen_state; do
+    [ -e "$p" ] && printf '0\n' 2>/dev/null >"$p"
+done
+if [ -f "$SD_RUN/scr.orig" ]; then
+    while IFS='|' read -r p o; do
+        [ -n "$p" ] && [ -e "$p" ] || continue
+        printf '%s\n' "$o" 2>/dev/null >"$p"
+    done <"$SD_RUN/scr.orig"
+fi
+
 rm -rf "$SD_DATA" 2>/dev/null
 
 exit 0

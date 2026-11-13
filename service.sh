@@ -1,11 +1,4 @@
 #!/system/bin/sh
-# service 阶段：恢复上次策略，拉起单进程守护。
-#
-# 守护设计：
-#   * 单进程单循环，状态分发；停止只需 kill 一个 pid。
-#   * 每 tick 只做一次 state.conf 的 read 循环 + 一次传感器 read，
-#     不调用任何外部命令（不 cat / grep / sed），15 秒周期下 CPU 占用接近 0。
-#   * zone 表缓存在内存，每 40 tick 重扫一次，兼顾热插拔。
 
 MODDIR="${SD_MODDIR:-}"
 if [ -z "$MODDIR" ]; then
@@ -20,35 +13,33 @@ fi
 
 . "$MODDIR/lib/qc.sh"
 
-# 阶段守卫：service 会等 boot_completed（最长 60 秒）。被误在 post-fs-data
-# 阶段同步调用时，这 60 秒就是实打实的开机卡顿。
 if [ "${SD_PHASE:-}" = "post-fs-data" ]; then
     sd_warn boot "拒绝执行：service.sh 不能在 post-fs-data 阶段运行"
     echo "QC: service.sh 不能在 post-fs-data 阶段运行，已跳过" >&2
     exit 0
 fi
 
-# ---------- 恢复状态 ----------
+_boot_ts=$(sd_boot_ts)
+if [ -f "$SD_LOG" ] && [ "$(sd_file_mtime "$SD_LOG")" -lt "$_boot_ts" ]; then
+    sd_log_reset
+    sd_info boot "清理上一轮日志（post-fs-data 未执行）"
+fi
+rm -f "$SD_RUN/curr.want" "$SD_RUN/hb" "$SD_RUN/sensor" 2>/dev/null
 
 sd_apply_state() {
     local mode c nc
     sd_state_load
     mode=$(sd_state_get temp_mode off)
 
-    # dyn 是旧版的"仅游戏时伪装"，依赖每 tick dumpsys，开销大且收益有限，
-    # 已并入 static（temp 伪装本身几乎不耗电）。老 state 直接迁移。
     [ "$mode" = "dyn" ] && { mode=static; sd_state_set temp_mode static; }
     case "$mode" in
         static) sd_horae "$(sd_state_get horae 1)"; sd_shell_emul "$(sd_shell_target)" ;;
         charge)
-            # 开机时若正在充电，别等第一个 tick（最长 300 秒）才伪装
-            sd_horae 1
+            sd_horae "$(sd_state_get horae 1)"
             sd_charge_tick ;;
 
     esac
 
-    # 核心/非核心是持久 bind mount，重启后必须重建。
-    # 历史版本可能写下过非法值，这里顺手纠正，避免每次开机白试一遍。
     c=$(sd_state_get core_temp off)
     case "$c" in
         ''|off) ;;
@@ -63,35 +54,38 @@ sd_apply_state() {
            else sd_warn state "noncore_temp 非法($nc)，重置 off"; sd_state_set noncore_temp off; fi ;;
     esac
 
-    # settings 是持久的，正常重启不用重写；这里只处理被系统/OTA 重置的情况
     sd_hz_boot
+    sd_batt_sp_guard
+    sd_screen_tick
+    sd_scr_tick
     sd_sync_desc
 
     sd_info boot "状态恢复: temp=$mode core=$c noncore=$nc hz=$(sd_state_get hz off)"
 }
 
-# ---------- 守护 ----------
-
 sd_daemon() {
-    local lock="$SD_RUN/daemon.lock" holder tick wall aggr
+    local lock="$SD_RUN/daemon.lock" holder tick
     local mode last_mode="" cnt=0 _hzr=0 _hz_n=0
     local _log_out="" _log_cnt=0
+    local _bst=""
     _sd_sp=""
     _sd_reload=0
 
-    # mkdir 是原子的。先读 pidfile 再判断在两进程同时启动时都会通过检查，
-    # 结果拉起两个守护而 pidfile 只记得最后一个 —— 卸载就漏杀。
+    mkdir -p "$SD_RUN" 2>/dev/null
+
     if ! mkdir "$lock" 2>/dev/null; then
         read -r holder 2>/dev/null <"$lock/pid"
-        if sd_pid_alive "$holder"; then
+        if sd_pid_is_daemon "$holder"; then
             sd_info daemon "已有守护在运行(pid=$holder)，本实例退出"
             exit 0
         fi
+        sd_info daemon "清理残留锁(pid=${holder:-空} 已不是守护)"
         rm -rf "$lock" 2>/dev/null
         mkdir "$lock" 2>/dev/null || exit 0
     fi
     printf '%s\n' "$$" >"$lock/pid"
     printf '%s\n' "$$" >"$SD_RUN/daemon.pid"
+    sd_hb_write
 
     sd_state_load
     sd_zone_scan
@@ -100,19 +94,13 @@ sd_daemon() {
 
     trap 'sd_info daemon "收到 TERM，退出"; rm -rf "$SD_RUN/daemon.lock"; rm -f "$SD_RUN/daemon.pid"; exit 0' TERM INT
 
-    # USR1：参数被改过，打断 sleep 立刻进入下一轮。默认动作是终止进程，
-    # 必须显式接管，否则 WebUI 一改参数守护就没了。
     trap 'sd_info daemon "收到重载信号，立即刷新参数"; [ -n "${_sd_sp:-}" ] && kill "$_sd_sp" 2>/dev/null; _sd_reload=1' USR1
 
     sd_wait_boot || sd_warn daemon "等待 boot_completed 超时，继续启动"
 
     tick=$(sd_state_int tick 15 5 300)
-    wall=$(sd_state_get wall off)
-    aggr=$(sd_state_int aggr 10 0 10)
-    sd_info daemon "循环参数: tick=${tick}s wall=${wall} aggr=${aggr} curr_max=$(sd_state_get curr_max 0)"
+    sd_info daemon "循环参数: tick=${tick}s wall=$(sd_state_get wall off) aggr=$(sd_state_int aggr 10 0 10) curr_max=$(sd_state_get curr_max 0)"
 
-    # sleep 放后台再 wait：收到信号时 wait 立即返回，sleep 子进程被 kill，
-    # 不必等满 15 秒。直接把 sleep 放前台的话信号会一直压到它睡完。
     _sd_pause() {
         sleep "$1" & _sd_sp=$!
         wait $_sd_sp 2>/dev/null
@@ -120,27 +108,44 @@ sd_daemon() {
     }
 
     while :; do
-        # 每 tick 重新读 state：用户改完参数最多等一个 tick 生效，不用重启守护。
-        # read 循环是内建的，不产生 fork。
         sd_state_load
         if [ "$_sd_reload" = 1 ]; then
             _sd_reload=0
             tick=$(sd_state_int tick 15 5 300)
-            wall=$(sd_state_get wall off)
-            aggr=$(sd_state_int aggr 10 0 10)
         fi
 
-        # 模块被删除后自己退出，不用等重启
         if [ ! -f "$MODDIR/service.sh" ]; then
             sd_info daemon "模块目录已移除，守护退出"
             break
         fi
 
-        # zone 表定期重扫：传感器可能在启动后才注册
         cnt=$((cnt + 1))
-        [ $((cnt % 40)) -eq 0 ] && sd_zone_scan
+        if [ -z "$_sd_zones" ] || [ "$_sd_temp_fail" -ge 2 ] || [ $((cnt % 40)) -eq 0 ]; then
+            sd_zone_scan
+            _sd_temp_fail=0
+        fi
+
+        sd_screen_tick
+
+        sd_batt_status_v
+        case "$_sd_rv" in Charging|Full) sd_curr_keep ;; esac
+        sd_scr_tick
+
+        sd_spoof_pending
+        sd_batt_sp_guard
 
         if ! sd_sentinel_guard; then
+            _sd_last_out=0
+            if sd_pick_sentinel_v; then
+                _sd_last_zone=${_sd_rv##*/}
+                if sd_sentinel_temp_v "$_sd_rv"; then
+                    _sd_last_cur=$_sd_rv
+                    sd_limit_for_type_v "$_sd_sent_type"
+                    case "$_sd_rv" in ''|0|off) _sd_last_lim="" ;; *) _sd_last_lim=$_sd_rv ;; esac
+                fi
+            fi
+            sd_hb_write
+            sd_telemetry_write
             _sd_pause "$tick"
             continue
         fi
@@ -149,27 +154,17 @@ sd_daemon() {
         if [ "$mode" != "$last_mode" ]; then
             sd_info daemon "温度模式: ${last_mode:-<无>} → $mode"
             last_mode=$mode
-            wall=$(sd_state_get wall off)
-            aggr=$(sd_state_int aggr 10 0 10)
             _sd_emul_last=""
-            # 模式变了描述必须跟着变（熔断会把它改成 off）
+            _sd_wall_hold=0
             sd_sync_desc
         fi
 
-        # 参数（档位 / 高刷 / 挂载数）改动后描述会变，但没必要每 tick 比一次；
-        # 约 3 分钟对一次，负载可忽略。sd_sync_desc 内部会比对，相同就不写盘。
         [ $((cnt % 12)) -eq 3 ] && sd_sync_desc
 
         case "$mode" in
             static)
-                # 不用 $(...) 取返回值：命令替换是子 shell，会把 _sd_last_cur
-                # 一起关在里面；直接调用还能省掉每 tick 一次 fork。
                 sd_shell_target >/dev/null
                 sd_shell_emul "$_sd_last_out"
-                # 只在"上报温度变了"时记一条；数值长期不动就不再刷日志。
-                # 原先固定每分钟一条，一天 1440 行、约 90KB 闪存写入，
-                # 而其中绝大多数是重复值。现在变化即记，再加 15 分钟兜底一条，
-                # 稳定工况下约 96 行/天，排查时仍有完整的时间线。
                 if [ "$_sd_last_out" != "$_log_out" ]; then
                     sd_info daemon "伪装 真实=${_sd_last_cur:-?}℃ 上报=${_sd_last_out:-0}℃ 墙=${_st_wall:-off}"
                     _log_out=$_sd_last_out
@@ -185,10 +180,21 @@ sd_daemon() {
             charge)
                 sd_charge_tick
                 ;;
+            off)
+                _sd_last_cur=""
+                _sd_last_out=0
+                _sd_last_lim=""
+                _sd_last_zone=""
+                if sd_pick_sentinel_v; then
+                    _sd_last_zone=${_sd_rv##*/}
+                    sd_sentinel_temp_v "$_sd_rv" && _sd_last_cur=$_sd_rv
+                fi
+                ;;
         esac
 
-        # 高刷看护。soft 档在 sd_hz_guard 里第一行就返回，不产生任何 fork；
-        # hard 档每 tick 两次 settings get，约 80ms/15s。
+        sd_hb_write
+        sd_telemetry_write
+
         sd_hz_guard; _hzr=$?
         case "$_hzr" in
             1)  _hz_n=$((_hz_n + 1))
@@ -203,9 +209,6 @@ sd_daemon() {
             *)  _hz_n=0 ;;
         esac
 
-        # charge 档最关心"拔电后多久还原"，这件事不该被 tick 拖慢：tick 调到
-        # 300 秒时，拔掉充电器还要伪装五分钟，正好是这个模式要避免的情况。
-        # 10 秒一次的成本极低（sd_charge_tick 零 fork），换来拔电后最多 10 秒还原。
         case "$mode" in
             charge) _sd_pause 10 ;;
             *)      _sd_pause "$tick" ;;
@@ -215,8 +218,6 @@ sd_daemon() {
     rm -rf "$SD_RUN/daemon.lock" "$SD_RUN/daemon.pid"
     sd_info daemon "守护已停止"
 }
-
-# ---------- 入口 ----------
 
 if [ "$1" = "--daemon" ]; then
     sd_daemon
@@ -229,11 +230,8 @@ sd_dump_env
 sd_wait_boot 60 || { sd_warn boot "boot_completed 未在 60s 内就绪，退出"; exit 0; }
 [ "$(getprop sys.boot_completed)" = "1" ] || exit 0
 
-# 走到这里说明这次没翻车，清掉自救计数
 printf '0\n' 2>/dev/null >"$SD_DATA/boot.count"
 
-# 元模块场景下 post-fs-data 可能没跑，或被安全模式跳过，这里补一次挂载。
-# 判定依据是挂载此刻是否真的存在，不是清单文件是否非空。
 if ! sd_mounts_alive; then
     sd_info boot "覆盖层未生效，补充挂载"
     sd_mount_overrides
@@ -241,10 +239,16 @@ fi
 
 sd_apply_state
 
+if [ -d "$SD_RUN/daemon.lock" ] || [ -f "$SD_RUN/daemon.pid" ]; then
+    sd_stale_clean && sd_warn boot "清理上一轮残留的守护锁(旧 pid=${_sd_stale_pid:-?})"
+fi
+
 if sd_daemon_pid >/dev/null; then
     sd_info boot "守护已在运行，跳过"
 else
-    nohup sh "$MODDIR/service.sh" --daemon >/dev/null 2>&1 &
-    sleep 1
-    sd_info boot "守护已拉起"
+    if sd_daemon_launch; then
+        sd_info boot "守护已拉起 pid=$(sd_daemon_pid 2>/dev/null)"
+    else
+        sd_warn boot "守护拉起失败，请查看日志"
+    fi
 fi
