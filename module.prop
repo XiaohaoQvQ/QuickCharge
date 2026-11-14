@@ -1,6 +1,7 @@
 id=quickcharge
+# 源码完全公开 · 禁止商用与非法用途
 name=Quick Charge
-version=2.9.41
-versioncode=29410
+version=2.9.42
+versioncode=29420
 author=Xiaohao
 description=QC · 欧加真温控与充电改写 · 42℃以下满功率 · 温控档位/温度墙/限流/熔断/高刷/CPU伪装可调 · 亮屏快充常开 · 全程可回滚 · 支持元模块

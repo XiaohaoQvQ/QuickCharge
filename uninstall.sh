@@ -1,4 +1,9 @@
 #!/system/bin/sh
+# ---------------------------------------------------------------
+# Quick Charge (QC) — 源码完全公开，可自由查看、修改、分发。
+# 禁止商业用途，禁止用于任何违反法律法规的场景。
+# Fully open source. Commercial use and any unlawful use prohibited.
+# ---------------------------------------------------------------
 
 SD_DATA="${SD_DATA:-/data/adb/quickcharge}"
 case "$SD_DATA" in ""|/|/data|/data/adb|/data/adb/) SD_DATA=/data/adb/quickcharge ;; esac
