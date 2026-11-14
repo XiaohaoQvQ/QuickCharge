@@ -901,8 +901,5 @@ grep -c thermal_zone /proc/mounts                   # 应为 0
 
 Copyright (C) 2026 QuickCharge contributors
 
-作者不设额外限制：随便用、随便改、随便分发，不用署名，也不保证任何东西。
-改温控与充电策略存在硬件风险，出问题自行承担。
-
 > 法律条款以 `LICENSE` 为准。再分发时按 GPL-3.0 保留许可证与版权声明即可，其余随你：
 > 商用、修改、二次打包、内置进别的模块，都不需要另行授权。
