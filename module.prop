@@ -1,6 +1,6 @@
 id=quickcharge
 name=Quick Charge
-version=2.9.40
-versioncode=29400
+version=2.9.41
+versioncode=29410
 author=Xiaohao
-description=QC · 温度伪装关闭 · 高刷关闭 · 未生效
+description=QC · 欧加真温控与充电改写 · 42℃以下满功率 · 温控档位/温度墙/限流/熔断/高刷/CPU伪装可调 · 亮屏快充常开 · 全程可回滚 · 支持元模块
