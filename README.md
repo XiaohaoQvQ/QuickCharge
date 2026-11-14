@@ -900,6 +900,3 @@ grep -c thermal_zone /proc/mounts                   # 应为 0
 本项目以 **GNU General Public License v3.0** 发布，许可证全文见 [LICENSE](LICENSE)。
 
 Copyright (C) 2026 QuickCharge contributors
-
-> 法律条款以 `LICENSE` 为准。再分发时按 GPL-3.0 保留许可证与版权声明即可，其余随你：
-> 商用、修改、二次打包、内置进别的模块，都不需要另行授权。
