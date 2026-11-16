@@ -1153,7 +1153,13 @@ sd_batt_best_v() {
     fi
 
     if [ -n "$zv" ] && [ -n "$pv" ]; then
-        _sd_rv=$zv; _sd_temp_src=both
+        # 温区若是连接器侧，会比电芯 NTC 高 8℃ 以上，这种偏差下以电量计为准
+        r=$(sd_batt_rank "$(sd_zone_type_of "$z")")
+        if [ "${r:-1}" -gt 0 ] && [ $((zv - pv)) -gt 8 ]; then
+            _sd_rv=$pv; _sd_temp_src=ps
+        else
+            _sd_rv=$zv; _sd_temp_src=both
+        fi
     elif [ -n "$zv" ]; then
         _sd_rv=$zv; _sd_temp_src=zone
     elif [ -n "$pv" ]; then
@@ -1179,8 +1185,28 @@ sd_sentinel_best_v() {
     sd_sentinel_temp_v "$z"
 }
 
+# 电池类温区优先级：0 = 电芯本体，1 = 其它 batt*，2 = 连接器/充电侧。
+# 一加/OPPO 上 batt-therm 挂在电池连接器旁，比电芯 NTC 高 8~12℃，
+# 直接当电池用会让 real 虚高、壳温目标算高，还容易顶到温度墙熔断。
+sd_batt_rank() {
+    case "$1" in
+        battery|batt|BATTERY|BATT) printf '0' ;;
+        *therm*|*Therm*|*conn*|*Conn*|*chg*|*Chg*) printf '2' ;;
+        *) printf '1' ;;
+    esac
+}
+
+sd_zone_type_of() {
+    local e
+    _sd_zones_ready
+    for e in $_sd_zones; do
+        [ "${e%%:*}" = "$1" ] && { printf '%s' "${e#*:}"; return 0; }
+    done
+    return 1
+}
+
 sd_pick_batt_zone_v() {
-    local e z t
+    local e z t r best="" bestr=9
     _sd_zones_ready
     for e in $_sd_zones; do
         z=${e%%:*}
@@ -1188,9 +1214,16 @@ sd_pick_batt_zone_v() {
         sd_zone_class "$t"
         [ "$_sd_zc" = battery ] || continue
         sd_zone_is_hot_load "$t" && continue
-        _sd_temp_readable "$z" && { _sd_rv=$z; _sd_sent_type=$t; return 0; }
+        _sd_temp_readable "$z" || continue
+        r=$(sd_batt_rank "$t")
+        if [ "$r" -lt "$bestr" ]; then
+            bestr=$r; best=$z; _sd_sent_type=$t
+            [ "$r" = 0 ] && break
+        fi
     done
-    return 1
+    [ -n "$best" ] || return 1
+    _sd_rv=$best
+    return 0
 }
 
 sd_pick_sentinel_v() {

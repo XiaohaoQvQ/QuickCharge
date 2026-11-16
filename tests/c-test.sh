@@ -379,6 +379,22 @@ out=$(run 2>&1)
 case "$out" in *"已有实例"*) ok "第二个实例自动退出" ;; *) bad "未拦住重复启动：$out" ;; esac
 daemon_stop
 
+# ============================================================ 13. 电池温区优选
+echo "[13] 电池温区优选"
+setup
+state static 30 42 off
+# 同时存在 battery(34℃) 与 batt-therm(48℃)：必须选电芯
+mkz thermal_zone8 batt-therm 48000
+out=$(run once)
+echo "$out" | grep -q 'real=34' && ok "优选电芯 battery（34℃）而非 batt-therm（48℃）" || bad "选了连接器温区：$out"
+# 只剩连接器侧：比电量计高 14℃，必须回退电量计
+printf 'batt-therm\n' >"$(z thermal_zone0)/type"
+printf '48000\n'      >"$(z thermal_zone0)/temp"
+rm -rf "$(z thermal_zone8)"
+out=$(run once)
+echo "$out" | grep -q 'real=34' && ok "连接器偏高 14℃ 时改用电量计" || bad "未回退电量计：$out"
+echo "$out" | grep -q 'zone=battery(ps)' && ok "温区标注为 battery(ps)" || bad "zone 标注错误：$out"
+
 echo
 echo "结果：通过 $PASS，失败 $FAIL"
 [ "$FAIL" -eq 0 ]

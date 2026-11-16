@@ -16,6 +16,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -28,7 +29,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-#define VER "2.9.46"
+#define VER "2.9.47"
 
 #define MAXZ 192
 #define MAXLINE 512
@@ -607,22 +608,41 @@ static int batt_capacity(void)
 
 /* ------------------------------------------------------------------ 哨兵 */
 
+/* 电池类温区分三档：0 = 电芯本体，1 = 其它 batt*，2 = 连接器/充电侧。
+ * 一加/OPPO 上 batt-therm 挂在电池连接器旁，比电芯 NTC 高 8~12℃，
+ * 直接当电池用会让 real 虚高、壳温目标算高，还容易顶到温度墙熔断。 */
+static int batt_rank(const char *t)
+{
+    if (!t || !*t) return 9;
+    if (strstr(t, "therm") || strstr(t, "conn") || strstr(t, "chg")) return 2;
+    if (!strcasecmp(t, "battery") || !strcasecmp(t, "batt")) return 0;
+    return 1;
+}
+
 static int pick_batt_zone(int *zi)
 {
+    int best = -1, bestr = 9;
     for (int i = 0; i < g_zn; i++) {
         if (g_z[i].cls != C_BATTERY) continue;
         if (is_hot_load(g_z[i].type)) continue;
         if (zone_temp(&g_z[i]) < -100) continue;
-        *zi = i;
-        return 0;
+        int r = batt_rank(g_z[i].type);
+        if (r < bestr) { bestr = r; best = i; if (r == 0) break; }
     }
-    return -1;
+    if (best < 0) return -1;
+    *zi = best;
+    return 0;
 }
 
-/* 与 sd_batt_best_v 一致：温区值与电量计值都在合理区间时优先温区 */
+/* 1 = 本次 real 取自电量计（温区判为连接器侧或温区不可用），遥测里的 zone 要跟着改 */
+static int g_batt_ps;
+
+/* 与 sd_batt_best_v 一致：温区值与电量计值都在合理区间时优先温区，
+ * 但温区明显高于电量计（连接器侧）时改用电量计。 */
 static int batt_best(int zi, int *out)
 {
     int zv = -1000, pv = -1000;
+    g_batt_ps = 0;
     if (zi >= 0) {
         zv = zone_temp(&g_z[zi]);
         if (zv < 8 || zv > 90) zv = -1000;
@@ -630,9 +650,13 @@ static int batt_best(int zi, int *out)
     pv = batt_temp_ps();
     if (pv >= 5 && pv <= 80) { /* keep */ } else pv = -1000;
 
-    if (zv > -100 && pv > -100) { *out = zv; return 0; }
+    if (zv > -100 && pv > -100) {
+        if (batt_rank(g_z[zi].type) > 0 && zv - pv > 8) { g_batt_ps = 1; *out = pv; return 0; }
+        *out = zv;
+        return 0;
+    }
     if (zv > -100) { *out = zv; return 0; }
-    if (pv > -100) { *out = pv; return 0; }
+    if (pv > -100) { g_batt_ps = 1; *out = pv; return 0; }
     return -1;
 }
 
@@ -1703,6 +1727,7 @@ static int shell_target(void)
         snprintf(g_tl_zone, sizeof g_tl_zone, "%s", nm ? nm + 1 : g_z[bz].path);
         /* 必须走 sentinel_temp：电池伪装开着时要读电量计，否则拿到的是自己写的假值 */
         if (sentinel_temp(bz, &cur) < 0) cur = -1000;
+        if (g_batt_ps || batt_spoof_on()) snprintf(g_tl_zone, sizeof g_tl_zone, "battery(ps)");
         lim = limit_for_type(C_BATTERY);
     } else {
         int v = batt_temp_ps();

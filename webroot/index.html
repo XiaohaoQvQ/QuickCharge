@@ -654,6 +654,13 @@
         ? "改写中：系统看到的温度固定为 <b>" + d.target + "℃</b>，真实温度读不到。"
         : "改写中：真实 <b>" + d.real + "℃</b> → 系统看到 <b>" + d.target + "℃</b>";
     }
+    if (d.wall && d.real !== null && d.real !== undefined &&
+        Number(d.real) >= Number(d.wall)) {
+      return "已停止改写：真实 <b>" + d.real + "℃</b>" +
+             (d.sentinel && d.sentinel !== "none" ? "（" + d.sentinel + "）" : "") +
+             " 已达到温度墙 <b>" + d.wall + "℃</b>，模块把控制权交回系统。" +
+             "想让它在这么高的温度下继续压制，把墙调高即可。";
+    }
     if (d.real === null || d.real === undefined) {
       return "读不到真实温度，模块不知道该报多少，所以没有改写。" +
              (d.real_why ? "原因：<b>" + d.real_why + "</b>。" : "") +
@@ -678,7 +685,9 @@
       $("realSrc").textContent = d.daemon ? (d.real_why || "读不到") : "守护没跑";
     } else {
       $("real").textContent = d.real + "℃";
-      $("realSrc").textContent = d.real_src === "cache" ? "守护读数" : "现场直读";
+      $("realSrc").textContent = d.real_src === "cache"
+        ? "守护读数" + (d.sentinel && d.sentinel !== "none" ? " · " + d.sentinel : "")
+        : "现场直读" + (d.sentinel && d.sentinel !== "none" ? " · " + d.sentinel : "");
     }
     if (rewritten(d)) {
       $("out").textContent = d.target + "℃";
