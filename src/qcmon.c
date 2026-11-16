@@ -29,7 +29,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-#define VER "2.9.47"
+#define VER "2.9.48"
 
 #define MAXZ 192
 #define MAXLINE 512

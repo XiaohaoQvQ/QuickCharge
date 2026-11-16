@@ -712,8 +712,8 @@
       $("mounted").textContent = d.mounted + " 项";
       $("mntSrc").textContent = "已挂载";
     } else {
-      $("mounted").textContent = d.mounted + " 项";
-      $("mntSrc").textContent = "未生效";
+      $("mounted").textContent = (d.mounted || 0) + " 条";
+      $("mntSrc").textContent = (d.mounted || 0) > 0 ? "未挂载" : "无需覆盖";
     }
     $("daemon").textContent = d.daemon ? "运行" : "停止";
     $("dmSrc").textContent = d.daemon
@@ -930,17 +930,21 @@
         pass("温度", d.real + "℃ · " + (d.sentinel || "?") + " · " +
              (d.real_src === "cache" ? "来自守护缓存" : "页面现场读取"));
       }
-      pass("挂载", d.mount_mode === "nomount"
-        ? "NoMount 注入 " + (d.nm_files || 0) + " 个文件（不产生挂载）"
-        : d.mount_mode === "nomount-idle"
-          ? "NoMount 在位，但没有注入文件"
-          : d.mount_mode === "meta"
-            ? (d.mm_name || "元模块") + " 托管 " + (d.nm_files || 0) + " 个文件（开机挂载）"
-            : d.mount_mode === "meta-idle"
-              ? (d.mm_name || "元模块") + " 在位，但没有交付文件"
-              : d.mount_mode === "bind"
-                ? "bind mount " + d.mounted + " 条"
-                : "未生效（0 个文件）");
+      if (d.mount_mode === "none" && (d.mounted || 0) > 0) {
+        fail("挂载", (d.mounted || 0) + " 条记录，一条也没挂上；日志里搜 mount 看失败原因");
+      } else if (d.mount_mode === "none") {
+        pass("挂载", "无需覆盖系统文件");
+      } else {
+        pass("挂载", d.mount_mode === "nomount"
+          ? "NoMount 注入 " + (d.nm_files || 0) + " 个文件（不产生挂载）"
+          : d.mount_mode === "nomount-idle"
+            ? "NoMount 在位，但没有注入文件"
+            : d.mount_mode === "meta"
+              ? (d.mm_name || "元模块") + " 托管 " + (d.nm_files || 0) + " 个文件（开机挂载）"
+              : d.mount_mode === "meta-idle"
+                ? (d.mm_name || "元模块") + " 在位，但没有交付文件"
+                : "bind mount " + (d.mounted || 0) + " 条");
+      }
       if (d.daemon) pass("守护", "运行中" + (d.daemon_age >= 0 ? " · " + d.daemon_age + " 秒前心跳" : ""));
       else fail("守护", "未运行，参数改动不会自动执行；点下方「重启守护」");
       note("json " + r.out.length + " 字节：" + r.out.replace(/\s+/g, " ").slice(0, 240));

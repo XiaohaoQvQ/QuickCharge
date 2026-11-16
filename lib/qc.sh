@@ -2191,15 +2191,35 @@ sd_mount_overrides() {
     sd_info mount "配置覆盖已挂载，累计 $n/$total 条"
 }
 
+# 挂载可能发生在别的 mount namespace（KSU 的 su 会话常常如此），
+# /proc/mounts 里看不到逐文件 bind。用一个内容比对兜底：
+# 抽样若干条，改写版与系统里的目标文件完全一致，就说明覆盖真实生效。
+sd_mounts_content_ok() {
+    local rel n=0 ok=0 root="${SD_ROOT:-}"
+    [ -d "$SD_OVERRIDES" ] || return 1
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        rel="${rel#/}"
+        [ -f "$SD_OVERRIDES/$rel" ] || continue
+        n=$((n + 1))
+        cmp -s "$SD_OVERRIDES/$rel" "$root/$rel" && ok=$((ok + 1))
+        [ "$n" -ge 5 ] && break
+    done <"$SD_MOUNTS"
+    [ "$n" -gt 0 ] && [ "$ok" -eq "$n" ]
+}
+
 sd_mounts_alive() {
     if sd_nm_active; then
         [ -s "$SD_NM_LIST" ] && [ -d "$SD_NM_ROOT" ] && return 0
         return 1
     fi
     [ -s "$SD_MOUNTS" ] || return 1
-    awk 'NR==FNR { if ($0!="") want[$0]=1; next }
-         ($2 in want) { hit[$2]=1 }
-         END { exit (length(hit)>0 ? 0 : 1) }' "$SD_MOUNTS" /proc/mounts 2>/dev/null
+    if awk 'NR==FNR { if ($0!="") want[$0]=1; next }
+            ($2 in want) { hit[$2]=1 }
+            END { exit (length(hit)>0 ? 0 : 1) }' "$SD_MOUNTS" /proc/mounts 2>/dev/null; then
+        return 0
+    fi
+    sd_mounts_content_ok
 }
 
 sd_umount_overrides() {

@@ -138,7 +138,11 @@ sd_do_status() {
                       printf '配置      %s（%s 托管，开机挂载）\n' "${nmn:-0} 个文件" "$(sd_mm_name)" ;;
         meta-idle)    printf '配置      %s 在位，但没有交付文件\n' "$(sd_mm_name)" ;;
         bind)         printf '配置      挂载 %s 个文件\n' "$mt" ;;
-        *)            printf '配置      未生效（0 个文件）\n' ;;
+        *)            if [ "${mt:-0}" -gt 0 ]; then
+                          printf '配置      %s 条记录，一条也没挂上\n' "$mt"
+                      else
+                          printf '配置      无需覆盖系统文件\n'
+                      fi ;;
     esac
     if [ -n "$dpid" ]; then
         if sd_hb_age; then
