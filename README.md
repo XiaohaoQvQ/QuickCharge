@@ -46,14 +46,14 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 
 ## 两个发行版
 
-同一个版本号，两个包，功能大体一致，守护实现不同：
+同一个版本号，两个包，功能一致，守护实现不同：
 
-| | `QuickCharge-v2.9.43.zip` | `QuickCharge-v2.9.43-c.zip` |
+| | `QuickCharge-v2.9.44.zip` | `QuickCharge-v2.9.44-c.zip` |
 |---|---|---|
 | 守护 | `lib/qc.sh` + shell 循环 | `bin/qcmon`（C，静态 arm64） |
-| 每 tick | 1.3 ms / 4 次 fork | 0.2 ms / 0 次 fork |
+| 每 tick | 1.3 ms / 4 次 fork（首轮后 1 次） | 0.1~0.2 ms / 0 次 fork |
 | 常驻内存 | 3~5 MB | < 1 MB |
-| 包体积 | 67 KB | 378 KB（含 649 KB 二进制） |
+| 包体积 | 67 KB | 390 KB（内含 713 KB 静态二进制） |
 | 适用 | 任何机型，出问题容易用 `sh -x` 追 | 追求零唤醒开销、老机型 |
 
 C 版把 `bin/qcmon` 放进包里，`service.sh` 检测到它就 `exec`，不再走 shell 循环；
@@ -66,18 +66,32 @@ C 版把 `bin/qcmon` 放进包里，`service.sh` 检测到它就 `exec`，不再
 su -c 'SD_SHELL_DAEMON=1 sh /data/adb/modules/quickcharge/service.sh'
 ```
 
-**C 版 v1 的覆盖范围**：温区分类与伪装、限流阶梯（墙 / 提前量 / MTK 偏移 /
-息屏 +2℃）、熔断、亮屏快充、心跳与日志、状态文件热重载、退出还原。
+**两个版本覆盖同一套热路径**，可以随时互换（`state.conf`、`run/` 下的状态文件、
+日志格式都通用）：
 
-**C 版 v1 还没做的**（这些在 shell 版里有，C 版包启动时由 `sd_apply_state`
-执行一次，之后不再动态跟随）：
+- 温区扫描与分类，作用域（core / noncore / batt）判定与兜底
+- 壳温动态上报：屏障、gap、余量爬升、`emul_temp` 与 `/proc/shell-temp` 双落点
+- 核心 / 非核心温度伪装（bind mount），稳态下不重复挂载
+- 限流阶梯：墙 / 提前量 / MTK 偏移 / 息屏 +2℃ / 滞回
+- 亮屏快充：内核 `ignore_screen_state` 优先，退回 FCC 回写，含基准学习与温度闸
+- 熔断 → 暂停伪装 → 冷却（回差 3℃）→ 自动恢复
+- 电池 NTC 伪装（`batt_spoof`），真实温度 46℃ 硬上限 + 120s 冷却
+- 遥测（`run/sensor`）与心跳（`run/hb`，`uptime pid` 格式）
+- 高刷补写（`hz_hard`）、描述同步（`module.prop`）
+- `SIGUSR1` 立即重载、`spoof.pending` 补齐、退出全量还原
 
-- 电量到 `fast_cap` 后撤销壳温伪装
-- 电池 NTC 伪装（`batt_spoof`）
-- 功耗遥测（`telemetry`）写入
-- 高刷动态切换（开机时的锁定仍生效）
+C 版另有几个只读子命令，排障时不必进守护：
 
-需要这几项就用 shell 版，或者在 `state.conf` 里把对应项设成固定值。
+```sh
+su -c '/data/adb/modules/quickcharge/bin/qcmon zones'    # 温区分类表
+su -c '/data/adb/modules/quickcharge/bin/qcmon once'     # 单轮目标值（不落盘）
+su -c '/data/adb/modules/quickcharge/bin/qcmon sensor'   # 跑一轮热路径并打印遥测
+su -c '/data/adb/modules/quickcharge/bin/qcmon bench 200' # 热路径耗时
+```
+
+差异只在这些地方，都不影响充电行为：C 版没有 `sd_horae`（开机时 shell 已经设过
+`persist.sys.horae.enable`），也没有 `action.sh` 的命令行子集——面板和命令行仍然
+走 `action.sh`，两版共用。
 
 ## 默认策略
 
@@ -864,14 +878,19 @@ su -c 'sh /data/adb/modules/quickcharge/action.sh diag 180'
 **41 个进程**（其中 36 个是 `tr`）。改成 `read` 内建后降到 **4 个**（只有首轮
 `getprop` 那三次）。
 
-容器实测（24 温区 + 完整电池节点，100 轮均值）：
+容器实测（8 温区 + 完整电池节点，200 轮均值）：
 
-| 指标 | 2.9.42 | 2.9.43 shell | 2.9.43 C |
-|---|---|---|---|
-| 每 tick CPU | 9.4 ms | **1.3 ms** | **0.2 ms** |
-| 每 tick fork | 41 | 4（首轮后 1） | 0 |
-| 常驻内存 | 3~5 MB | 3~5 MB | < 1 MB |
-| 日均 CPU（tick=15s） | 约 54 秒 | 约 7 秒 | 约 1 秒 |
+| 指标 | 2.9.42 | 2.9.43 shell | 2.9.44 shell | 2.9.44 C |
+|---|---|---|---|---|
+| 每 tick CPU | 9.4 ms | 1.3 ms | 1.3 ms | **0.14 ms** |
+| 每 tick fork | 41 | 4（首轮后 1） | 4（首轮后 1） | **0** |
+| 常驻内存 | 3~5 MB | 3~5 MB | 3~5 MB | < 1 MB |
+| 日均 CPU（tick=15s） | 约 54 秒 | 约 7 秒 | 约 7 秒 | 约 1 秒 |
+
+C 版的 0.14 ms 是 x86 容器实测；arm64 在 qemu 用户态下 0.42 ms，而 qemu 有 3~10 倍
+解释开销，真机落在 0.1~0.2 ms。功能上 2.9.44 的 C 版比 2.9.43 多做了一圈
+（壳温动态上报、电池伪装、熔断恢复、遥测、高刷），耗时反而更低——省掉的是
+每轮 `umount`/`mount`：目标值没变就直接返回。
 
 真机是 ARM + mksh + toybox，fork 比容器贵 2~5 倍，实际差距更大：
 shell 版大约从「3~8 分钟/天」降到「1~2 分钟/天」，C 版在 10 秒量级。
@@ -899,6 +918,9 @@ quickcharge/
 ├── uninstall.sh        卸载：停守护、卸挂载、归零、清数据
 ├── webroot/index.html  WebUI（纯静态，KernelSU / MMRL / KsuWebUI 加载）
 ├── lib/qc.sh           核心库：配置改写 / 温度伪装 / 充电，单文件
+├── bin/qcmon           C 守护（静态 aarch64，仅 C 版包含）
+├── src/qcmon.c         C 守护源码（不打包，脚本版包里也没有）
+├── build-qcmon.sh      编译脚本：sh build-qcmon.sh [x86]
 └── META-INF/...
 ```
 

@@ -1,12 +1,15 @@
 /*
  * qcmon — Quick Charge 守护进程（C 版）
  *
- * 与 shell 版共用同一份 state.conf 与同一套节点路径约定。
- * 负责每轮热路径：读温区 → 写伪装 → 算限流 → 熔断。
- * 安装、卸载、WebUI、配置改写仍由 shell 侧负责，这里不碰。
+ * 源码完全公开 · 禁止商用与非法用途
  *
- * 状态文件、日志格式、节点单位判定均与 lib/qc.sh 对齐，
- * 两版可以互相替换而不用改 WebUI。
+ * 与 lib/qc.sh 的 sd_daemon 一一对应，覆盖同样的热路径：
+ *   温区扫描 → 屏幕状态 → 电流墙 → 亮屏快充 → 伪装补齐 → 电池伪装
+ *   → 熔断/冷却恢复 → 温度模式（壳温动态上报 / 仅充电 / 关闭）
+ *   → 遥测 → 高刷补写 → 描述同步
+ *
+ * 状态文件名、日志格式、节点单位判定与 shell 版完全一致，两版可以互换，
+ * WebUI 与 action.sh 不需要区分当前跑的是哪一个。
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -19,30 +22,36 @@
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
-#define VER "2.9.43"
+#define VER "2.9.44"
 
 #define MAXZ 192
 #define MAXLINE 512
+#define MAXPATH 256
+
+/* 侵入作用域。shell 版没有单独的 shell 作用域：壳温走 emul_temp，不走 bind mount */
+enum { SC_CORE = 1, SC_NONCORE, SC_BATT };
 
 /* 温区分类，与 sd_zone_class 一一对应 */
 enum { C_OTHER = 0, C_BATTERY, C_SHELL, C_CORE, C_BOARD };
-/* 伪装范围，独立于分类枚举：C_OTHER 是 0，不能拿 0 当「全部」 */
-enum { SP_SHELL = 101, SP_CORE, SP_NONCORE, SP_BATT };
+
+static const char *CLS_NAME[] = { "other", "battery", "shell", "core", "board" };
 
 typedef struct {
-    char path[256];
+    char path[MAXPATH];
     char type[64];
     int cls;
-    int unit;          /* 1000=毫摄氏度 10=十分之一度 1=摄氏度 */
 } zone_t;
 
 static zone_t g_z[MAXZ];
 static int g_zn = 0;
 static int g_scanned = 0;
+static int g_temp_fail = 0;
 
 /* 配置，键名与 state.conf 相同 */
 typedef struct {
@@ -50,39 +59,103 @@ typedef struct {
     int shell_temp;      /* 0=off */
     int core_temp;
     int noncore_temp;
-    int wall;            /* 0=off */
+    int batt_spoof;      /* 0=off */
+    char wall[8];        /* "off" 或 35..80 */
     int aggr;
     int curr_max;
     int curr_edge;
-    int battery_limit;
-    int sentinel_limit;
+    int battery_limit;   /* 0=off */
+    int sentinel_limit;  /* 0=off */
     int tick;
     int fast_cap;
     int horae;
+    int log_level;
+    char hz[8];          /* "off" 或数值 */
+    int hz_hard;
+    char hz_prev_mcfr[16];
 } conf_t;
 
 static conf_t g_c;
-static char g_data[256] = "/data/adb/quickcharge";
+
+static char g_data[MAXPATH] = "/data/adb/quickcharge";
 static char g_state[300];
 static char g_log[320];
+static char g_log_old[320];
 static char g_run[300];
-static char g_moddir[256] = "";
-/* 测试用：把 /sys 换成别的根，真机留空 */
-static char g_sys[128] = "";
+static char g_moddir[MAXPATH] = "";
+static char g_sys[128] = "";       /* 测试用：把 / 换成别的根，真机留空 */
+
+static char g_ps[MAXPATH];
+static char g_therm[MAXPATH];
+static char g_zone_pref[64] = "thermal_zone";
+static char g_bl[MAXPATH];
+static char g_fb[MAXPATH];
+static char g_oplus[MAXPATH];
+static char g_shellproc[MAXPATH];
+
+/* 运行时状态文件，命名与 shell 版一致 */
+static char g_scr_orig[320], g_scr_way[320], g_scr_fail[320], g_fcc_norm[320];
+static char g_curr_orig[320], g_curr_want[320];
+static char g_spoof_flag[320];
+static char g_sensor[320];
+static char g_hb[320];
 
 static volatile sig_atomic_t g_stop = 0;
+static volatile sig_atomic_t g_reload = 0;
+
 static int g_screen_on = 1;
+static int g_screen_n = 0;
+static char g_bl_node[MAXPATH] = "";
+static int g_fb_blank = -1;
+
 static int g_last_pct = 100;
 static int g_wall_eff = 0;
-static char g_plat[8] = "";      /* qcom / mtk / other */
-static int g_spoof_done_core = 0;
-static int g_spoof_done_nc = 0;
+static char g_plat[8] = "";
 static int g_tick_n = 0;
+
+/* 遥测字段（对应 shell 的 _sd_last_cur 等） */
+static char g_tl_real[24] = "";
+static char g_tl_lim[16] = "";
+static char g_tl_zone[64] = "";
+static char g_tl_out[16] = "";
+static int g_emul_ok = -1;
+
+/* 熔断 */
+static int g_guard_paused = 0;
+static int g_cool_blind = 0;
+
+/* 上次成功应用的 core / noncore 目标，-1 表示未应用 */
+static int g_core_last = -1, g_nc_last = -1;
+
+/* 域不残留：上次伪装目标值，用来判断"这一轮要不要重做" */
+static int g_spoof_val[5] = { 0, 0, 0, 0, 0 };
+static int g_spoof_ok[5] = { 0, 0, 0, 0, 0 };
+static int g_spoof_force = 0;
+
+/* 电池伪装 */
+static int g_batt_sp_on = 0;
+static int g_batt_sp_last = 0;
+static long g_batt_sp_hold = 0;
+
+/* 亮屏快充 */
+static int g_scr_on = 0;
+static char g_scr_way_s[16] = "";
+
+/* 高刷 */
+static int g_hz_bad = 0;
+
+/* 日志轮转计数 */
+static int g_log_rot = 0;
 
 /* ------------------------------------------------------------------ 基础 */
 
-static void on_signal(int s) { (void)s; g_stop = 1; }
+static void on_term(int s) { (void)s; g_stop = 1; }
+static void on_usr1(int s) { (void)s; g_reload = 1; }
 
+/* 清理/熔断恢复会回写 module.prop 描述，先声明 */
+static void sync_desc(void);
+/* 壳温写入带缓存，模式切换时要能重置 */
+static void shell_emul_reset(void);
 
 static void ts_str(char *out, size_t n)
 {
@@ -90,6 +163,13 @@ static void ts_str(char *out, size_t n)
     struct tm tm;
     localtime_r(&t, &tm);
     strftime(out, n, "%m-%d %H:%M:%S", &tm);
+}
+
+/* 拼一个以 g_sys 为根的绝对路径 */
+static const char *rp(const char *rel, char *out, size_t n)
+{
+    snprintf(out, n, "%s%s", g_sys, rel);
+    return out;
 }
 
 /* 读一行，去掉首尾空白与 CR。成功返回 0。 */
@@ -125,29 +205,41 @@ static int write_str(const char *path, const char *s)
 {
     int fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC | O_TRUNC, 0644);
     if (fd < 0) return -1;
-    ssize_t w = write(fd, s, strlen(s));
+    size_t len = strlen(s);
+    ssize_t w = write(fd, s, len);
     close(fd);
-    return (w == (ssize_t)strlen(s)) ? 0 : -1;
+    return (w == (ssize_t)len) ? 0 : -1;
 }
 
 static void log_msg(const char *lvl, const char *tag, const char *fmt, ...)
 {
     char t[32], msg[400], line[512];
     va_list ap;
+    const char *l = "I";
+    if (lvl && lvl[0] == 'W') l = "W";
+    else if (lvl && lvl[0] == 'E') l = "E";
+    else if (lvl && lvl[0] == 'D') {
+        if (g_c.log_level < 4) return;
+        l = "D";
+    }
+
     ts_str(t, sizeof t);
     va_start(ap, fmt);
     vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
-    snprintf(line, sizeof line, "%s I [%s] %s\n", t, tag, msg);
-    if (lvl && lvl[0] == 'W') {
-        snprintf(line, sizeof line, "%s W [%s] %s\n", t, tag, msg);
-    } else if (lvl && lvl[0] == 'E') {
-        snprintf(line, sizeof line, "%s E [%s] %s\n", t, tag, msg);
-    }
+    snprintf(line, sizeof line, "%s %s [%s] %s\n", t, l, tag, msg);
+
     int fd = open(g_log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     if (fd < 0) return;
     if (write(fd, line, strlen(line)) < 0) { /* 日志写失败不影响守护 */ }
     close(fd);
+
+    /* 与 shell 版一致：每 64 条看一次体积，超过 512KB 轮转一次 */
+    g_log_rot++;
+    if ((g_log_rot & 63) == 0) {
+        struct stat st;
+        if (stat(g_log, &st) == 0 && st.st_size > 524288) rename(g_log, g_log_old);
+    }
 }
 
 static void mkdir_p(const char *p)
@@ -160,16 +252,24 @@ static void mkdir_p(const char *p)
     mkdir(tmp, 0755);
 }
 
+static long now_sec(void) { return (long)time(NULL); }
+
+static int up_ticks(void)
+{
+    char p[MAXPATH], b[64];
+    if (read_line(rp("/proc/uptime", p, sizeof p), b, sizeof b) < 0) return 0;
+    return atoi(b);
+}
+
 /* ------------------------------------------------------------------ 配置 */
 
 static void conf_defaults(void)
 {
     memset(&g_c, 0, sizeof g_c);
     snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "off");
-    g_c.shell_temp = 0;
-    g_c.core_temp = 0;
-    g_c.noncore_temp = 0;
-    g_c.wall = 42;
+    snprintf(g_c.wall, sizeof g_c.wall, "42");
+    snprintf(g_c.hz, sizeof g_c.hz, "off");
+    g_c.shell_temp = 30;
     g_c.aggr = 10;
     g_c.curr_max = 0;
     g_c.curr_edge = 4;
@@ -178,8 +278,8 @@ static void conf_defaults(void)
     g_c.tick = 15;
     g_c.fast_cap = 55;
     g_c.horae = 1;
+    g_c.log_level = 3;
 }
-
 
 static int parse_i(const char *v, int def)
 {
@@ -191,11 +291,24 @@ static int parse_i(const char *v, int def)
     return (int)n;
 }
 
+/* wall: "off" 保留为 0（=关闭），其余数值原样收，范围在用时夹紧 */
+static int wall_of(const char *v)
+{
+    if (!v || !*v) return 42;
+    if (!strcmp(v, "off")) return 0;
+    char *e = NULL;
+    long n = strtol(v, &e, 10);
+    if (e == v) return 42;
+    if (n < 35 || n > 80) return 42;
+    return (int)n;
+}
+
 static void conf_load(void)
 {
     FILE *f = fopen(g_state, "r");
     if (!f) return;
     char line[MAXLINE];
+    conf_defaults();
     while (fgets(line, sizeof line, f)) {
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
@@ -205,13 +318,14 @@ static void conf_load(void)
         *eq = 0;
         char *k = p, *v = eq + 1;
         char *e = v + strlen(v);
-        while (e > v && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ')) *--e = 0;
+        while (e > v && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ' || e[-1] == '\t')) *--e = 0;
 
         if (!strcmp(k, "temp_mode")) snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "%s", v);
-        else if (!strcmp(k, "shell_temp")) g_c.shell_temp = parse_i(v, 0);
+        else if (!strcmp(k, "shell_temp")) g_c.shell_temp = parse_i(v, 30);
         else if (!strcmp(k, "core_temp")) g_c.core_temp = parse_i(v, 0);
         else if (!strcmp(k, "noncore_temp")) g_c.noncore_temp = parse_i(v, 0);
-        else if (!strcmp(k, "wall")) g_c.wall = parse_i(v, 42);
+        else if (!strcmp(k, "batt_spoof")) g_c.batt_spoof = parse_i(v, 0);
+        else if (!strcmp(k, "wall")) snprintf(g_c.wall, sizeof g_c.wall, "%s", v);
         else if (!strcmp(k, "aggr")) g_c.aggr = parse_i(v, 10);
         else if (!strcmp(k, "curr_max")) g_c.curr_max = parse_i(v, 0);
         else if (!strcmp(k, "curr_edge")) g_c.curr_edge = parse_i(v, 4);
@@ -220,31 +334,101 @@ static void conf_load(void)
         else if (!strcmp(k, "tick")) g_c.tick = parse_i(v, 15);
         else if (!strcmp(k, "fast_cap")) g_c.fast_cap = parse_i(v, 55);
         else if (!strcmp(k, "horae")) g_c.horae = parse_i(v, 1);
+        else if (!strcmp(k, "log_level")) g_c.log_level = parse_i(v, 3);
+        else if (!strcmp(k, "hz")) snprintf(g_c.hz, sizeof g_c.hz, "%s", v);
+        else if (!strcmp(k, "hz_hard")) g_c.hz_hard = parse_i(v, 0);
+        else if (!strcmp(k, "hz_prev_mcfr")) snprintf(g_c.hz_prev_mcfr, sizeof g_c.hz_prev_mcfr, "%s", v);
     }
     fclose(f);
 
-    if (g_c.tick < 5) g_c.tick = 5;
-    if (g_c.tick > 300) g_c.tick = 300;
+    /* 与 shell 版 _sd_clamp 的兜底值保持一致 */
+    if (g_c.tick < 5 || g_c.tick > 300) g_c.tick = 15;
     if (g_c.curr_max < 0) g_c.curr_max = 0;
     if (g_c.curr_max > 8000) g_c.curr_max = 8000;
-    if (g_c.curr_edge < 0) g_c.curr_edge = 0;
-    if (g_c.curr_edge > 6) g_c.curr_edge = 6;
-    if (g_c.battery_limit < 30) g_c.battery_limit = 30;
-    if (g_c.battery_limit > 70) g_c.battery_limit = 70;
-    if (g_c.wall && (g_c.wall < 35 || g_c.wall > 80)) g_c.wall = 42;
-    if (g_c.aggr < 0) g_c.aggr = 0;
-    if (g_c.aggr > 10) g_c.aggr = 10;
+    if (g_c.curr_edge < 0 || g_c.curr_edge > 6) g_c.curr_edge = 4;
+    if (g_c.battery_limit < 30 || g_c.battery_limit > 70) g_c.battery_limit = 48;
+    if (g_c.sentinel_limit < 60 || g_c.sentinel_limit > 110) g_c.sentinel_limit = 85;
+    if (g_c.aggr < 0 || g_c.aggr > 10) g_c.aggr = 10;
+    if (g_c.fast_cap < 20 || g_c.fast_cap > 90) g_c.fast_cap = 55;
+    if (g_c.shell_temp < 25 || g_c.shell_temp > 60) g_c.shell_temp = 30;
+    if (g_c.log_level < 0 || g_c.log_level > 4) g_c.log_level = 3;
+    if (g_c.temp_mode[0] == 0) snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "off");
+    /* dyn 是旧键值，等价 static */
+    if (!strcmp(g_c.temp_mode, "dyn")) snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "static");
+}
+
+/* 只改一行，其余保留。用于 batt_spoof 自行关闭等场景 */
+static int state_set(const char *k, const char *v)
+{
+    char buf[8192], out[8192], tmp[340];
+    int fd = open(g_state, O_RDONLY | O_CLOEXEC);
+    ssize_t r = 0;
+    if (fd >= 0) {
+        r = read(fd, buf, sizeof buf - 1);
+        close(fd);
+        if (r < 0) r = 0;
+    }
+    buf[r] = 0;
+
+    size_t o = 0;
+    int found = 0;
+    char *p = buf;
+    while (*p) {
+        char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) + 1 : strlen(p);
+        char tmpk[64];
+        size_t kl = 0;
+        while (kl < len && kl < sizeof tmpk - 1 && p[kl] != '=') kl++;
+        memcpy(tmpk, p, kl);
+        tmpk[kl] = 0;
+        int w = (kl < len && !strcmp(tmpk, k));
+        if (w) {
+            o += snprintf(out + o, sizeof out - o, "%s=%s\n", k, v);
+            found = 1;
+        } else {
+            if (o + len < sizeof out) { memcpy(out + o, p, len); o += len; }
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    if (!found) o += snprintf(out + o, sizeof out - o, "%s=%s\n", k, v);
+    out[o] = 0;
+
+    snprintf(tmp, sizeof tmp, "%s.t.%d", g_state, (int)getpid());
+    if (write_str(tmp, out) < 0) return -1;
+    if (rename(tmp, g_state) < 0) { unlink(tmp); return -1; }
+    return 0;
 }
 
 /* ------------------------------------------------------------------ 温区 */
 
+/* 与 sd_zone_is_not_temp 一致：这些不是温度节点 */
+static int is_not_temp(const char *t)
+{
+    if (!t || !*t) return 0;
+    if (strstr(t, "hw-trip") || strstr(t, "hw_trip")) return 1;
+    if (strstr(t, "bcl-lvl") || strstr(t, "bcl_lvl")) return 1;
+    if (strstr(t, "ibat-lvl") || strstr(t, "ibat_lvl")) return 1;
+    if (!strncmp(t, "vbat", 4) || !strncmp(t, "vbatt", 5)) return 1;
+    return 0;
+}
+
+/* 与 sd_zone_is_hot_load 一致：充电器/无线/功放这类热点，不参与伪装 */
+static int is_hot_load(const char *t)
+{
+    if (!t || !*t) return 0;
+    size_t n = strlen(t);
+    if (n >= 2 && !strcmp(t + n - 2, "pa")) return 1;
+    if (n >= 3 && !strcmp(t + n - 3, "_pa")) return 1;
+    if (strstr(t, "wifi") || strstr(t, "wlan")) return 1;
+    if (strstr(t, "mtktswmt") || strstr(t, "mtktsbtsmdpa")) return 1;
+    return 0;
+}
+
 static int cls_of(const char *t)
 {
     if (!t || !*t) return C_OTHER;
-    if (strstr(t, "hw-trip") || strstr(t, "hw_trip") ||
-        strstr(t, "bcl-lvl") || strstr(t, "bcl_lvl") ||
-        strstr(t, "ibat-lvl") || strstr(t, "ibat_lvl") ||
-        strstr(t, "vbat")) return C_OTHER;
+    if (is_not_temp(t)) return C_OTHER;
     if (strstr(t, "batt") || strstr(t, "Batt")) return C_BATTERY;
     if (strstr(t, "shell") || strstr(t, "Shell") || strstr(t, "back") ||
         strstr(t, "case") || strstr(t, "skin") || strstr(t, "cover") ||
@@ -253,168 +437,451 @@ static int cls_of(const char *t)
         strstr(t, "cpuss") || strstr(t, "gpu") || strstr(t, "GPU") ||
         strstr(t, "ddr") || strstr(t, "mtktsap") || strstr(t, "mtktsabb") ||
         strstr(t, "tzts") || strstr(t, "tsen_max") || strstr(t, "soc") ||
-        strstr(t, "Soc")) return C_CORE;
+        strstr(t, "Soc") || !strncmp(t, "ap", 2) || strstr(t, "ap0")) return C_CORE;
     if (strstr(t, "xo-therm") || strstr(t, "xtherm") || strstr(t, "pmic") ||
         strstr(t, "charger") || strstr(t, "board") || strstr(t, "sys-therm") ||
         strstr(t, "mtktspa") || strstr(t, "mtktswmt") || strstr(t, "mtktsbtsmdpa") ||
-        !strcmp(t, "pa") || (strstr(t, "pa") && t[strlen(t) - 3] == '_')) return C_BOARD;
+        !strcmp(t, "pa") || strstr(t, "pm") ) {
+        /* pm 开头的 *_tz 也要算 board，但不能把 "pmic" 之外的杂项吞掉 */
+        if (!strcmp(t, "pa") || strstr(t, "therm") || strstr(t, "pmic") ||
+            strstr(t, "charger") || strstr(t, "board") || strstr(t, "mtkts") ||
+            strstr(t, "pm8") || strstr(t, "pmr") || strstr(t, "pm5") ||
+            strstr(t, "pm6") || strstr(t, "pm7")) return C_BOARD;
+    }
     return C_OTHER;
 }
 
-/* 单位按当前读数推断，与 sd_zone_temp_unit 相同 */
-static int temp_unit(const char *zp)
+/* 伪装作用域，与 sd_zone_in_scope 一致 */
+static int in_scope(const char *t, int scope)
 {
-    char b[64];
-    snprintf(b, sizeof b, "%s/temp", zp);
-    int v;
-    if (read_int(b, &v) < 0) return 1000;
-    if (v >= 2000) return 1000;
-    if (v >= 150) return 10;
+    if (is_not_temp(t)) return 0;
+    int c = cls_of(t);
+    switch (scope) {
+        case SC_CORE:
+            return c == C_CORE;
+        case SC_BATT:
+            return c == C_BATTERY && !is_hot_load(t);
+        case SC_NONCORE:
+            if (c == C_CORE || c == C_SHELL) return 0;
+            if (c == C_BATTERY || c == C_BOARD) return 0;
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* core 无候选时的兜底：与 _sd_spoof_fallback_ok 一致 */
+static int fallback_ok(const char *t)
+{
+    if (is_not_temp(t)) return 0;
+    int c = cls_of(t);
+    if (c == C_BATTERY || c == C_BOARD || c == C_SHELL) return 0;
+    if (is_hot_load(t)) return 0;
     return 1;
 }
 
-static int temp_c(const zone_t *z)
+/* 温度归一：>=2000 毫度、>=150 十分之一度、其余摄氏度；负数与 >150 视为无效 */
+static int temp_norm(const char *s)
 {
-    char b[256];
+    char t[32];
+    size_t i = 0;
+    if (!s || !*s) return -1000;
+    while (s[i] && i < sizeof t - 1) { t[i] = s[i]; i++; }
+    t[i] = 0;
+    char *dot = strchr(t, '.');
+    if (dot) *dot = 0;
+    if (!t[0]) return -1000;
+    for (char *p = t; *p; p++)
+        if (*p < '0' || *p > '9') return -1000;
+    long v = atol(t);
+    if (v >= 2000) v /= 1000;
+    else if (v >= 150) v /= 10;
+    if (v > 150) return -1000;
+    return (int)v;
+}
+
+static int zone_temp(const zone_t *z)
+{
+    char b[MAXPATH + 8], v[64];
     snprintf(b, sizeof b, "%s/temp", z->path);
-    int v;
-    if (read_int(b, &v) < 0) return -1000;
-    if (v > 0 || v == 0) {
-        if (z->unit == 1000) return v / 1000;
-        if (z->unit == 10) return v / 10;
-        return v;
-    }
-    return -1000;
+    if (read_line(b, v, sizeof v) < 0) return -1000;
+    return temp_norm(v);
+}
+
+/* 写伪装时按当前读数推断单位，与 sd_zone_temp_unit 一致 */
+static int zone_unit(const char *zp)
+{
+    char b[MAXPATH + 8], v[64];
+    snprintf(b, sizeof b, "%s/temp", zp);
+    if (read_line(b, v, sizeof v) < 0) return 0;   /* 毫度 */
+    char *dot = strchr(v, '.');
+    if (dot) *dot = 0;
+    long n = atol(v);
+    if (n >= 2000) return 0;
+    if (n >= 150) return 1;
+    return 2;
 }
 
 static void zones_scan(void)
 {
     g_zn = 0;
-    char root[256];
-    snprintf(root, sizeof root, "%s/sys/class/thermal", g_sys);
-    DIR *d = opendir(root);
-    if (!d) return;
+    g_temp_fail = 0;
+    DIR *d = opendir(g_therm);
+    if (!d) { g_scanned = 1; return; }
     struct dirent *de;
     while ((de = readdir(d)) && g_zn < MAXZ) {
-        if (strncmp(de->d_name, "thermal_zone", 12)) continue;
+        if (strncmp(de->d_name, g_zone_pref, strlen(g_zone_pref))) continue;
         zone_t *z = &g_z[g_zn];
-        snprintf(z->path, sizeof z->path, "%s/%s", root, de->d_name);
-        char tp[256];
+        snprintf(z->path, sizeof z->path, "%s/%s", g_therm, de->d_name);
+        char tp[MAXPATH + 8];
         snprintf(tp, sizeof tp, "%s/type", z->path);
         if (read_line(tp, z->type, sizeof z->type) < 0) continue;
         z->cls = cls_of(z->type);
-        z->unit = temp_unit(z->path);
         g_zn++;
     }
     closedir(d);
     g_scanned = 1;
-    log_msg("I", "scan", "温区 %d 个", g_zn);
+    g_spoof_force = 1;   /* 重扫后节点可能变了，伪装必须重做一遍 */
+    log_msg("D", "scan", "温区 %d 个", g_zn);
+}
+
+/* ------------------------------------------------------------------ 电池 */
+
+static const char *PS_NODES[] = { "battery", "mtk-battery", "mtk-gauge", "bms", NULL };
+
+static int ps_attr(const char *attr, char *out, size_t n)
+{
+    for (int i = 0; PS_NODES[i]; i++) {
+        char p[MAXPATH + 96];
+        snprintf(p, sizeof p, "%s/%s/%s", g_ps, PS_NODES[i], attr);
+        if (read_line(p, out, n) == 0) return 0;
+    }
+    return -1;
+}
+
+static int batt_status(char *out, size_t n)
+{
+    if (ps_attr("status", out, n) == 0) return 0;
+    snprintf(out, n, "Unknown");
+    return -1;
+}
+
+/* 与 sd_batt_temp_v 一致：四个 temp 节点，再退到 uevent 的 TEMP= */
+static int batt_temp_ps(void)
+{
+    char b[128], p[MAXPATH + 96];
+    for (int i = 0; PS_NODES[i]; i++) {
+        snprintf(p, sizeof p, "%s/%s/temp", g_ps, PS_NODES[i]);
+        if (read_line(p, b, sizeof b) < 0) continue;
+        int v = temp_norm(b);
+        if (v >= 10 && v <= 120) return v;
+    }
+    for (int i = 0; PS_NODES[i]; i++) {
+        snprintf(p, sizeof p, "%s/%s/uevent", g_ps, PS_NODES[i]);
+        FILE *f = fopen(p, "r");
+        if (!f) continue;
+        while (fgets(b, sizeof b, f)) {
+            if (!strncmp(b, "TEMP=", 5)) {
+                int v = temp_norm(b + 5);
+                if (v >= 10 && v <= 120) { fclose(f); return v; }
+            }
+        }
+        fclose(f);
+    }
+    return -1000;
+}
+
+static int batt_capacity(void)
+{
+    char b[32];
+    if (ps_attr("capacity", b, sizeof b) < 0) return -1;
+    char *e = NULL;
+    long v = strtol(b, &e, 10);
+    if (e == b) return -1;
+    return (int)v;
+}
+
+/* ------------------------------------------------------------------ 哨兵 */
+
+static int pick_batt_zone(int *zi)
+{
+    for (int i = 0; i < g_zn; i++) {
+        if (g_z[i].cls != C_BATTERY) continue;
+        if (is_hot_load(g_z[i].type)) continue;
+        if (zone_temp(&g_z[i]) < -100) continue;
+        *zi = i;
+        return 0;
+    }
+    return -1;
+}
+
+/* 与 sd_batt_best_v 一致：温区值与电量计值都在合理区间时优先温区 */
+static int batt_best(int zi, int *out)
+{
+    int zv = -1000, pv = -1000;
+    if (zi >= 0) {
+        zv = zone_temp(&g_z[zi]);
+        if (zv < 8 || zv > 90) zv = -1000;
+    }
+    pv = batt_temp_ps();
+    if (pv >= 5 && pv <= 80) { /* keep */ } else pv = -1000;
+
+    if (zv > -100 && pv > -100) { *out = zv; return 0; }
+    if (zv > -100) { *out = zv; return 0; }
+    if (pv > -100) { *out = pv; return 0; }
+    return -1;
+}
+
+static int pick_sentinel(int *zi, int *cls_out)
+{
+    static const int PASSES[] = { C_BATTERY, C_BOARD, C_OTHER, -1 };
+    for (int p = 0; PASSES[p] >= 0; p++) {
+        for (int i = 0; i < g_zn; i++) {
+            if (g_z[i].cls != PASSES[p]) continue;
+            if (is_hot_load(g_z[i].type)) continue;
+            if (zone_temp(&g_z[i]) < -100) continue;
+            *zi = i;
+            if (cls_out) *cls_out = g_z[i].cls;
+            return 0;
+        }
+    }
+    /* 最后一轮：热点也认，总比没有哨兵强 */
+    for (int i = 0; i < g_zn; i++) {
+        if (!is_hot_load(g_z[i].type)) continue;
+        if (g_z[i].cls == C_CORE || g_z[i].cls == C_SHELL) continue;
+        if (zone_temp(&g_z[i]) < -100) continue;
+        *zi = i;
+        if (cls_out) *cls_out = g_z[i].cls;
+        return 0;
+    }
+    return -1;
+}
+
+static int batt_spoof_on(void)
+{
+    return g_c.batt_spoof >= 20 && g_c.batt_spoof <= 45;
+}
+
+/* 哨兵温度：电池伪装开着时必须读电量计，否则读到的就是自己写进去的假值 */
+static int sentinel_temp(int zi, int *out)
+{
+    if (zi < 0) return -1;
+    if (g_z[zi].cls == C_BATTERY) {
+        if (batt_spoof_on()) {
+            int v = batt_temp_ps();
+            if (v > -100) { *out = v; return 0; }
+        }
+        return batt_best(zi, out);
+    }
+    int v = zone_temp(&g_z[zi]);
+    if (v < -100) return -1;
+    *out = v;
+    return 0;
+}
+
+/* 与 sd_limit_for_type_v 一致：-1 表示关闭 */
+static int limit_for_type(int cls)
+{
+    if (cls == C_BATTERY) return g_c.battery_limit > 0 ? g_c.battery_limit : -1;
+    return g_c.sentinel_limit > 0 ? g_c.sentinel_limit : -1;
 }
 
 /* ------------------------------------------------------------------ 伪装 */
 
-static char g_spoof_dir[256] = "/dev/qc";
+static char g_spoof_dir[MAXPATH] = "/dev/qc";
 
-static int spoof_apply(int scope, int celsius)
+/* 确保伪装落点可用；返回实际目录 */
+static const char *spoof_dir(void)
 {
-    if (celsius < 20 || celsius > 100) return -1;
-    if (g_zn == 0) zones_scan();
+    const char *env = getenv("SD_SPOOF_DIR");
+    if (env && *env) {
+        mkdir_p(env);
+        chmod(env, 0700);
+        if (access(env, W_OK) == 0) return env;
+    }
     mkdir_p(g_spoof_dir);
     chmod(g_spoof_dir, 0700);
+    if (access(g_spoof_dir, W_OK) == 0) return g_spoof_dir;
+    return g_run;
+}
+
+static int spoof_one(zone_t *z, int celsius)
+{
+    int unit = zone_unit(z->path);
+    int ms = unit == 1 ? celsius * 10 : (unit == 2 ? celsius : celsius * 1000);
+
+    char target[MAXPATH + 8];
+    snprintf(target, sizeof target, "%s/temp", z->path);
+    umount2(target, MNT_DETACH);
+
+    const char *base = strrchr(z->path, '/');
+    base = base ? base + 1 : z->path;
+    const char *sd = spoof_dir();
+
+    char tf[MAXPATH + 64], body[24];
+    snprintf(body, sizeof body, "%d\n", ms);
+    snprintf(tf, sizeof tf, "%s/%s.temp", sd, base);
+    if (write_str(tf, body) < 0) {
+        snprintf(tf, sizeof tf, "%s/%s.temp", g_run, base);
+        if (write_str(tf, body) < 0) return -1;
+    }
+    chmod(tf, 0644);
+    if (mount(tf, target, NULL, MS_BIND, NULL) < 0) return -1;
+    return 0;
+}
+
+/* core 分类完全没命中时（部分机型的 type 名不规范），放宽到"非电池/非板级/非壳温" */
+static int scope_fallback(int scope, int sent)
+{
+    if (scope != SC_CORE) return 0;
+    for (int i = 0; i < g_zn; i++) {
+        if (i == sent) continue;
+        if (in_scope(g_z[i].type, SC_CORE)) return 0;
+    }
+    return 1;
+}
+
+/* 作用域内是否全已达到目标值（稳态下就不用反复 umount/mount） */
+static int spoof_satisfied(int scope, int celsius, int *total)
+{
+    int ok = 0, need = 0, sent = -1;
+    pick_sentinel(&sent, NULL);
+    int fallback = scope_fallback(scope, sent);
+    for (int i = 0; i < g_zn; i++) {
+        zone_t *z = &g_z[i];
+        if (scope != SC_BATT && i == sent) continue;
+        int in = in_scope(z->type, scope);
+        if (!in && fallback && fallback_ok(z->type)) in = 1;
+        if (!in) continue;
+        int t = zone_temp(z);
+        if (t < -100) continue;
+        need++;
+        if (t == celsius) ok++;
+    }
+    if (total) *total = need;
+    return need > 0 && ok == need;
+}
+
+static int spoof_apply(int scope, int celsius, int quiet)
+{
+    if (celsius < 20 || celsius > 100) {
+        log_msg("E", "thermal", "伪温度超出合理范围(20-100℃): %d", celsius);
+        return -1;
+    }
+    if (scope == SC_BATT && celsius > 45) {
+        log_msg("E", "thermal", "电池伪装上限 45℃: %d", celsius);
+        return -1;
+    }
+    if (g_zn == 0) zones_scan();
+
+    int total = 0;
+    if (!g_spoof_force && g_spoof_ok[scope] && g_spoof_val[scope] == celsius &&
+        spoof_satisfied(scope, celsius, &total)) {
+        return 0;
+    }
+
+    int prev = g_spoof_val[scope] ? g_spoof_val[scope] : -1;
+    int sent = -1;
+    pick_sentinel(&sent, NULL);
+    int fallback = scope_fallback(scope, sent);
 
     int hit = 0, fail = 0;
     for (int i = 0; i < g_zn; i++) {
         zone_t *z = &g_z[i];
-        int in = 0;
-        switch (scope) {
-            case SP_CORE:    in = (z->cls == C_CORE); break;
-            case SP_NONCORE: in = (z->cls != C_CORE && z->cls != C_SHELL); break;
-            case SP_BATT:    in = (z->cls == C_BATTERY); break;
-            case SP_SHELL:   in = (z->cls == C_SHELL || z->cls == C_BOARD || z->cls == C_OTHER); break;
-            default:         in = 0; break;
-        }
+        if (scope != SC_BATT && i == sent) continue;
+        int in = in_scope(z->type, scope);
+        if (!in && fallback && fallback_ok(z->type)) in = 1;
         if (!in) continue;
-
-        int ms;
-        if (z->unit == 10) ms = celsius * 10;
-        else if (z->unit == 1) ms = celsius;
-        else ms = celsius * 1000;
-
-        char tf[320], tmp[400];
-        snprintf(tmp, sizeof tmp, "%s/temp", z->path);
-        umount2(tmp, MNT_DETACH);
-
-        const char *base = strrchr(z->path, '/');
-        base = base ? base + 1 : z->path;
-        snprintf(tf, sizeof tf, "%s/%s.temp", g_spoof_dir, base);
-        snprintf(tmp, sizeof tmp, "%d\n", ms);
-        if (write_str(tf, tmp) < 0) {
-            static int once2 = 0;
-            if (!once2) { once2 = 1; log_msg("W", "thermal", "写临时文件失败 %s: %s，回退 %s", tf, strerror(errno), g_run); }
-            snprintf(tf, sizeof tf, "%s/%s.temp", g_run, base);
-            if (write_str(tf, tmp) < 0) { fail++; continue; }
-        }
-        chmod(tf, 0644);
-        snprintf(tmp, sizeof tmp, "%s/temp", z->path);
-        if (mount(tf, tmp, NULL, MS_BIND, NULL) == 0) {
-            hit++;
-        } else {
-            static int once = 0;
-            if (!once) { once = 1; log_msg("W", "thermal", "bind 失败 %s → %s: %s", tf, tmp, strerror(errno)); }
-            fail++;
-        }
+        int t = zone_temp(z);
+        if (t < -100) continue;
+        if (t == celsius) { hit++; continue; }
+        if (spoof_one(z, celsius) == 0) hit++;
+        else fail++;
     }
-    const char *sn = scope == SP_CORE ? "core" : scope == SP_NONCORE ? "noncore" :
-                     scope == SP_BATT ? "batt" : scope == SP_SHELL ? "shell" : "?";
-    log_msg(hit ? "I" : "W", "thermal", "伪装 %s → %d℃，命中 %d，失败 %d",
-            sn, celsius, hit, fail);
+
+    const char *sn = scope == SC_CORE ? "core" : (scope == SC_NONCORE ? "noncore" : "batt");
+    if (hit > 0) {
+        g_spoof_val[scope] = celsius;
+        g_spoof_ok[scope] = 1;
+        /* 只有目标值变了才打日志，否则每轮刷屏 */
+        if (!quiet || prev != celsius)
+            log_msg("I", "thermal", "伪装 %s → %d℃，命中 %d，失败 %d", sn, celsius, hit, fail);
+    } else {
+        g_spoof_ok[scope] = 0;
+        g_spoof_val[scope] = celsius;   /* 记住这次尝试，下一轮同值不再重复告警 */
+        if (prev != celsius)
+            log_msg("W", "thermal", "伪装 %s → %d℃ 未命中任何节点（失败 %d）", sn, celsius, fail);
+    }
+    g_spoof_force = 0;
     return hit > 0 ? 0 : -1;
 }
 
 static void spoof_clear(void)
 {
     for (int i = 0; i < g_zn; i++) {
-        char p[320];
+        char p[MAXPATH + 8];
         snprintf(p, sizeof p, "%s/temp", g_z[i].path);
         umount2(p, MNT_DETACH);
     }
-    g_spoof_done_core = 0;
-    g_spoof_done_nc = 0;
+    for (int s = 0; s < 5; s++) { g_spoof_ok[s] = 0; g_spoof_val[s] = 0; }
 }
 
-/* ------------------------------------------------------------------ 电池 */
-
-static int batt_status(char *out, size_t n)
+static void spoof_clear_scope(int scope)
 {
-    char p0[256], p1[256];
-    snprintf(p0, sizeof p0, "%s/sys/class/power_supply/battery/status", g_sys);
-    snprintf(p1, sizeof p1, "%s/sys/class/power_supply/bms/status", g_sys);
-    const char *paths[] = { p0, p1, NULL };
-    for (int i = 0; paths[i]; i++)
-        if (read_line(paths[i], out, n) == 0) return 0;
-    return -1;
+    int n = 0;
+    for (int i = 0; i < g_zn; i++) {
+        if (!in_scope(g_z[i].type, scope)) continue;
+        char p[MAXPATH + 8];
+        snprintf(p, sizeof p, "%s/temp", g_z[i].path);
+        if (umount2(p, MNT_DETACH) == 0) n++;
+    }
+    g_spoof_ok[scope] = 0;
+    if (n > 0) log_msg("D", "thermal", "撤销作用域 %d 伪装，解除 %d 个节点", scope, n);
 }
 
+/* ------------------------------------------------------------------ 壳温模拟 */
 
-static int batt_temp(void)
+/* 与 sd_shell_emul 一致：写 shell 类节点的 emul_temp，再补 /proc/shell-temp */
+static int g_emul_last = -1;
+
+static void shell_emul_reset(void) { g_emul_last = -1; }
+
+static void shell_emul(int celsius)
 {
-    char p0[256], p1[256];
-    snprintf(p0, sizeof p0, "%s/sys/class/power_supply/battery/temp", g_sys);
-    snprintf(p1, sizeof p1, "%s/sys/class/power_supply/bms/temp", g_sys);
-    const char *paths[] = { p0, p1, NULL };
-    int v;
-    for (int i = 0; paths[i]; i++) {
-        if (read_int(paths[i], &v) == 0) {
-            /* 三种编码：38000=毫度、380=0.1℃、38=℃ */
-            if (v >= 1000) return v / 1000;
-            if (v >= 100) return v / 10;
-            return v;
+    if (celsius == g_emul_last) return;
+    g_emul_last = celsius;
+
+    int ms = celsius * 1000, n = 0, ps = 0;
+    for (int i = 0; i < g_zn; i++) {
+        if (g_z[i].cls != C_SHELL) continue;
+        char p[MAXPATH + 16];
+        snprintf(p, sizeof p, "%s/emul_temp", g_z[i].path);
+        if (access(p, W_OK) != 0) continue;
+        char b[24];
+        snprintf(b, sizeof b, "%d\n", ms);
+        if (write_str(p, b) == 0) n++;
+    }
+    if (access(g_shellproc, W_OK) == 0) {
+        for (int t = 0; t <= 9; t++) {
+            char b[32];
+            snprintf(b, sizeof b, "%d %d\n", t, ms);
+            if (write_str(g_shellproc, b) == 0) ps = 1;
         }
     }
-    return -1000;
+
+    if (celsius == 0) g_emul_ok = 1;
+    else if (n > 0 || ps > 0) g_emul_ok = 1;
+    else {
+        g_emul_ok = 0;
+        log_msg("W", "thermal", "壳温节点不可写（无 emul_temp 或权限被拒），目标 %d℃", celsius);
+    }
 }
 
-/* ------------------------------------------------------------------ 平台 */
+/* ------------------------------------------------------------------ 电流墙 */
+
+#define MAXCURR 12
+static char g_curr_nodes[MAXCURR][MAXPATH];
+static int g_curr_n = 0;
 
 static void plat_resolve(void)
 {
@@ -429,60 +896,78 @@ static void plat_resolve(void)
     if (p) { if (fgets(b, sizeof b, p)) {} pclose(p); }
     if (strstr(b, "mt") || strstr(b, "MT")) snprintf(g_plat, sizeof g_plat, "mtk");
     else if (strstr(b, "sm") || strstr(b, "msm") || strstr(b, "kona") ||
-             strstr(b, "taro") || strstr(b, "sun")) snprintf(g_plat, sizeof g_plat, "qcom");
+             strstr(b, "taro") || strstr(b, "sun") || strstr(b, "pineapple"))
+        snprintf(g_plat, sizeof g_plat, "qcom");
     else snprintf(g_plat, sizeof g_plat, "other");
 }
 
-/* ------------------------------------------------------------------ 哨兵 */
-
-/* 选一个温度哨兵：battery → board → other，跳过无法读取的 */
-static int sentinel_pick(zone_t **out)
+/* 节点顺序与 _sd_curr_prepare 一致 */
+static void curr_prepare(void)
 {
-    for (int pass = 0; pass < 3; pass++) {
-        int want = pass == 0 ? C_BATTERY : (pass == 1 ? C_BOARD : C_OTHER);
-        for (int i = 0; i < g_zn; i++) {
-            if (g_z[i].cls != want) continue;
-            if (temp_c(&g_z[i]) < -100) continue;
-            *out = &g_z[i];
-            return 0;
-        }
+    if (g_curr_n) return;
+    const char *base[] = {
+        "battery/constant_charge_current_max",
+        "battery/constant_charge_current",
+        "battery/current_max",
+        "main/constant_charge_current_max",
+        "bms/current_max",
+        "usb/current_max",
+        NULL
+    };
+    for (int i = 0; base[i] && g_curr_n < MAXCURR - 6; i++)
+        snprintf(g_curr_nodes[g_curr_n++], MAXPATH, "%s/%s", g_ps, base[i]);
+    {
+        char p[MAXPATH];
+        snprintf(p, sizeof p, "%s/chg_current_max", g_oplus);
+        snprintf(g_curr_nodes[g_curr_n++], MAXPATH, "%s", p);
+        snprintf(p, sizeof p, "%s/current_max", g_oplus);
+        snprintf(g_curr_nodes[g_curr_n++], MAXPATH, "%s", p);
     }
-    return -1;
+    plat_resolve();
+    if (!strcmp(g_plat, "mtk")) {
+        const char *mtk[] = {
+            "battery/input_current_limit",
+            "charger/current_max",
+            "mtk-master-charger/current_max",
+            "mtk-slave-charger/current_max",
+            "mtk-battery/current_max",
+            NULL
+        };
+        for (int i = 0; mtk[i] && g_curr_n < MAXCURR; i++)
+            snprintf(g_curr_nodes[g_curr_n++], MAXPATH, "%s/%s", g_ps, mtk[i]);
+    }
 }
 
-static int limit_for(const zone_t *z)
+/* 单位：读出值 >100000 视为 µA；路径特征兜底 */
+static int curr_is_ua(const char *path, int cur)
 {
-    if (z->cls == C_BATTERY) {
-        if (g_c.battery_limit == 0) return -1;   /* off */
-        return g_c.battery_limit;
-    }
-    if (g_c.sentinel_limit == 0) return -1;
-    return g_c.sentinel_limit;
+    if (cur > 100000) return 1;
+    if (strstr(path, "oplus_chg") || strstr(path, "input_current_limit") ||
+        strstr(path, "charger/current_max")) return 0;
+    return 1;
 }
 
-/* 哨兵温度：battery 类直接读电量计，避开自己对 thermal_zone 的伪装 */
-static int sent_temp(zone_t *z)
+static int curr_read(const char *path, int *ma)
 {
-    if (z->cls == C_BATTERY) {
-        int bt = batt_temp();
-        if (bt > -100) return bt;
-    }
-    return temp_c(z);
+    int v;
+    if (read_int(path, &v) < 0) return -1;
+    if (v < 0) return -1;
+    *ma = v > 100000 ? v / 1000 : v;
+    return 0;
 }
 
-/* 目标电流 = curr_max 按温度阶梯打折，逻辑同 sd_curr_target_v */
+/* 目标电流：curr_max 按温度阶梯打折，逻辑同 sd_curr_target_v */
 static int curr_target(int *out_wall)
 {
     int ma = g_c.curr_max;
     if (ma <= 0) return 0;
 
-    zone_t *s = NULL;
-    if (sentinel_pick(&s) < 0) return ma;
-    int cur = sent_temp(s);
-    if (cur < -100) return ma;
+    int si = -1, si_cls = 0, cur = -1000;
+    if (pick_sentinel(&si, &si_cls) < 0) return ma;
+    if (sentinel_temp(si, &cur) < 0) return ma;
 
-    int wall = g_c.wall;
-    int lim = limit_for(s);
+    int wall = wall_of(g_c.wall);
+    int lim = limit_for_type(si_cls);
     if (wall <= 0) {
         wall = (lim > 0 ? lim : 48) - 4;
         if (wall < 35) wall = 35;
@@ -492,7 +977,8 @@ static int curr_target(int *out_wall)
         wall += 2;
         if (lim > 0 && wall > lim - 3) wall = lim - 3;
     }
-    *out_wall = wall;
+    if (out_wall) *out_wall = wall;
+    g_wall_eff = wall;
 
     plat_resolve();
     int shift = !strcmp(g_plat, "mtk") ? 2 : 0;
@@ -512,7 +998,7 @@ static int curr_target(int *out_wall)
     if (cur >= t50) pct = 50;
     if (cur >= t25) pct = 25;
 
-    /* 滞回：升温才降档，降温要退回阈下一度才升档，避免边界抖动 */
+    /* 滞回：升温才降档，降温要退回阈下一度才升档 */
     int last = g_last_pct;
     if (pct > last) {
         if (last == 25 && cur > t25 - 1) pct = 25;
@@ -520,117 +1006,901 @@ static int curr_target(int *out_wall)
         else if (last == 75 && cur > t75 - 1) pct = 75;
     }
     g_last_pct = pct;
-
     return ma * pct / 100;
+}
+
+/* curr.orig 里已经记过这个节点就不重复记 */
+static void curr_orig_save(const char *path, const char *raw)
+{
+    FILE *f = fopen(g_curr_orig, "r");
+    if (f) {
+        char line[400];
+        while (fgets(line, sizeof line, f)) {
+            char *bar = strchr(line, '|');
+            if (bar) *bar = 0;
+            if (!strcmp(line, path)) { fclose(f); return; }
+        }
+        fclose(f);
+    }
+    int fd = open(g_curr_orig, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    char line[400];
+    int n = snprintf(line, sizeof line, "%s|%s\n", path, raw);
+    if (write(fd, line, n) < 0) { /* 记录失败不影响限流 */ }
+    close(fd);
+}
+
+static void curr_restore(void)
+{
+    FILE *f = fopen(g_curr_orig, "r");
+    int n = 0;
+    if (f) {
+        char line[400];
+        while (fgets(line, sizeof line, f)) {
+            char *bar = strchr(line, '|');
+            if (!bar) continue;
+            *bar = 0;
+            char *val = bar + 1;
+            char *e = val + strlen(val);
+            while (e > val && (e[-1] == '\n' || e[-1] == '\r')) *--e = 0;
+            if (!line[0] || !val[0]) continue;
+            if (write_str(line, val) == 0) n++;
+        }
+        fclose(f);
+        unlink(g_curr_orig);
+    }
+    unlink(g_curr_want);
+    if (n) log_msg("I", "charge", "限流已关闭，还原 %d 个节点", n);
+}
+
+static void curr_keep(void)
+{
+    int wall = 0;
+    int want = curr_target(&wall);
+
+    if (want <= 0) {
+        if (access(g_curr_orig, F_OK) == 0) curr_restore();
+        else unlink(g_curr_want);
+        return;
+    }
+
+    char lastb[32] = "";
+    read_line(g_curr_want, lastb, sizeof lastb);
+    int has_last = lastb[0] != 0;
+    int last = has_last ? atoi(lastb) : 0;
+
+    curr_prepare();
+    int ok = 0;
+    for (int i = 0; i < g_curr_n; i++) {
+        const char *path = g_curr_nodes[i];
+        if (access(path, F_OK) != 0) continue;
+        int cur = 0;
+        if (curr_read(path, &cur) < 0) continue;
+        int v = curr_is_ua(path, cur) ? want * 1000 : want;
+        if (!has_last || want != last || cur > v * 11 / 10) {
+            if (cur == v) continue;
+            char raw[32];
+            read_line(path, raw, sizeof raw);
+            if (raw[0]) curr_orig_save(path, raw);
+            char b[32];
+            snprintf(b, sizeof b, "%d\n", v);
+            if (write_str(path, b) == 0) ok++;
+        }
+    }
+    if (!has_last || want != last) {
+        char b[32];
+        snprintf(b, sizeof b, "%d\n", want);
+        write_str(g_curr_want, b);
+    }
+    if (ok) log_msg("I", "charge", "电流墙 → %dmA（%d 节点，墙 %d℃）", want, ok, wall);
 }
 
 /* ------------------------------------------------------------------ 亮屏快充 */
 
 static int scr_node(char *out, size_t n)
 {
-    char b0[256], b1[256], b2[256];
-    snprintf(b0, sizeof b0, "%s/sys/module/oplus_chg/parameters/ignore_screen_state", g_sys);
-    snprintf(b1, sizeof b1, "%s/sys/module/oplus_chg_v2/parameters/ignore_screen_state", g_sys);
-    snprintf(b2, sizeof b2, "%s/sys/module/oplus_charge/parameters/ignore_screen_state", g_sys);
-    const char *p[] = { b0, b1, b2, NULL };
-    for (int i = 0; p[i]; i++) {
-        if (access(p[i], F_OK) == 0) { snprintf(out, n, "%s", p[i]); return 0; }
+    const char *rel[] = {
+        "/sys/module/oplus_chg/parameters/ignore_screen_state",
+        "/sys/module/oplus_chg_v2/parameters/ignore_screen_state",
+        "/sys/module/oplus_charge/parameters/ignore_screen_state",
+        "/sys/module/oplus_chg/parameters/chg_ignore_screen_state",
+        NULL
+    };
+    for (int i = 0; rel[i]; i++) {
+        char p[MAXPATH];
+        if (access(rp(rel[i], p, sizeof p), F_OK) == 0) { snprintf(out, n, "%s", p); return 0; }
     }
     return -1;
 }
 
-static int fcc_node(char *out, size_t n)
+/* 优先级：电池侧 FCC → 电池侧 current_max → USB 输入上限 */
+static int scr_fcc_node(char *out, size_t n)
 {
-    char b0[256], b1[256], b2[256];
-    snprintf(b0, sizeof b0, "%s/sys/class/power_supply/battery/constant_charge_current_max", g_sys);
-    snprintf(b1, sizeof b1, "%s/sys/class/power_supply/battery/current_max", g_sys);
-    snprintf(b2, sizeof b2, "%s/sys/class/power_supply/usb/current_max", g_sys);
-    const char *p[] = { b0, b1, b2, NULL };
-    for (int i = 0; p[i]; i++) {
-        if (access(p[i], F_OK) == 0) { snprintf(out, n, "%s", p[i]); return 0; }
+    curr_prepare();
+    const char *pref[] = { "constant_charge_current_max", "battery/current_max", "usb/current_max", NULL };
+    for (int p = 0; pref[p]; p++) {
+        for (int i = 0; i < g_curr_n; i++) {
+            if (!strstr(g_curr_nodes[i], pref[p])) continue;
+            if (access(g_curr_nodes[i], F_OK) == 0) { snprintf(out, n, "%s", g_curr_nodes[i]); return 0; }
+        }
+    }
+    for (int i = 0; i < g_curr_n; i++) {
+        const char *q = g_curr_nodes[i];
+        size_t l = strlen(q);
+        if ((l > 11 && !strcmp(q + l - 11, "/current_max")) ||
+            (l > 21 && !strcmp(q + l - 21, "/constant_charge_current"))) {
+            if (access(q, F_OK) == 0) { snprintf(out, n, "%s", q); return 0; }
+        }
     }
     return -1;
 }
 
-static int g_fcc_norm = 0;
-
-static void scr_tick(void)
+static int scr_read_ma(const char *path, int *ma)
 {
-    static char orig_path[256];
-    static int orig_val = -1;
+    int v;
+    if (read_int(path, &v) < 0) return -1;
+    if (v < 0) return -1;
+    *ma = v > 100000 ? v / 1000 : v;
+    return 0;
+}
 
-    char node[256];
-    if (scr_node(node, sizeof node) == 0) {
-        if (orig_val < 0) {
-            int v = 0;
-            if (read_int(node, &v) == 0) { orig_val = v; snprintf(orig_path, sizeof orig_path, "%s", node); }
-        }
-        if (!g_screen_on) {
-            if (orig_val >= 0) { char b[16]; snprintf(b, sizeof b, "%d\n", orig_val); write_str(node, b); orig_val = -1; }
-            return;
-        }
-        if (write_str(node, "1\n") == 0) return;
-    }
+/* 记下息屏时的正常 FCC，作为亮屏接管的目标 */
+static void scr_learn(void)
+{
+    char fcc[MAXPATH];
+    int v = 0;
+    if (scr_fcc_node(fcc, sizeof fcc) < 0) return;
+    if (scr_read_ma(fcc, &v) < 0) return;
+    if (v < 500) return;
+    if (v > 8000) v = 8000;
 
-    char fcc[256];
-    if (fcc_node(fcc, sizeof fcc) < 0) return;
-
-    int cur = 0;
-    if (read_int(fcc, &cur) < 0) return;
-    if (cur > 100000) cur /= 1000;
-
-    if (!g_screen_on) {
-        if (orig_val >= 0 && cur < orig_val) {
-            char b[32]; snprintf(b, sizeof b, "%d\n", orig_val);
-            write_str(fcc, b);
-        }
-        return;
-    }
-
-    if (cur >= 500 && (g_fcc_norm == 0 || cur > g_fcc_norm)) g_fcc_norm = cur > 8000 ? 8000 : cur;
-    if (g_fcc_norm < 500) return;
-
-    int bt = batt_temp();
-    int target = g_fcc_norm;
-    if (bt >= 42) return;
-    if (bt >= 38) target = g_fcc_norm * 7 / 10;
-    if (cur >= target) return;
-
-    if (orig_val < 0) { orig_val = cur; snprintf(orig_path, sizeof orig_path, "%s", fcc); }
+    int old = 0;
     char b[32];
-    snprintf(b, sizeof b, "%d\n", cur > 100000 ? target * 1000 : target);
-    write_str(fcc, b);
+    if (read_line(g_fcc_norm, b, sizeof b) == 0) old = atoi(b);
+    if (v > old) {
+        snprintf(b, sizeof b, "%d\n", v);
+        write_str(g_fcc_norm, b);
+    }
+}
+
+/* 0=有目标 2=还没基准 3=电池偏热 */
+static int scr_target(int *tgt)
+{
+    char b[32];
+    if (read_line(g_fcc_norm, b, sizeof b) < 0) return 2;
+    int n = atoi(b);
+    if (n <= 0) return 2;
+    if (n > 8000) n = 8000;
+
+    int bt = batt_temp_ps();
+    if (bt <= -100) *tgt = n * 7 / 10;
+    else if (bt <= 38) *tgt = n;
+    else if (bt <= 41) *tgt = n * 7 / 10;
+    else return 3;
+
+    if (*tgt < 500) return 2;
+    return 0;
 }
 
 static void scr_release(void)
 {
-    char node[256];
-    if (scr_node(node, sizeof node) == 0) write_str(node, "0\n");
+    FILE *f = fopen(g_scr_orig, "r");
+    if (f) {
+        char line[400];
+        while (fgets(line, sizeof line, f)) {
+            char *bar = strchr(line, '|');
+            if (!bar) continue;
+            *bar = 0;
+            char *val = bar + 1;
+            char *e = val + strlen(val);
+            while (e > val && (e[-1] == '\n' || e[-1] == '\r')) *--e = 0;
+            if (!line[0] || !val[0]) continue;
+            if (access(line, F_OK) == 0) write_str(line, val);
+        }
+        fclose(f);
+        unlink(g_scr_orig);
+    }
+    g_scr_on = 0;
+    g_scr_way_s[0] = 0;
+    unlink(g_scr_way);
+}
+
+static int scr_active(void) { return g_scr_on || access(g_scr_orig, F_OK) == 0; }
+
+static void scr_save_orig(const char *path, const char *raw)
+{
+    if (access(g_scr_orig, F_OK) == 0) return;
+    char line[400];
+    int n = snprintf(line, sizeof line, "%s|%s\n", path, raw);
+    write_str(g_scr_orig, line);
+    (void)n;
+}
+
+/* 0 成功；2 没基准；3 偏热；1 不支持 */
+static int scr_apply(void)
+{
+    char node[MAXPATH];
+    if (scr_node(node, sizeof node) == 0) {
+        if (access(g_scr_orig, F_OK) != 0) {
+            char raw[32] = "";
+            read_line(node, raw, sizeof raw);
+            if (raw[0]) scr_save_orig(node, raw);
+        }
+        if (write_str(node, "1\n") < 0) return 1;
+        int v = 0;
+        if (read_int(node, &v) < 0) return 1;
+        if (v != 1) return 1;
+        g_scr_on = 1;
+        snprintf(g_scr_way_s, sizeof g_scr_way_s, "kernel");
+        write_str(g_scr_way, "kernel\n");
+        unlink(g_scr_fail);
+        return 0;
+    }
+
+    char fcc[MAXPATH];
+    if (scr_fcc_node(fcc, sizeof fcc) < 0) return 1;
+    if (!g_screen_on) return 1;
+
+    int tgt = 0;
+    int rc = scr_target(&tgt);
+    if (rc == 3) return 3;
+    if (rc != 0) return 2;
+
+    int cur = 0;
+    if (scr_read_ma(fcc, &cur) < 0) return 1;
+    if (cur >= tgt) {
+        g_scr_on = 1;
+        snprintf(g_scr_way_s, sizeof g_scr_way_s, "fcc");
+        write_str(g_scr_way, "fcc\n");
+        unlink(g_scr_fail);
+        return 0;
+    }
+
+    if (access(g_scr_orig, F_OK) != 0) {
+        char raw[32] = "";
+        read_line(fcc, raw, sizeof raw);
+        if (!raw[0]) snprintf(raw, sizeof raw, "%d", cur);
+        scr_save_orig(fcc, raw);
+    }
+    char b[32];
+    snprintf(b, sizeof b, "%d\n", cur > 100000 ? tgt * 1000 : tgt);
+    if (write_str(fcc, b) < 0) return 1;
+
+    int back = 0;
+    if (scr_read_ma(fcc, &back) < 0) return 1;
+    if (back < tgt * 8 / 10) return 1;
+    g_scr_on = 1;
+    snprintf(g_scr_way_s, sizeof g_scr_way_s, "fcc");
+    write_str(g_scr_way, "fcc\n");
+    unlink(g_scr_fail);
+    return 0;
+}
+
+static void scr_tick(void)
+{
+    static char logged[16] = "";
+
+    if (!strcmp(g_c.temp_mode, "off")) {
+        if (scr_active()) {
+            scr_release();
+            logged[0] = 0;
+            log_msg("I", "charge", "亮屏快充：已退出，屏幕状态恢复");
+        }
+        return;
+    }
+
+    char st[32];
+    batt_status(st, sizeof st);
+    if (strcmp(st, "Charging") && strcmp(st, "Full")) {
+        if (scr_active()) { scr_release(); logged[0] = 0; }
+        return;
+    }
+
+    /* 限流或熔断期间不抢 FCC，避免两个策略互相覆盖 */
+    if (g_guard_paused || g_c.curr_max > 0) {
+        if (scr_active()) { scr_release(); logged[0] = 0; }
+        return;
+    }
+
+    if (!g_screen_on) {
+        scr_learn();
+        if (scr_active()) { scr_release(); logged[0] = 0; }
+        return;
+    }
+
+    int bt = batt_temp_ps();
+    if (bt > -100 && bt >= 42) {
+        if (scr_active()) scr_release();
+        if (strcmp(logged, "hot")) {
+            log_msg("W", "charge", "亮屏快充：电池 %d℃ 偏高，暂停接管", bt);
+            snprintf(logged, sizeof logged, "hot");
+        }
+        return;
+    }
+    if (!strcmp(logged, "hot")) logged[0] = 0;
+
+    switch (scr_apply()) {
+        case 0:
+            if (strcmp(g_scr_way_s, logged)) {
+                if (!strcmp(g_scr_way_s, "kernel"))
+                    log_msg("I", "charge", "亮屏快充：已接管（内核 ignore_screen_state）");
+                else {
+                    char b[32] = "";
+                    read_line(g_fcc_norm, b, sizeof b);
+                    log_msg("I", "charge", "亮屏快充：已接管（回写 FCC，目标 %smA）", b[0] ? b : "?");
+                }
+                snprintf(logged, sizeof logged, "%s", g_scr_way_s);
+            }
+            break;
+        case 2:
+            if (strcmp(logged, "wait")) {
+                log_msg("I", "charge", "亮屏快充：还没有基准值，先息屏充一次再亮屏");
+                snprintf(logged, sizeof logged, "wait");
+            }
+            break;
+        case 3:
+            if (scr_active()) scr_release();
+            if (strcmp(logged, "hot")) {
+                log_msg("I", "charge", "亮屏快充：电池偏热，本轮不接管");
+                snprintf(logged, sizeof logged, "hot");
+            }
+            break;
+        default:
+            if (scr_active()) scr_release();
+            if (strcmp(logged, "fail")) {
+                log_msg("W", "charge", "亮屏快充：本机不支持（无屏幕状态参数，FCC 也写不进去）");
+                snprintf(logged, sizeof logged, "fail");
+            }
+            write_str(g_scr_fail, "1\n");
+            break;
+    }
+}
+
+/* ------------------------------------------------------------------ 屏幕 */
+
+static int screen_sample(void)
+{
+    if (g_bl_node[0]) {
+        if (access(g_bl_node, F_OK) != 0) g_bl_node[0] = 0;
+    }
+    if (!g_bl_node[0]) {
+        /* 与 sd_screen_node 一致：panel0 优先，其次任取一个子目录的 actual_brightness */
+        char p[MAXPATH];
+        snprintf(p, sizeof p, "%s/panel0-backlight/actual_brightness", g_bl);
+        if (access(p, F_OK) == 0) snprintf(g_bl_node, sizeof g_bl_node, "%s", p);
+    }
+    if (!g_bl_node[0]) {
+        DIR *d = opendir(g_bl);
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d))) {
+                if (de->d_name[0] == '.') continue;
+                char p[MAXPATH];
+                snprintf(p, sizeof p, "%s/%s/actual_brightness", g_bl, de->d_name);
+                if (access(p, F_OK) == 0) { snprintf(g_bl_node, sizeof g_bl_node, "%s", p); break; }
+            }
+            if (!g_bl_node[0]) {
+                rewinddir(d);
+                while ((de = readdir(d))) {
+                    if (de->d_name[0] == '.') continue;
+                    char p[MAXPATH];
+                    snprintf(p, sizeof p, "%s/%s/brightness", g_bl, de->d_name);
+                    if (access(p, F_OK) == 0) { snprintf(g_bl_node, sizeof g_bl_node, "%s", p); break; }
+                }
+            }
+            closedir(d);
+        }
+    }
+
+    int v = 0;
+    if (g_bl_node[0] && read_int(g_bl_node, &v) == 0) return v > 0 ? 1 : 0;
+    if (g_fb_blank >= 0) return g_fb_blank;   /* blank 文件里 0 才是亮 */
+    if (read_int(g_fb, &v) == 0) { g_fb_blank = v == 0 ? 1 : 0; return g_fb_blank; }
+    return -1;
+}
+
+/* 与 sd_screen_tick 一致：连续两次读到暗才算息屏，避免息屏瞬间的抖动 */
+static void screen_tick(void)
+{
+    int on = screen_sample();
+    if (on < 0) { g_screen_on = 1; g_screen_n = 0; return; }
+    if (on) { g_screen_on = 1; g_screen_n = 0; }
+    else {
+        g_screen_n++;
+        if (g_screen_n >= 2) g_screen_on = 0;
+    }
 }
 
 /* ------------------------------------------------------------------ 熔断 */
 
-static int check_fuse(zone_t *s)
+/* xo-therm 或电池类才算熔断来源，与 sd_zone_is_guard_src 一致 */
+static int is_guard_src(const char *t)
 {
-    if (!s) return 0;
-    int cur = sent_temp(s);
-    if (cur < -100) return 0;
-    int lim = limit_for(s);
-    if (lim < 0) return 0;
-    return cur >= lim ? 1 : 0;
+    if (!t) return 0;
+    if (!strncmp(t, "xo-therm", 8) || !strncmp(t, "xtherm", 6)) return 1;
+    return cls_of(t) == C_BATTERY;
 }
 
-/* ------------------------------------------------------------------ 主循环 */
+static int guard_one(int zi, const char *type)
+{
+    int lim = limit_for_type(cls_of(type));
+    if (lim <= 0) return 0;
+    int cur = 0;
+    if (sentinel_temp(zi, &cur) < 0) return 0;
+    if (cur < lim) return 0;
 
-static char g_lock[320];
+    log_msg("W", "guard", "熔断：哨兵 %s 实测 %d℃ ≥ 上限 %d℃", g_z[zi].path + strlen(g_therm) + 1, cur, lim);
+    spoof_clear();
+    shell_emul(0);
+    g_guard_paused = 1;
+    log_msg("W", "guard", "已暂停伪装，温度回落后自动恢复（配置未改动）");
+    return 1;
+}
+
+/* 回差 3℃ 才恢复，且读不到温度时保持熔断（不猜安全） */
+static int guard_cooled(void)
+{
+    int checked = 0, ok = 1, blind = 0;
+    for (int i = 0; i < g_zn; i++) {
+        if (!is_guard_src(g_z[i].type)) continue;
+        if (zone_temp(&g_z[i]) < -100) continue;
+        int lim = limit_for_type(g_z[i].cls);
+        if (lim <= 0) continue;
+        checked++;
+        int cur = 0;
+        if (sentinel_temp(i, &cur) < 0) { ok = 0; blind = 1; continue; }
+        if (cur + 3 > lim) ok = 0;
+    }
+    if (!checked) {
+        int lim = limit_for_type(C_BATTERY);
+        if (lim > 0) {
+            int v = batt_temp_ps();
+            if (v > -100) { checked = 1; if (v + 3 > lim) ok = 0; }
+            else { ok = 0; blind = 1; }
+        }
+    }
+    if (blind && !ok) {
+        if (!g_cool_blind) { g_cool_blind = 1; log_msg("W", "guard", "熔断复查读不到温度，暂时保持熔断"); }
+    } else g_cool_blind = 0;
+    return checked > 0 && ok;
+}
+
+static int sentinel_guard(void)
+{
+    if (g_guard_paused) {
+        if (guard_cooled()) {
+            g_guard_paused = 0;
+            log_msg("I", "guard", "温度已回落，恢复伪装");
+            g_core_last = g_nc_last = -1;
+            if (g_c.core_temp >= 20) spoof_apply(SC_CORE, g_c.core_temp, 0);
+            if (g_c.noncore_temp >= 20) spoof_apply(SC_NONCORE, g_c.noncore_temp, 0);
+            if (batt_spoof_on()) {
+                g_spoof_ok[SC_BATT] = 0;
+                spoof_apply(SC_BATT, g_c.batt_spoof, 0);
+                g_batt_sp_on = 1;
+                g_batt_sp_last = g_c.batt_spoof;
+            }
+            sync_desc();
+        } else return 0;
+    }
+
+    if (!strcmp(g_c.temp_mode, "off") && g_c.core_temp < 20 && g_c.noncore_temp < 20)
+        return 1;
+
+    int checked = 0, fb = -1;
+    char fb_t[64] = "";
+    for (int i = 0; i < g_zn; i++) {
+        zone_t *z = &g_z[i];
+        if (zone_temp(z) < -100) continue;
+        if (is_guard_src(z->type)) {
+            checked = 1;
+            if (guard_one(i, z->type)) return 0;
+            continue;
+        }
+        if (z->cls == C_CORE || z->cls == C_SHELL) continue;
+        if (fb < 0 && !is_hot_load(z->type)) { fb = i; snprintf(fb_t, sizeof fb_t, "%s", z->type); }
+    }
+    if (!checked) {
+        int v = batt_temp_ps();
+        if (v > -100) {
+            checked = 1;
+            int lim = limit_for_type(C_BATTERY);
+            if (lim > 0 && v >= lim) {
+                log_msg("W", "guard", "熔断：电量计 %d℃ ≥ 上限 %d℃", v, lim);
+                spoof_clear();
+                shell_emul(0);
+                g_guard_paused = 1;
+                return 0;
+            }
+        }
+    }
+    if (!checked && fb >= 0) {
+        if (guard_one(fb, fb_t)) return 0;
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------ 电池伪装 */
+
+static void batt_sp_off(void)
+{
+    spoof_clear_scope(SC_BATT);
+    g_batt_sp_on = 0;
+    g_batt_sp_last = 0;
+}
+
+static void batt_sp_guard(void)
+{
+    int want = g_c.batt_spoof;
+    if (want <= 0) {
+        if (g_batt_sp_on) batt_sp_off();
+        return;
+    }
+    if (want < 20 || want > 45) { batt_sp_off(); return; }
+    if (!strcmp(g_c.temp_mode, "off")) { batt_sp_off(); return; }
+
+    int real = batt_temp_ps();
+    if (real < -100) {
+        batt_sp_off();
+        g_c.batt_spoof = 0;
+        state_set("batt_spoof", "off");
+        log_msg("W", "guard", "读不到真实电池温度（power_supply），已关闭电池伪装");
+        return;
+    }
+    long now = now_sec();
+    if (real >= 46) {
+        batt_sp_off();
+        g_batt_sp_hold = now + 120;
+        log_msg("W", "guard", "真实电池 %d℃ ≥ 硬上限 46℃，撤销电池伪装并冷却 120s", real);
+        return;
+    }
+    if (g_batt_sp_hold > now) { batt_sp_off(); return; }
+
+    if (want == g_batt_sp_last && g_batt_sp_on) return;
+    if (spoof_apply(SC_BATT, want, 1) == 0) {
+        g_batt_sp_last = want;
+        g_batt_sp_on = 1;
+    }
+}
+
+/* ------------------------------------------------------------------ 遥测 */
+
+/* 面板靠这个文件判断"守护在跑 + 真实温度"，缺了就只能实时读，会读到伪装值 */
+static void telemetry(void)
+{
+    char line[320];
+    snprintf(line, sizeof line, "%d %s %s %s %s %s %d\n",
+             up_ticks(),
+             g_tl_real[0] ? g_tl_real : "-",
+             g_tl_lim[0] ? g_tl_lim : "-",
+             g_tl_zone[0] ? g_tl_zone : "-",
+             g_tl_out[0] ? g_tl_out : "-",
+             g_c.temp_mode[0] ? g_c.temp_mode : "off",
+             g_emul_ok);
+    write_str(g_sensor, line);
+}
+
+static void hb_write(void)
+{
+    char b[64];
+    snprintf(b, sizeof b, "%d %d\n", up_ticks(), (int)getpid());
+    write_str(g_hb, b);
+}
+
+/* ------------------------------------------------------------------ 壳温目标 */
+
+/* 与 sd_shell_target 一致：把壳温上报压到屏障下方，留 gap 并随余量爬升 */
+static int shell_target(void)
+{
+    int base = g_c.shell_temp;
+    int gap = 2 + g_c.aggr;
+    int wall = wall_of(g_c.wall);
+
+    g_tl_out[0] = 0;
+    g_tl_real[0] = 0;
+    g_tl_lim[0] = 0;
+    g_tl_zone[0] = 0;
+
+    int cur = -1000, lim = -1;
+    int bz = -1;
+    if (pick_batt_zone(&bz) == 0) {
+        const char *nm = strrchr(g_z[bz].path, '/');
+        snprintf(g_tl_zone, sizeof g_tl_zone, "%s", nm ? nm + 1 : g_z[bz].path);
+        /* 必须走 sentinel_temp：电池伪装开着时要读电量计，否则拿到的是自己写的假值 */
+        if (sentinel_temp(bz, &cur) < 0) cur = -1000;
+        lim = limit_for_type(C_BATTERY);
+    } else {
+        int v = batt_temp_ps();
+        if (v > -100) {
+            cur = v;
+            snprintf(g_tl_zone, sizeof g_tl_zone, "battery(ps)");
+            lim = limit_for_type(C_BATTERY);
+        } else {
+            int si = -1, sc = 0;
+            if (pick_sentinel(&si, &sc) == 0) {
+                const char *nm = strrchr(g_z[si].path, '/');
+                snprintf(g_tl_zone, sizeof g_tl_zone, "%s", nm ? nm + 1 : g_z[si].path);
+                if (sentinel_temp(si, &cur) < 0) cur = -1000;
+                lim = limit_for_type(sc);
+            }
+        }
+    }
+
+    if (cur < -100) {
+        g_temp_fail++;
+        snprintf(g_tl_out, sizeof g_tl_out, "0");
+        return 0;
+    }
+    g_temp_fail = 0;
+    snprintf(g_tl_real, sizeof g_tl_real, "%d", cur);
+    if (lim > 0) snprintf(g_tl_lim, sizeof g_tl_lim, "%d", lim);
+
+    /* 熔断关闭时不设屏障，只做 gap 压制 */
+    if (lim <= 0) {
+        if (base > cur) base = cur;
+        snprintf(g_tl_out, sizeof g_tl_out, "%d", base);
+        return base;
+    }
+
+    int barrier = wall > 0 ? wall : lim - 2;
+    if (base >= barrier) {
+        base = barrier - 2;
+        if (base < 25) base = 25;
+    }
+
+    if (cur >= barrier) {
+        snprintf(g_tl_out, sizeof g_tl_out, "0");
+        return 0;
+    }
+
+    int room = barrier - cur;
+    int v = base;
+    if (cur - gap > v) v = cur - gap;
+    if (room < 4 && barrier > base) {
+        int climb = base + (barrier - base) * (4 - room) / 4;
+        if (climb > v) v = climb;
+    }
+    if (v > cur) v = cur;
+    if (v < 20) {
+        snprintf(g_tl_out, sizeof g_tl_out, "0");
+        return 0;
+    }
+    snprintf(g_tl_out, sizeof g_tl_out, "%d", v);
+    return v;
+}
+
+/* 与 sd_charge_tick 一致：只有电芯没到 fast_cap 才接管壳温 */
+static void charge_tick(void)
+{
+    char st[32];
+    batt_status(st, sizeof st);
+    if (strcmp(st, "Charging") && strcmp(st, "Full")) {
+        shell_emul(0);
+        g_tl_real[0] = g_tl_out[0] = g_tl_lim[0] = g_tl_zone[0] = 0;
+        return;
+    }
+    int cap = batt_capacity();
+    if (cap >= 0 && cap < g_c.fast_cap) shell_emul(shell_target());
+    else {
+        shell_emul(0);
+        /* 已到 fast_cap，壳温交给系统；遥测里只保留真实温度，out 记 0 */
+        shell_target();
+        g_tl_out[0] = 0;
+    }
+}
+
+/* ------------------------------------------------------------------ 高刷 */
+
+static int cmd_capture(const char *cmd, char *out, size_t n)
+{
+    out[0] = 0;
+    FILE *p = popen(cmd, "r");
+    if (!p) return -1;
+    size_t o = 0;
+    int ch;
+    while ((ch = fgetc(p)) != EOF && o < n - 1) out[o++] = (char)ch;
+    out[o] = 0;
+    pclose(p);
+    return out[0] ? 0 : -1;
+}
+
+static int hz_want(void)
+{
+    if (!strcmp(g_c.hz, "off") || !g_c.hz[0]) return 0;
+    for (const char *p = g_c.hz; *p; p++)
+        if (*p < '0' || *p > '9') return 0;
+    int v = atoi(g_c.hz);
+    return v > 0 ? v : 0;
+}
+
+static int hz_read_pair(int *peak, int *mn)
+{
+    char out[8192];
+    *peak = -1;
+    *mn = -1;
+    if (cmd_capture("settings list system 2>/dev/null", out, sizeof out) < 0) return -1;
+    char *p = out;
+    while (*p) {
+        char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (len > 17 && !strncmp(p, "peak_refresh_rate=", 18)) *peak = atoi(p + 18);
+        else if (len > 16 && !strncmp(p, "min_refresh_rate=", 17)) *mn = atoi(p + 17);
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return 0;
+}
+
+static int hz_lowpower(void)
+{
+    char out[64];
+    if (cmd_capture("settings get global low_power 2>/dev/null", out, sizeof out) < 0) return 0;
+    return atoi(out) == 1;
+}
+
+static void hz_mcfr_on(void)
+{
+    if (!g_c.hz_prev_mcfr[0]) {
+        char out[64] = "";
+        cmd_capture("settings get secure match_content_frame_rate 2>/dev/null", out, sizeof out);
+        char *e = out + strlen(out);
+        while (e > out && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ')) *--e = 0;
+        if (!out[0]) snprintf(out, sizeof out, "none");
+        snprintf(g_c.hz_prev_mcfr, sizeof g_c.hz_prev_mcfr, "%s", out);
+        state_set("hz_prev_mcfr", g_c.hz_prev_mcfr);
+    }
+    if (system("settings put secure match_content_frame_rate 1 2>/dev/null") < 0) { /* 无 settings 命令 */ }
+    if (system("cmd display set-match-content-frame-rate-policy 1 >/dev/null 2>&1") < 0) { /* 无 cmd 命令 */ }
+}
+
+/* 返回：0 无需处理 / 1 已补写 / 2 被拒绝 / 3 省电模式接管 */
+static int hz_guard(void)
+{
+    if (!g_c.hz_hard) return 0;
+    int v = hz_want();
+    if (!v) return 0;
+
+    int peak = -1, mn = -1;
+    hz_read_pair(&peak, &mn);
+    if (peak == v && mn == v) { g_hz_bad = 0; return 0; }
+    if (hz_lowpower()) { g_hz_bad = 0; return 3; }
+    if (g_hz_bad >= 3) return 2;
+
+    char c[256];
+    snprintf(c, sizeof c, "settings put system peak_refresh_rate %d 2>/dev/null", v);
+    if (system(c) < 0) { /* settings 不存在时忽略 */ }
+    snprintf(c, sizeof c, "settings put system min_refresh_rate %d 2>/dev/null", v);
+    if (system(c) < 0) { /* settings 不存在时忽略 */ }
+    hz_mcfr_on();
+
+    hz_read_pair(&peak, &mn);
+    if (peak == v) { g_hz_bad = 0; return 1; }
+    g_hz_bad++;
+    return 2;
+}
+
+/* ------------------------------------------------------------------ 描述同步 */
+
+/* 与 shell 版的 sort -u | wc -l 对齐：同一路径重复挂载只算一项 */
+static int mounts_count(void)
+{
+    char p[MAXPATH], b[256];
+    static char seen[64][MAXPATH];
+    int n = 0, nseen = 0;
+    snprintf(p, sizeof p, "%s/mounts.list", g_data);
+    FILE *f = fopen(p, "r");
+    if (!f) return 0;
+    while (fgets(b, sizeof b, f)) {
+        char *e = b;
+        while (*e && *e != '\n' && *e != '\r') e++;
+        *e = 0;
+        if (!b[0]) continue;
+        int dup = 0;
+        for (int i = 0; i < nseen; i++)
+            if (!strcmp(seen[i], b)) { dup = 1; break; }
+        if (dup) continue;
+        if (nseen < 64) {
+            snprintf(seen[nseen], MAXPATH, "%s", b);
+            nseen++;
+        }
+        n++;
+    }
+    fclose(f);
+    return n;
+}
+
+static void desc_build(char *out, size_t n)
+{
+    char gear[32], shape[96];
+    int mode_static = !strcmp(g_c.temp_mode, "static");
+    int mode_charge = !strcmp(g_c.temp_mode, "charge");
+
+    if (mode_static) snprintf(gear, sizeof gear, "温控档位 %d/10", g_c.aggr);
+    else if (mode_charge) snprintf(gear, sizeof gear, "温控档位 %d/10（仅充电）", g_c.aggr);
+    else snprintf(gear, sizeof gear, "温度伪装关闭");
+
+    int hv = hz_want();
+    if (!hv) snprintf(shape, sizeof shape, " · 高刷关闭");
+    else if (g_c.hz_hard) snprintf(shape, sizeof shape, " · 高刷 %dHz 锁定", hv);
+    else snprintf(shape, sizeof shape, " · 高刷 %dHz", hv);
+
+    int mt = mounts_count();
+    if (mt > 0) snprintf(out, n, "QC · %s%s · 配置 %d 项", gear, shape, mt);
+    else snprintf(out, n, "QC · %s%s · 未生效", gear, shape);
+}
+
+static void sync_desc(void)
+{
+    if (!g_moddir[0]) return;
+    char prop[MAXPATH + 32];
+    snprintf(prop, sizeof prop, "%s/module.prop", g_moddir);
+    if (access(prop, F_OK) != 0) return;
+
+    char want[256], cur[256] = "";
+    desc_build(want, sizeof want);
+
+    FILE *f = fopen(prop, "r");
+    if (!f) return;
+    char line[MAXLINE], buf[8192];
+    size_t o = 0;
+    while (fgets(line, sizeof line, f)) {
+        if (!strncmp(line, "description=", 12)) {
+            char *e = line + strlen(line);
+            while (e > line && (e[-1] == '\n' || e[-1] == '\r')) *--e = 0;
+            snprintf(cur, sizeof cur, "%s", line + 12);
+            o += snprintf(buf + o, sizeof buf - o, "description=%s\n", want);
+        } else {
+            o += snprintf(buf + o, sizeof buf - o, "%s", line);
+        }
+        if (o >= sizeof buf - MAXLINE) break;
+    }
+    fclose(f);
+    if (!strcmp(cur, want)) return;
+
+    char tmp[MAXPATH + 48];
+    snprintf(tmp, sizeof tmp, "%s.t.%d", prop, (int)getpid());
+    if (write_str(tmp, buf) < 0) return;
+    if (rename(tmp, prop) < 0) unlink(tmp);
+}
+
+/* ------------------------------------------------------------------ 伪装补齐 */
+
+/* action.sh 在自己域里读不到温区时会把请求写进 spoof.pending，等守护补齐 */
+static void spoof_pending(void)
+{
+    if (access(g_spoof_flag, F_OK) != 0) return;
+    int n = 0;
+    char b[32];
+    if (read_line(g_spoof_flag, b, sizeof b) == 0) n = atoi(b);
+
+    int ok = 1;
+    if (g_c.core_temp >= 20) { if (spoof_apply(SC_CORE, g_c.core_temp, 1) < 0) ok = 0; }
+    if (g_c.noncore_temp >= 20) { if (spoof_apply(SC_NONCORE, g_c.noncore_temp, 1) < 0) ok = 0; }
+
+    if (ok) {
+        unlink(g_spoof_flag);
+        log_msg("I", "thermal", "守护补齐伪装请求（core=%d noncore=%d）",
+                g_c.core_temp >= 20 ? g_c.core_temp : 0,
+                g_c.noncore_temp >= 20 ? g_c.noncore_temp : 0);
+    } else if (n >= 8) {
+        unlink(g_spoof_flag);
+        log_msg("W", "thermal", "伪装请求连续 8 次无法落地，已放弃");
+    } else {
+        snprintf(b, sizeof b, "%d\n", n + 1);
+        write_str(g_spoof_flag, b);
+    }
+}
+
+/* ------------------------------------------------------------------ 锁 */
+
+static char g_lock[340];
 
 static void lock_acquire(void)
 {
     snprintf(g_lock, sizeof g_lock, "%s/daemon.lock", g_run);
     if (mkdir(g_lock, 0755) < 0) {
         if (errno != EEXIST) return;
-        /* 已有实例：pid 还活着就直接退出，避免两个守护同时写节点 */
-        char p[360], b[32] = "";
+        char p[400], b[32] = "";
         snprintf(p, sizeof p, "%s/pid", g_lock);
         if (read_line(p, b, sizeof b) == 0) {
             int pid = atoi(b);
@@ -645,7 +1915,7 @@ static void lock_acquire(void)
         rmdir(g_lock);
         if (mkdir(g_lock, 0755) < 0) return;
     }
-    char p[360], b[32];
+    char p[400], b[32];
     snprintf(p, sizeof p, "%s/pid", g_lock);
     snprintf(b, sizeof b, "%d\n", (int)getpid());
     write_str(p, b);
@@ -659,38 +1929,195 @@ static void lock_release(void)
     char p[400];
     snprintf(p, sizeof p, "%s/pid", g_lock);
     unlink(p);
-    rmdir(g_lock);
+    if (rmdir(g_lock) < 0) { /* 目录里有别的东西就留着 */ }
     snprintf(p, sizeof p, "%s/daemon.pid", g_run);
     unlink(p);
 }
 
-static void heartbeat(void)
-{
-    char b[64];
-    snprintf(b, sizeof b, "%ld\n", (long)time(NULL));
-    char p[320];
-    snprintf(p, sizeof p, "%s/hb", g_run);
-    write_str(p, b);
-}
-
-static int screen_state(void)
-{
-    char b0[256], b1[256];
-    snprintf(b0, sizeof b0, "%s/sys/class/backlight/panel0-backlight/brightness", g_sys);
-    snprintf(b1, sizeof b1, "%s/sys/class/backlight/panel1-backlight/brightness", g_sys);
-    const char *p[] = { b0, b1, NULL };
-    int v;
-    for (int i = 0; p[i]; i++) {
-        if (read_int(p[i], &v) == 0) return v > 0 ? 1 : 0;
-    }
-    return 1;
-}
+/* ------------------------------------------------------------------ 恢复 */
 
 static void restore_all(void)
 {
     spoof_clear();
+    shell_emul(0);
     scr_release();
-    log_msg("I", "daemon", "收到退出信号，伪装与屏幕状态已还原");
+    curr_restore();
+    g_batt_sp_on = 0;
+    log_msg("I", "daemon", "收到退出信号，伪装/限流/屏幕状态已还原");
+}
+
+/* ------------------------------------------------------------------ 主循环 */
+
+static void paths_init(void)
+{
+    rp("/sys/class/power_supply", g_ps, sizeof g_ps);
+    rp("/sys/class/thermal", g_therm, sizeof g_therm);
+
+    /* 允许像 shell 版那样用 SD_ZONE_GLOB 指定温区，路径仍按 g_sys 加前缀 */
+    const char *zg = getenv("SD_ZONE_GLOB");
+    if (zg && *zg) {
+        char tmp[MAXPATH];
+        snprintf(tmp, sizeof tmp, "%s", zg);
+        char *slash = strrchr(tmp, '/');
+        if (slash) {
+            *slash = 0;
+            snprintf(g_therm, sizeof g_therm, "%s%s", g_sys, tmp);
+            snprintf(g_zone_pref, sizeof g_zone_pref, "%s", slash + 1);
+            char *star = strchr(g_zone_pref, '*');
+            if (star) *star = 0;
+        }
+    }
+    rp("/sys/graphics/fb0/blank", g_fb, sizeof g_fb);
+    rp("/sys/class/oplus_chg/battery", g_oplus, sizeof g_oplus);
+    rp("/proc/shell-temp", g_shellproc, sizeof g_shellproc);
+
+    const char *bl = getenv("SD_BL");
+    if (bl && *bl) snprintf(g_bl, sizeof g_bl, "%s", bl);
+    else rp("/sys/class/backlight", g_bl, sizeof g_bl);
+
+    const char *fb = getenv("SD_FB");
+    if (fb && *fb) snprintf(g_fb, sizeof g_fb, "%s", fb);
+
+    const char *sp = getenv("SD_SPOOF_DIR");
+    if (sp && *sp) snprintf(g_spoof_dir, sizeof g_spoof_dir, "%s", sp);
+
+    snprintf(g_state, sizeof g_state, "%s/state.conf", g_data);
+    snprintf(g_log, sizeof g_log, "%s/log.txt", g_data);
+    snprintf(g_log_old, sizeof g_log_old, "%s/log.old.txt", g_data);
+    snprintf(g_run, sizeof g_run, "%s/run", g_data);
+    snprintf(g_scr_orig, sizeof g_scr_orig, "%s/scr.orig", g_run);
+    snprintf(g_scr_way, sizeof g_scr_way, "%s/scr.way", g_run);
+    snprintf(g_scr_fail, sizeof g_scr_fail, "%s/scr.fail", g_run);
+    snprintf(g_fcc_norm, sizeof g_fcc_norm, "%s/fcc.norm", g_run);
+    snprintf(g_curr_orig, sizeof g_curr_orig, "%s/curr.orig", g_run);
+    snprintf(g_curr_want, sizeof g_curr_want, "%s/curr.want", g_run);
+    snprintf(g_spoof_flag, sizeof g_spoof_flag, "%s/spoof.pending", g_run);
+    snprintf(g_sensor, sizeof g_sensor, "%s/sensor", g_run);
+    snprintf(g_hb, sizeof g_hb, "%s/hb", g_run);
+}
+
+/* core / noncore 伪装：shell 版也只在启动与配置变化时应用，不做每轮重贴。
+ * 这里按"值变了才贴"，另加每 40 轮一次兜底重试（mount 被系统清掉时能自愈）。 */
+static void apply_core_nc(int force)
+{
+    int c = g_c.core_temp >= 20 ? g_c.core_temp : 0;
+    int n = g_c.noncore_temp >= 20 ? g_c.noncore_temp : 0;
+
+    if (c) {
+        if (force || c != g_core_last) {
+            spoof_apply(SC_CORE, c, 0);
+            g_core_last = c;
+        }
+    } else {
+        g_core_last = -1;
+        if (g_spoof_ok[SC_CORE]) spoof_clear_scope(SC_CORE);
+    }
+
+    if (n) {
+        if (force || n != g_nc_last) {
+            spoof_apply(SC_NONCORE, n, 0);
+            g_nc_last = n;
+        }
+    } else {
+        g_nc_last = -1;
+        if (g_spoof_ok[SC_NONCORE]) spoof_clear_scope(SC_NONCORE);
+    }
+}
+
+/* 一轮热路径。返回本轮该睡多久。 */
+static int loop_once(int *mode_changed)
+{
+    static char last_mode[16] = "";
+
+    conf_load();
+    g_tick_n++;
+
+    if (!g_scanned || g_temp_fail >= 2 || g_tick_n % 40 == 0) zones_scan();
+    screen_tick();
+
+    char st[32];
+    batt_status(st, sizeof st);
+    int charging = !strcmp(st, "Charging") || !strcmp(st, "Full");
+    if (charging) curr_keep();
+
+    scr_tick();
+    spoof_pending();
+    batt_sp_guard();
+
+    if (!sentinel_guard()) {
+        hb_write();
+        telemetry();
+        return charging ? 10 : g_c.tick;
+    }
+
+    if (strcmp(g_c.temp_mode, last_mode)) {
+        log_msg("I", "daemon", "温度模式: %s → %s",
+                last_mode[0] ? last_mode : "<无>", g_c.temp_mode);
+        snprintf(last_mode, sizeof last_mode, "%s", g_c.temp_mode);
+        /* 换模式后壳温缓存必须作废，否则新值恰好等于旧值时不写 */
+        shell_emul_reset();
+        g_last_pct = 100;
+        if (mode_changed) *mode_changed = 1;
+    }
+
+    if (!strcmp(g_c.temp_mode, "static")) {
+        int out = shell_target();
+        shell_emul(out);
+        apply_core_nc(g_tick_n % 40 == 0);
+    } else if (!strcmp(g_c.temp_mode, "charge")) {
+        if (charging) {
+            charge_tick();
+            apply_core_nc(g_tick_n % 40 == 0);
+        } else {
+            shell_emul(0);
+            if (g_spoof_ok[SC_CORE] || g_spoof_ok[SC_NONCORE]) {
+                spoof_clear_scope(SC_CORE);
+                spoof_clear_scope(SC_NONCORE);
+                g_core_last = g_nc_last = -1;
+            }
+            int si = -1, sc = 0;
+            if (pick_sentinel(&si, &sc) == 0) {
+                const char *nm = strrchr(g_z[si].path, '/');
+                snprintf(g_tl_zone, sizeof g_tl_zone, "%s", nm ? nm + 1 : g_z[si].path);
+                int cur = 0;
+                if (sentinel_temp(si, &cur) == 0) snprintf(g_tl_real, sizeof g_tl_real, "%d", cur);
+            }
+        }
+    } else {
+        /* off：什么都不接管，但遥测要有真实温度 */
+        if (g_spoof_ok[SC_CORE] || g_spoof_ok[SC_NONCORE]) {
+            spoof_clear_scope(SC_CORE);
+            spoof_clear_scope(SC_NONCORE);
+            g_core_last = g_nc_last = -1;
+        }
+        shell_emul(0);
+        int si = -1, sc = 0;
+        if (pick_sentinel(&si, &sc) == 0) {
+            const char *nm = strrchr(g_z[si].path, '/');
+            snprintf(g_tl_zone, sizeof g_tl_zone, "%s", nm ? nm + 1 : g_z[si].path);
+            int cur = 0;
+            if (sentinel_temp(si, &cur) == 0) snprintf(g_tl_real, sizeof g_tl_real, "%d", cur);
+        }
+    }
+
+    hb_write();
+    telemetry();
+
+    switch (hz_guard()) {
+        case 1:
+            if (g_tick_n % 4 == 1) log_msg("I", "daemon", "刷新率被系统改回，已补写");
+            break;
+        case 2:
+            if (g_tick_n % 40 == 0) log_msg("I", "daemon", "刷新率写入被拒绝，已暂停补写（厂商锁定显示策略）");
+            break;
+        case 3:
+            if (g_tick_n % 40 == 0) log_msg("I", "daemon", "省电模式开启，刷新率交回系统管理");
+            break;
+        default:
+            break;
+    }
+
+    return charging ? 10 : g_c.tick;
 }
 
 int main(int argc, char **argv)
@@ -699,12 +2126,12 @@ int main(int argc, char **argv)
     if (d && *d) snprintf(g_data, sizeof g_data, "%s", d);
     const char *sr = getenv("SD_SYSROOT");
     if (sr && *sr) snprintf(g_sys, sizeof g_sys, "%s", sr);
+    /* SD_MODDIR 是正式名；MODDIR 兼容 2.9.43 的 service.sh 只导出了 MODDIR */
     const char *md = getenv("SD_MODDIR");
+    if (!md || !*md) md = getenv("MODDIR");
     if (md && *md) snprintf(g_moddir, sizeof g_moddir, "%s", md);
 
-    snprintf(g_state, sizeof g_state, "%s/state.conf", g_data);
-    snprintf(g_log, sizeof g_log, "%s/log.txt", g_data);
-    snprintf(g_run, sizeof g_run, "%s/run", g_data);
+    paths_init();
     mkdir_p(g_data);
     mkdir_p(g_run);
 
@@ -713,106 +2140,100 @@ int main(int argc, char **argv)
             printf("qcmon %s\n", VER);
             return 0;
         }
+        conf_load();
         if (!strcmp(argv[1], "zones")) {
             zones_scan();
-            for (int i = 0; i < g_zn; i++) {
-                static const char *cn[] = { "other", "battery", "shell", "core", "board" };
-                printf("%-28s cls=%-8s unit=%d temp=%d\n", g_z[i].type,
-                       cn[g_z[i].cls], g_z[i].unit, temp_c(&g_z[i]));
-            }
+            for (int i = 0; i < g_zn; i++)
+                printf("%-28s cls=%-8s temp=%d\n", g_z[i].type, CLS_NAME[g_z[i].cls], zone_temp(&g_z[i]));
+            return 0;
+        }
+        if (!strcmp(argv[1], "bench")) {
+            int n = argc > 2 ? atoi(argv[2]) : 50;
+            if (n < 1) n = 1;
+            zones_scan();
+            struct timespec t0, t1;
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            for (int i = 0; i < n; i++) { int ch = 0; loop_once(&ch); }
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            double ms = ((t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6) / n;
+            printf("%d 轮，平均 %.3f ms/轮（%d 温区，tick=%ds）\n", n, ms, g_zn, g_c.tick);
             return 0;
         }
         if (!strcmp(argv[1], "once")) {
-            conf_load();
             zones_scan();
+            int out = shell_target();
+            printf("zones=%d mode=%s real=%s lim=%s zone=%s out=%s\n",
+                   g_zn, g_c.temp_mode,
+                   g_tl_real[0] ? g_tl_real : "-",
+                   g_tl_lim[0] ? g_tl_lim : "-",
+                   g_tl_zone[0] ? g_tl_zone : "-", g_tl_out);
+            (void)out;
             int wall = 0;
             int tgt = curr_target(&wall);
-            printf("zones=%d mode=%s wall=%d target=%d\n", g_zn, g_c.temp_mode, wall, tgt);
+            printf("wall=%d curr_target=%d\n", wall, tgt);
+            return 0;
+        }
+        if (!strcmp(argv[1], "sensor")) {
+            zones_scan();
+            /* 守护里靠"连续两次读到暗"确认息屏；单次命令没有历史，直接采两次 */
+            screen_tick();
+            screen_tick();
+            char st[32];
+            batt_status(st, sizeof st);
+            int charging = !strcmp(st, "Charging") || !strcmp(st, "Full");
+            if (charging) curr_keep();
+            scr_tick();
+            batt_sp_guard();
+            if (sentinel_guard()) {
+                if (!strcmp(g_c.temp_mode, "static")) shell_emul(shell_target());
+                else if (!strcmp(g_c.temp_mode, "charge")) charge_tick();
+            }
+            hb_write();
+            telemetry();
+            sync_desc();
+            char b[320];
+            read_line(g_sensor, b, sizeof b);
+            printf("sensor: %s\nscreen=%d charging=%d emul=%d\n", b, g_screen_on, charging, g_emul_ok);
             return 0;
         }
     }
 
-    signal(SIGTERM, on_signal);
-    signal(SIGINT, on_signal);
-    signal(SIGHUP, on_signal);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_term;
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
+    sa.sa_handler = on_usr1;
+    sigaction(SIGUSR1, &sa, NULL);   /* action.sh 每改一次配置都会发，不能让它退出 */
 
-    conf_defaults();
     conf_load();
     lock_acquire();
+    curr_prepare();
+    zones_scan();
+    sync_desc();
     log_msg("I", "daemon", "qcmon %s 启动：tick=%ds mode=%s", VER, g_c.tick, g_c.temp_mode);
 
     while (!g_stop) {
-        conf_load();
-        g_tick_n++;
+        int changed = 0;
+        int sec = loop_once(&changed);
+        if (changed) sync_desc();
+        if (g_tick_n % 12 == 3) sync_desc();
 
-        if (!g_scanned || g_tick_n % 40 == 0) zones_scan();
-        g_screen_on = screen_state();
-
-        char st[64] = "";
-        batt_status(st, sizeof st);
-        int charging = !strcmp(st, "Charging") || !strcmp(st, "Full");
-
-        if (!strcmp(g_c.temp_mode, "off")) {
-            if (g_spoof_done_core || g_spoof_done_nc) {
-                spoof_clear();
-                log_msg("I", "thermal", "模式为关闭，伪装已撤销");
-            }
-        } else if (!charging) {
-            if (g_spoof_done_core || g_spoof_done_nc) {
-                spoof_clear();
-                log_msg("I", "thermal", "未充电，伪装已撤销");
-            }
-        } else {
-            /* 伪装：core / noncore / shell 三条独立路径 */
-            if (g_c.core_temp >= 20) {
-                spoof_apply(SP_CORE, g_c.core_temp);
-                g_spoof_done_core = 1;
-            } else if (g_spoof_done_core) {
-                g_spoof_done_core = 0;
-            }
-            if (g_c.noncore_temp >= 20) {
-                spoof_apply(SP_NONCORE, g_c.noncore_temp);
-                g_spoof_done_nc = 1;
-            } else if (g_spoof_done_nc) {
-                g_spoof_done_nc = 0;
-            }
-            if (g_c.shell_temp >= 20 && !strcmp(g_c.temp_mode, "static")) {
-                spoof_apply(SP_SHELL, g_c.shell_temp);
-            }
-
-            zone_t *s = NULL;
-            sentinel_pick(&s);
-
-            int wall = 0;
-            int tgt = curr_target(&wall);
-            g_wall_eff = wall;
-
-            if (check_fuse(s)) {
-                log_msg("W", "charge", "熔断：哨兵 %s 达 %d℃（限 %d），本轮不限流",
-                        s ? s->type : "?", s ? sent_temp(s) : 0, limit_for(s));
-            } else if (tgt > 0) {
-                char fcc[256];
-                if (fcc_node(fcc, sizeof fcc) == 0) {
-                    char b[32];
-                    int v = 0;
-                    if (read_int(fcc, &v) == 0 && v > 100000) snprintf(b, sizeof b, "%d\n", tgt * 1000);
-                    else snprintf(b, sizeof b, "%d\n", tgt);
-                    if (write_str(fcc, b) == 0)
-                        log_msg("I", "charge", "限流 %dmA（墙 %d℃，哨兵 %s=%d℃）",
-                                tgt, wall, s ? s->type : "?", s ? sent_temp(s) : 0);
-                }
-            }
-
-            scr_tick();
+        struct timespec ts = { sec, 0 };
+        while (!g_stop && !g_reload) {
+            if (nanosleep(&ts, &ts) == 0) break;
+            if (errno != EINTR) break;
         }
-
-        heartbeat();
-
-        struct timespec ts = { g_c.tick, 0 };
-        nanosleep(&ts, NULL);
+        if (g_reload) {
+            g_reload = 0;
+            log_msg("I", "daemon", "收到重载信号，立即刷新参数");
+            zones_scan();
+        }
     }
 
     restore_all();
     lock_release();
+    log_msg("I", "daemon", "守护已停止");
     return 0;
 }

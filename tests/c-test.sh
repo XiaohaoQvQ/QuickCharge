@@ -1,0 +1,315 @@
+#!/bin/sh
+# C 守护（qcmon）冒烟测试：在假 sysroot 上跑完整热路径，逐项断言。
+# 用法：sh c-test.sh /path/to/qcmon
+# 依赖：root + 允许 bind mount（模拟设备节点）
+set -u
+
+BIN=${1:-/tmp/qcmon_x86}   # 可以是 "qemu-aarch64-static /path/bin"
+BASE=/tmp/qct
+ROOT=$BASE/root
+PASS=0
+FAIL=0
+ok()   { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+bad()  { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; }
+chk()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1（期望 $3，实际 $2）"; fi; }
+chkn() { if [ "$2" != "$3" ]; then ok "$1"; else bad "$1（不应等于 $3）"; fi; }
+has()  { if grep -q "$2" "$3" 2>/dev/null; then ok "$1"; else bad "$1（日志缺：$2）"; fi; }
+nhas() { if grep -q "$2" "$3" 2>/dev/null; then bad "$1（日志不该有：$2）"; else ok "$1"; fi; }
+
+z() { echo "$ROOT/sys/class/thermal/$1"; }
+mkz() { # name type temp
+    mkdir -p "$(z "$1")"
+    printf '%s\n' "$2" >"$(z "$1")/type"
+    printf '%s\n' "$3" >"$(z "$1")/temp"
+}
+
+setup() {
+    rm -rf "$BASE"
+    mkdir -p "$BASE/spoof"
+    mkdir -p "$ROOT/sys/class/thermal"
+    mkdir -p "$ROOT/sys/class/power_supply/battery"
+    mkdir -p "$ROOT/sys/class/power_supply/usb"
+    mkdir -p "$ROOT/sys/class/backlight/panel0-backlight"
+    mkdir -p "$ROOT/sys/class/graphics/fb0"
+    mkdir -p "$ROOT/sys/module/oplus_chg/parameters"
+    mkdir -p "$ROOT/proc"
+
+    # 温区：电池 / 壳温(可 emul) / 核心 / 板级熔断源 / 热点 / 非温度
+    mkz thermal_zone0 battery        34000
+    mkz thermal_zone1 shell_back     33000
+    mkz thermal_zone2 cpu-0-0        45000
+    mkz thermal_zone3 xo-therm       36000
+    mkz thermal_zone4 pa            39000
+    mkz thermal_zone5 vbat            4000
+    mkz thermal_zone6 hw-trip0       60000
+    mkz thermal_zone7 bms            34500
+    : >"$(z thermal_zone1)/emul_temp"
+    chmod 644 "$(z thermal_zone1)/emul_temp"
+
+    printf 'Charging\n' >"$ROOT/sys/class/power_supply/battery/status"
+    printf '34000\n'    >"$ROOT/sys/class/power_supply/battery/temp"
+    printf '40\n'       >"$ROOT/sys/class/power_supply/battery/capacity"
+    printf '3000000\n'  >"$ROOT/sys/class/power_supply/battery/constant_charge_current_max"
+    printf '3000000\n'  >"$ROOT/sys/class/power_supply/battery/current_max"
+    printf '0\n'        >"$ROOT/sys/class/backlight/panel0-backlight/actual_brightness"
+    printf '0\n'        >"$ROOT/sys/class/graphics/fb0/blank"
+    printf '0\n'        >"$ROOT/sys/module/oplus_chg/parameters/ignore_screen_state"
+    printf '0\n'        >"$ROOT/proc/shell-temp"
+    printf '1234.56 900.0\n' >"$ROOT/proc/uptime"
+
+    mkdir -p "$BASE/data/run" "$BASE/mod"
+    MP="$(dirname "$0")/../module.prop"
+    [ -f "$MP" ] || MP="$(dirname "$0")/../quickcharge/module.prop"
+    cp "$MP" "$BASE/mod/module.prop" 2>/dev/null || \
+        printf 'id=quickcharge\nname=Quick Charge\nversion=2.9.44\nversioncode=29440\ndescription=QC\n' >"$BASE/mod/module.prop"
+}
+
+# 基础 state.conf
+state() {
+    cat >"$BASE/data/state.conf" <<EOF
+temp_mode=${1:-static}
+shell_temp=${2:-30}
+core_temp=${3:-off}
+noncore_temp=${4:-off}
+wall=${5:-42}
+aggr=${6:-10}
+curr_max=${7:-0}
+curr_edge=4
+battery_limit=48
+sentinel_limit=85
+tick=5
+fast_cap=55
+log_level=4
+hz=off
+hz_hard=0
+batt_spoof=off
+EOF
+}
+
+run() { # 子命令
+    SD_DATA=$BASE/data SD_SYSROOT=$ROOT SD_MODDIR=$BASE/mod \
+    SD_SPOOF_DIR=$BASE/spoof SD_BL=$ROOT/sys/class/backlight \
+    $BIN "$@"
+}
+
+# 亮屏 / 息屏
+screen_on()  { printf '512\n' >"$ROOT/sys/class/backlight/panel0-backlight/actual_brightness"; }
+screen_off() { printf '0\n' >"$ROOT/sys/class/backlight/panel0-backlight/actual_brightness"; }
+
+val() { cat "$1" 2>/dev/null | tr -d ' \r\n'; }
+
+daemon_start() {
+    SD_DATA=$BASE/data SD_SYSROOT=$ROOT SD_MODDIR=$BASE/mod \
+    SD_SPOOF_DIR=$BASE/spoof SD_BL=$ROOT/sys/class/backlight \
+    $BIN >"$BASE/daemon.out" 2>&1 &
+    DPID=$!
+}
+
+daemon_stop() {
+    kill -TERM "$DPID" 2>/dev/null
+    i=0
+    while kill -0 "$DPID" 2>/dev/null && [ "$i" -lt 40 ]; do
+        sleep 0.1; i=$((i + 1))
+    done
+    kill -KILL "$DPID" 2>/dev/null
+    wait "$DPID" 2>/dev/null
+}
+
+# ============================================================ 1. 分类
+echo "[1] 温区分类与作用域"
+setup
+state static
+out=$(run zones)
+echo "$out" | grep -q 'battery  *cls=battery'      && ok "battery 归入 battery"      || bad "battery 分类"
+echo "$out" | grep -q 'shell_back .*cls=shell'     && ok "shell_back 归入 shell"     || bad "shell 分类"
+echo "$out" | grep -q 'cpu-0-0 .*cls=core'         && ok "cpu-0-0 归入 core"         || bad "core 分类"
+echo "$out" | grep -q 'xo-therm .*cls=board'       && ok "xo-therm 归入 board"       || bad "board 分类"
+echo "$out" | grep -q 'vbat .*cls=other'           && ok "vbat 归入 other（非温度）"   || bad "vbat 分类"
+echo "$out" | grep -q 'hw-trip0 .*cls=other'       && ok "hw-trip0 归入 other"       || bad "hw-trip 分类"
+
+# ============================================================ 2. 壳温目标
+echo "[2] 壳温目标计算（static）"
+setup
+state static 30
+screen_on
+out=$(run once)
+echo "$out" | grep -q 'real=34'  && ok "真实温度取到 34℃" || bad "真实温度：$out"
+echo "$out" | grep -q 'lim=48'   && ok "电池限值 48℃"     || bad "限值：$out"
+# 屏障 42、真实 34、base 30、gap 12：余量 8℃ 还够，按 base 上报 30（低于真值 4℃）
+echo "$out" | grep -q 'out=30' && ok "上报温度压在屏障下方（30）" || bad "上报温度：$out"
+
+# ============================================================ 3. static 全链
+echo "[3] static 模式：壳温模拟 + 核心伪装"
+setup
+state static 30 42 off
+screen_on
+daemon_start
+sleep 6
+# 壳温模拟写到 emul_temp
+ev=$(val "$(z thermal_zone1)/emul_temp")
+[ -n "$ev" ] && [ "$ev" != 0 ] && ok "壳温写入 emul_temp=$ev" || bad "壳温未写入（$ev）"
+# core 伪装：cpu-0-0 读到 42℃
+cv=$(val "$(z thermal_zone2)/temp")
+chk "核心伪装 42℃" "$cv" "42000"
+# 电池与板级不该被 core 作用域动到
+bv=$(val "$(z thermal_zone0)/temp")
+chk "电池温区保持真实" "$bv" "34000"
+# 哨兵（battery 优先）没被伪装
+gv=$(val "$(z thermal_zone3)/temp")
+chk "xo-therm 保持真实" "$gv" "36000"
+# 遥测文件
+if [ -f "$BASE/data/run/sensor" ]; then
+    set -- $(cat "$BASE/data/run/sensor")
+    [ $# -eq 7 ] && ok "sensor 七字段：$*" || bad "sensor 字段数 $#"
+    chk "sensor 记录 real" "$2" "34"
+    chk "sensor 记录 mode" "$6" "static"
+else bad "sensor 未生成"; fi
+# 心跳必须是 uptime + pid
+if [ -f "$BASE/data/run/hb" ]; then
+    set -- $(cat "$BASE/data/run/hb")
+    [ "$1" -lt 100000 ] && chk "心跳 pid 正确" "$2" "$DPID" || bad "心跳格式：$*"
+else bad "hb 未写入"; fi
+# USR1 不能把守护打死
+kill -USR1 "$DPID" 2>/dev/null
+sleep 1
+kill -0 "$DPID" 2>/dev/null && ok "USR1 后守护存活" || bad "USR1 杀死了守护"
+has "重载信号被处理" "收到重载信号" "$BASE/data/log.txt"
+daemon_stop
+# 退出还原
+cv=$(val "$(z thermal_zone2)/temp")
+chk "退出后核心温度还原" "$cv" "45000"
+ev=$(val "$(z thermal_zone1)/emul_temp")
+chk "退出后壳温归零" "$ev" "0"
+has "退出日志" "已还原" "$BASE/data/log.txt"
+
+# ============================================================ 4. charge 模式
+echo "[4] charge 模式：按电量切换"
+setup
+state charge 30 off off
+screen_on
+run sensor >/dev/null
+ev=$(val "$(z thermal_zone1)/emul_temp")
+[ -n "$ev" ] && [ "$ev" != 0 ] && ok "电量 40% < fast_cap，接管壳温" || bad "charge 模式未接管（$ev）"
+printf '80\n' >"$ROOT/sys/class/power_supply/battery/capacity"
+run sensor >/dev/null
+ev=$(val "$(z thermal_zone1)/emul_temp")
+chk "电量 80% ≥ fast_cap，关闭模拟" "$ev" "0"
+
+# ============================================================ 5. 熔断与恢复
+echo "[5] 熔断 / 暂停 / 冷却恢复"
+setup
+state static 30 42 off
+screen_on
+daemon_start
+sleep 6
+cv=$(val "$(z thermal_zone2)/temp")
+chk "熔断前已伪装" "$cv" "42000"
+# 把 xo-therm 推到 90（≥ sentinel_limit 85）
+printf '90000\n' >"$(z thermal_zone3)/temp"
+sleep 7
+cv=$(val "$(z thermal_zone2)/temp")
+chk "熔断后伪装撤销" "$cv" "45000"
+has "熔断日志" "熔断" "$BASE/data/log.txt"
+has "暂停日志" "已暂停伪装" "$BASE/data/log.txt"
+# 回落到 80（85-3=82 以下）。熔断那轮的 sleep 是 5s，冷却判定要再等一轮
+printf '80000\n' >"$(z thermal_zone3)/temp"
+sleep 12
+cv=$(val "$(z thermal_zone2)/temp")
+chk "冷却后自动恢复伪装" "$cv" "42000"
+has "恢复日志" "温度已回落" "$BASE/data/log.txt"
+daemon_stop
+
+# ============================================================ 6. 亮屏快充（内核参数）
+echo "[6] 亮屏快充：内核 ignore_screen_state"
+setup
+state static 30
+screen_off
+# 先息屏一轮，学到基准
+run sensor >/dev/null
+sleep 1
+screen_on
+run sensor >/dev/null
+sv=$(val "$ROOT/sys/module/oplus_chg/parameters/ignore_screen_state")
+chk "亮屏后置 1" "$sv" "1"
+[ -f "$BASE/data/run/scr.orig" ] && ok "落盘 scr.orig" || bad "scr.orig 未落盘"
+chk "scr.way 记 kernel" "$(val "$BASE/data/run/scr.way")" "kernel"
+screen_off
+run sensor >/dev/null
+run sensor >/dev/null
+sv=$(val "$ROOT/sys/module/oplus_chg/parameters/ignore_screen_state")
+chk "息屏后还原 0" "$sv" "0"
+
+# ============================================================ 7. 限流
+echo "[7] 电流墙"
+setup
+state static 30 off off 42 10 3000
+screen_on
+run sensor >/dev/null
+cv=$(val "$ROOT/sys/class/power_supply/battery/constant_charge_current_max")
+chk "写入 3A（µA 单位）" "$cv" "3000000"
+[ -f "$BASE/data/run/curr.orig" ] && ok "记录原始值" || bad "curr.orig 未落盘"
+# 目标归零，还原
+state static 30 off off 42 10 0
+run sensor >/dev/null
+cv=$(val "$ROOT/sys/class/power_supply/battery/constant_charge_current_max")
+chk "关闭限流后还原" "$cv" "3000000"
+
+# ============================================================ 8. 电池伪装
+echo "[8] 电池伪装与硬上限"
+setup
+state static 30 off off 42 10 0
+screen_on
+# batt_spoof=30
+printf 'batt_spoof=30\n' >>"$BASE/data/state.conf"
+run sensor >/dev/null
+bv=$(val "$(z thermal_zone0)/temp")
+chk "电池温区被伪装成 30℃" "$bv" "30000"
+# bms 在 sd_zone_class 里不属于 battery 类（只有 batt/battery 关键词），两版行为一致
+nb=$(val "$(z thermal_zone7)/temp")
+chk "bms 不参与电池伪装" "$nb" "34500"
+# 哨兵仍要读真温 34
+out=$(run once)
+echo "$out" | grep -q 'real=34' && ok "哨兵读真实温度" || bad "哨兵读了伪装值：$out"
+# 真实温度到 47，撤销并冷却
+printf '47000\n' >"$ROOT/sys/class/power_supply/battery/temp"
+run sensor >/dev/null
+bv=$(val "$(z thermal_zone0)/temp")
+chk "超硬上限撤销伪装" "$bv" "34000"
+has "硬上限日志" "硬上限" "$BASE/data/log.txt"
+
+# ============================================================ 9. off 模式
+echo "[9] off 模式不接管"
+setup
+state off 30 42000 off
+screen_on
+daemon_start
+sleep 6
+cv=$(val "$(z thermal_zone2)/temp")
+chk "off 模式不改核心温度" "$cv" "45000"
+sv=$(val "$ROOT/sys/module/oplus_chg/parameters/ignore_screen_state")
+chk "off 模式不接管亮屏快充" "$sv" "0"
+daemon_stop
+
+# ============================================================ 10. 描述同步
+echo "[10] module.prop 描述同步"
+setup
+state static 30
+screen_on
+run sensor >/dev/null
+d=$(grep '^description=' "$BASE/mod/module.prop" | cut -d= -f2-)
+case "$d" in "QC · 温控档位"*) ok "描述已写回：$d" ;; *) bad "描述未同步：$d" ;; esac
+
+# ============================================================ 11. 双实例保护
+echo "[11] 单实例锁"
+setup
+state static 30
+screen_on
+daemon_start
+sleep 2
+out=$(run 2>&1)
+case "$out" in *"已有实例"*) ok "第二个实例自动退出" ;; *) bad "未拦住重复启动：$out" ;; esac
+daemon_stop
+
+echo
+echo "结果：通过 $PASS，失败 $FAIL"
+[ "$FAIL" -eq 0 ]

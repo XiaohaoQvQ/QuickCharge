@@ -83,7 +83,10 @@ sd_daemon() {
     # 所以两个包共用这一份 service.sh，行为由 bin/qcmon 是否存在决定。
     if [ -x "$MODDIR/bin/qcmon" ] && [ "${SD_SHELL_DAEMON:-0}" != 1 ]; then
         if "$MODDIR/bin/qcmon" -v >/dev/null 2>&1; then
-            export SD_DATA MODDIR
+            # qcmon 读 SD_MODDIR（用于回写 module.prop 描述），MODDIR 是兼容旧名
+            export SD_DATA
+            export SD_MODDIR="$MODDIR"
+            export MODDIR
             sd_info daemon "切换到 C 守护 qcmon（shell 版本仍可用 SD_SHELL_DAEMON=1 强制）"
             rm -rf "$lock" 2>/dev/null
             exec "$MODDIR/bin/qcmon"
