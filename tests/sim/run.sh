@@ -135,7 +135,13 @@ EOS
 chmod +x /usr/local/bin/*
 
 # ---------------------------------------------------------------- 假 sysfs
-mount -t tmpfs tmpfs /sys 2>/dev/null || { echo "NO_TMPFS_SYS"; exit 1; }
+# 容器里 /sys 可能已被上一轮或别的测试占着（再 mount 会 EBUSY）。
+# 这种情况直接清空复用，不要退出——否则整套用例在 CI 里跑第二遍就挂。
+if ! mount -t tmpfs tmpfs /sys 2>/dev/null; then
+    [ -d /sys/class ] || { echo "NO_TMPFS_SYS"; exit 1; }
+    rm -rf /sys/class/thermal /sys/class/power_supply /sys/class/backlight 2>/dev/null
+    rm -rf /sys/module/oplus_chg /sys/module/oplus_chg_v2 /sys/module/oplus_charge 2>/dev/null
+fi
 mkzone() {  # dir type temp
     mkdir -p "/sys/class/thermal/$1"
     printf '%s\n' "$2" >"/sys/class/thermal/$1/type"
@@ -2665,6 +2671,38 @@ printf '2000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
 t47c sh -c '. /opt/qc/lib/qc.sh; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
 eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "1" "降温后恢复接管（内核参数）"
 rm -rf /sys/module/oplus_chg
+
+# ---------------------------------------------------------------- T48 节点读取
+# sd_read1 从 $(tr ...) 改为 read 内建，省掉每轮几十次 fork。
+# 这里锁住行为：换行/CRLF/空格/无换行/空文件/不存在，六种输入结果必须和旧实现一致。
+D48=/tmp/qc48; rm -rf "$D48"; mkdir -p "$D48"
+t48() { env SD_DATA=$D48 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 SD_BL=/nonexistent SD_FB=/nonexistent sh "$@"; }
+rd48() { t48 -c '. /opt/qc/lib/qc.sh; sd_read1 "$1" && printf "%s" "$_sd_rv" || printf "ERR"' rd "$1"; }
+
+printf '38000\n'      >"$D48/n_lf"
+printf '38000\r\n'    >"$D48/n_crlf"
+printf '  38000  \n'  >"$D48/n_sp"
+printf '38000'        >"$D48/n_nonl"
+printf '  380  \r\n'  >"$D48/n_mix"
+: >"$D48/n_empty"
+printf '  \n'         >"$D48/n_blank"
+
+eq "$(rd48 "$D48/n_lf")"    "38000" "读取：普通换行"
+eq "$(rd48 "$D48/n_crlf")"  "38000" "读取：CRLF 去掉回车"
+eq "$(rd48 "$D48/n_sp")"    "38000" "读取：前后空格裁掉"
+eq "$(rd48 "$D48/n_nonl")"  "38000" "读取：无换行结尾也认"
+eq "$(rd48 "$D48/n_mix")"   "380"   "读取：空格+CRLF 混合"
+eq "$(rd48 "$D48/n_empty")" "ERR"   "读取：空文件返回失败"
+eq "$(rd48 "$D48/n_blank")" "ERR"   "读取：只有空白算空"
+eq "$(rd48 "$D48/nonexist")" "ERR"  "读取：文件不存在返回失败"
+
+# 值里带空格不能被截断（部分节点的 type 是 "quiet-therm-adc" 这类长名）
+printf 'quiet-therm-adc\n' >"$D48/n_word"
+eq "$(rd48 "$D48/n_word")" "quiet-therm-adc" "读取：含连字符的名字完整"
+
+# 空行在中间时只取第一行
+printf '12345\n67890\n' >"$D48/n_two"
+eq "$(rd48 "$D48/n_two")" "12345" "读取：多行只取第一行"
 
 # 失败清单放在最后统一列一遍：滚动日志里翻不到的那几条，这里能一次看全
 if [ "$FAIL" -gt 0 ]; then

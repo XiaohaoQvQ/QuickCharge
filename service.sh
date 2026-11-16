@@ -78,6 +78,19 @@ sd_daemon() {
 
     mkdir -p "$SD_RUN" 2>/dev/null
 
+    # C 守护包：把热路径整个交给 qcmon，不再走下面的 shell 循环。
+    # 二进制缺失、不可执行或跑不起来时，脚本会照旧走 shell 版本，
+    # 所以两个包共用这一份 service.sh，行为由 bin/qcmon 是否存在决定。
+    if [ -x "$MODDIR/bin/qcmon" ] && [ "${SD_SHELL_DAEMON:-0}" != 1 ]; then
+        if "$MODDIR/bin/qcmon" -v >/dev/null 2>&1; then
+            export SD_DATA MODDIR
+            sd_info daemon "切换到 C 守护 qcmon（shell 版本仍可用 SD_SHELL_DAEMON=1 强制）"
+            rm -rf "$lock" 2>/dev/null
+            exec "$MODDIR/bin/qcmon"
+        fi
+        sd_warn daemon "bin/qcmon 无法执行，回退 shell 守护"
+    fi
+
     if ! mkdir "$lock" 2>/dev/null; then
         read -r holder 2>/dev/null <"$lock/pid"
         if sd_pid_is_daemon "$holder"; then
