@@ -28,7 +28,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-#define VER "2.9.45"
+#define VER "2.9.46"
 
 #define MAXZ 192
 #define MAXLINE 512
@@ -73,6 +73,7 @@ typedef struct {
     char hz[8];          /* "off" 或数值 */
     int hz_hard;
     char hz_prev_mcfr[16];
+    int cool_guard;      /* 1=亮屏解除 oplus cool_down 降流 */
 } conf_t;
 
 static conf_t g_c;
@@ -280,6 +281,7 @@ static void conf_defaults(void)
     g_c.fast_cap = 55;
     g_c.horae = 1;
     g_c.log_level = 3;
+    g_c.cool_guard = 1;
 }
 
 static int parse_i(const char *v, int def)
@@ -339,6 +341,7 @@ static void conf_load(void)
         else if (!strcmp(k, "hz")) snprintf(g_c.hz, sizeof g_c.hz, "%s", v);
         else if (!strcmp(k, "hz_hard")) g_c.hz_hard = parse_i(v, 0);
         else if (!strcmp(k, "hz_prev_mcfr")) snprintf(g_c.hz_prev_mcfr, sizeof g_c.hz_prev_mcfr, "%s", v);
+        else if (!strcmp(k, "cool_guard")) g_c.cool_guard = parse_i(v, 1);
     }
     fclose(f);
 
@@ -1357,6 +1360,97 @@ static void scr_tick(void)
     }
 }
 
+/* ------------------------------------------------------------------ 降流解除 */
+/*
+ * ColorOS 16 用 oplus_chg/battery/cool_down 做亮屏降流：灭屏 0，亮屏 7~13，
+ * 与温度无关（实测电池 33.8℃ 照样跳到 7）。该节点可写，写 0 后满速立即恢复，
+ * 驱动不会逐秒覆盖，只在屏幕状态等事件时重算，所以按 tick 复查即可。
+ */
+
+static char g_cool_path[MAXPATH];
+static int g_cool_none = 0;
+static int g_cool_logged = -99;
+
+static int cool_node(char *out, size_t n)
+{
+    if (g_cool_none) return -1;
+    if (g_cool_path[0] && access(g_cool_path, F_OK) == 0) {
+        snprintf(out, n, "%s", g_cool_path);
+        return 0;
+    }
+    static const char *cand[] = {
+        "/sys/class/oplus_chg/battery/cool_down",
+        "/sys/class/oplus_chg/battery/oplus_cool_down",
+        "/sys/class/oplus_chg/charger/cool_down",
+        NULL
+    };
+    for (int i = 0; cand[i]; i++) {
+        char p[MAXPATH + 96];
+        snprintf(p, sizeof p, "%s%s", g_sys, cand[i]);
+        if (access(p, F_OK) == 0) {
+            snprintf(g_cool_path, sizeof g_cool_path, "%s", p);
+            snprintf(out, n, "%s", p);
+            return 0;
+        }
+    }
+    g_cool_none = 1;
+    return -1;
+}
+
+static void cool_tick(void)
+{
+    char node[MAXPATH];
+
+    if (!g_c.cool_guard) return;
+
+    if (cool_node(node, sizeof node) < 0) {
+        if (g_cool_logged != -1) {
+            log_msg("W", "charge", "降流解除：本机没有 cool_down 节点，跳过");
+            g_cool_logged = -1;
+        }
+        return;
+    }
+
+    char st[32];
+    batt_status(st, sizeof st);
+    if (strcmp(st, "Charging") && strcmp(st, "Full")) return;
+
+    /* 灭屏时驱动自己给 0，不插手，省得来回写 */
+    if (!g_screen_on) return;
+
+    int bt = batt_temp_ps();
+    if (bt > -100 && bt >= 48) {          /* 过热：彻底放手 */
+        if (g_cool_logged != -2) {
+            log_msg("W", "charge", "降流解除：电池 %d℃ 过热，交还驱动控制", bt);
+            g_cool_logged = -2;
+        }
+        return;
+    }
+
+    int cap = batt_capacity();
+    int want;
+    if (bt > -100 && bt >= 45) want = 2;  /* 偏热：留轻度降流 */
+    else if (cap >= 85) want = 1;         /* 接近满电：恒压段，只轻放 */
+    else want = 0;
+
+    int cur = 0;
+    if (read_int(node, &cur) < 0) return;
+    if (cur == want) return;
+
+    char b[16];
+    snprintf(b, sizeof b, "%d\n", want);
+    if (write_str(node, b) == 0) {
+        if (g_cool_logged != want) {
+            log_msg("I", "charge", "降流解除：cool_down %d → %d（电池 %d℃ 电量 %d%%）",
+                    cur, want, bt, cap);
+            g_cool_logged = want;
+        }
+    } else if (g_cool_logged != -3) {
+        log_msg("W", "charge", "降流解除失败：%s 写不进去", node);
+        g_cool_logged = -3;
+    }
+}
+
 /* ------------------------------------------------------------------ 屏幕 */
 
 static int screen_sample(void)
@@ -2099,6 +2193,14 @@ static void apply_core_nc(int force)
     }
 }
 
+/* 亮屏充电时把 tick 压到 2s：cool_down 会在亮屏瞬间跳回 7~13，
+ * 15s 才复查一次意味着最多白等 15 秒，2s 足够跟上且开销可忽略。 */
+static int next_tick(int charging)
+{
+    if (charging && g_screen_on && g_c.cool_guard) return 2;
+    return charging ? 10 : g_c.tick;
+}
+
 /* 一轮热路径。返回本轮该睡多久。 */
 static int loop_once(int *mode_changed)
 {
@@ -2116,13 +2218,14 @@ static int loop_once(int *mode_changed)
     if (charging) curr_keep();
 
     scr_tick();
+    cool_tick();
     spoof_pending();
     batt_sp_guard();
 
     if (!sentinel_guard()) {
         hb_write();
         telemetry();
-        return charging ? 10 : g_c.tick;
+        return next_tick(charging);
     }
 
     if (strcmp(g_c.temp_mode, last_mode)) {
@@ -2192,7 +2295,7 @@ static int loop_once(int *mode_changed)
             break;
     }
 
-    return charging ? 10 : g_c.tick;
+    return next_tick(charging);
 }
 
 int main(int argc, char **argv)
@@ -2261,6 +2364,7 @@ int main(int argc, char **argv)
             int charging = !strcmp(st, "Charging") || !strcmp(st, "Full");
             if (charging) curr_keep();
             scr_tick();
+            cool_tick();
             batt_sp_guard();
             if (sentinel_guard()) {
                 if (!strcmp(g_c.temp_mode, "static")) shell_emul(shell_target());

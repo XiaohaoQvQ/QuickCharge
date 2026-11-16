@@ -32,6 +32,7 @@ setup() {
     mkdir -p "$ROOT/sys/class/backlight/panel0-backlight"
     mkdir -p "$ROOT/sys/class/graphics/fb0"
     mkdir -p "$ROOT/sys/module/oplus_chg/parameters"
+    mkdir -p "$ROOT/sys/class/oplus_chg/battery"
     mkdir -p "$ROOT/proc"
 
     # 温区：电池 / 壳温(可 emul) / 核心 / 板级熔断源 / 热点 / 非温度
@@ -54,6 +55,8 @@ setup() {
     printf '0\n'        >"$ROOT/sys/class/backlight/panel0-backlight/actual_brightness"
     printf '0\n'        >"$ROOT/sys/class/graphics/fb0/blank"
     printf '0\n'        >"$ROOT/sys/module/oplus_chg/parameters/ignore_screen_state"
+    printf '7\n'        >"$ROOT/sys/class/oplus_chg/battery/cool_down"
+    chmod 644 "$ROOT/sys/class/oplus_chg/battery/cool_down"
     printf '0\n'        >"$ROOT/proc/shell-temp"
     printf '1234.56 900.0\n' >"$ROOT/proc/uptime"
 
@@ -83,6 +86,7 @@ log_level=4
 hz=off
 hz_hard=0
 batt_spoof=off
+cool_guard=1
 EOF
 }
 
@@ -327,8 +331,45 @@ case "$(grep '^description=' "$BASE/mod/module.prop")" in
     *) bad "disable 回退：$(grep '^description=' "$BASE/mod/module.prop")" ;;
 esac
 
-# ============================================================ 11. 双实例保护
-echo "[11] 单实例锁"
+# ============================================================ 11. 降流解除
+echo "[11] 降流解除 cool_down"
+setup
+state static 30
+screen_on
+
+COOL=$ROOT/sys/class/oplus_chg/battery/cool_down
+BT=$ROOT/sys/class/power_supply/battery/temp
+CAP=$ROOT/sys/class/power_supply/battery/capacity
+
+printf '7\n'     >"$COOL"; printf '34000\n' >"$BT"; printf '40\n' >"$CAP"
+run sensor >/dev/null 2>&1
+chk "亮屏 34℃/40% → 0" "$(val "$COOL")" "0"
+
+printf '7\n' >"$COOL"; printf '46000\n' >"$BT"
+run sensor >/dev/null 2>&1
+chk "电池 46℃ → 2" "$(val "$COOL")" "2"
+
+printf '7\n' >"$COOL"; printf '49000\n' >"$BT"
+run sensor >/dev/null 2>&1
+chk "电池 49℃ → 不干预" "$(val "$COOL")" "7"
+
+printf '7\n' >"$COOL"; printf '34000\n' >"$BT"; printf '90\n' >"$CAP"
+run sensor >/dev/null 2>&1
+chk "电量 90% → 1" "$(val "$COOL")" "1"
+
+printf '7\n' >"$COOL"; printf '40\n' >"$CAP"
+screen_off
+run sensor >/dev/null 2>&1
+chk "灭屏 → 不干预" "$(val "$COOL")" "7"
+
+printf '7\n' >"$COOL"
+screen_on
+sed -i 's/^cool_guard=.*/cool_guard=0/' "$BASE/data/state.conf"
+run sensor >/dev/null 2>&1
+chk "cool_guard=0 → 不干预" "$(val "$COOL")" "7"
+
+# ============================================================ 12. 双实例保护
+echo "[12] 单实例锁"
 setup
 state static 30
 screen_on

@@ -26,7 +26,7 @@ SD_SPOOF_DIR="${SD_SPOOF_DIR:-}"
 SD_SPOOF_DEF="${SD_SPOOF_DEF:-/dev/qc}"
 SD_SPOOF_FLAG="$SD_RUN/spoof.pending"
 SD_BUILT="$SD_DATA/built.id"
-SD_PS=/sys/class/power_supply
+SD_PS="${SD_PS:-/sys/class/power_supply}"
 SD_BL="${SD_BL:-/sys/class/backlight}"
 SD_FB="${SD_FB:-/sys/class/graphics/fb0/blank}"
 SD_OPLUS_CHG="${SD_OPLUS_CHG:-/sys/class/oplus_chg/battery}"
@@ -448,6 +448,7 @@ _st_hz_hard=""
 _st_hz_prev_mcfr=""
 _st_power_scale=""
 _st_batt_spoof=""
+_st_cool_guard=""
 
 sd_state_load() {
     _sd_st_loaded=1
@@ -457,7 +458,7 @@ sd_state_load() {
     _st_curr_edge=""
     _st_log_level=""; _st_tick=""; _st_defrev=""
     _st_hz=""; _st_hz_prev_peak=""; _st_hz_prev_min=""; _st_hz_hard=""; _st_hz_prev_mcfr=""; _st_power_scale=""
-    _st_cells_mode=""; _st_batt_spoof=""
+    _st_cells_mode=""; _st_batt_spoof=""; _st_cool_guard=""
     [ -f "$SD_STATE" ] || { _st_log_level=3; _sd_lv=3; return 0; }
     local k v
     while IFS='=' read -r k v; do
@@ -499,6 +500,7 @@ sd_state_get() {
         power_scale)    printf '%s' "${_st_power_scale:-${2:-100}}" ;;
         cells_mode)     printf '%s' "${_st_cells_mode:-${2:-auto}}" ;;
         batt_spoof)     printf '%s' "${_st_batt_spoof:-${2:-off}}" ;;
+        cool_guard)     printf '%s' "${_st_cool_guard:-${2:-1}}" ;;
         *)              printf '%s' "${2:-}" ;;
     esac
 }
@@ -2763,6 +2765,81 @@ sd_charge_tick() {
         sd_shell_emul "$_sd_last_out"
     else
         sd_shell_emul 0
+    fi
+}
+
+# ------------------------------------------------------------------ 降流解除
+# ColorOS 16 用 oplus_chg/battery/cool_down 做亮屏降流：灭屏 0，亮屏 7~13，
+# 与温度无关（实测电池 33.8℃ 照样跳到 7）。写 0 后满速立即恢复，驱动不会覆盖，
+# 只在屏幕状态等事件时重算，因此按 tick 复查即可。
+SD_COOL_NODE=""
+_sd_cool_none=0
+_sd_cool_log=""
+
+sd_cool_node() {
+    local p
+    [ "$_sd_cool_none" = 1 ] && return 1
+    if [ -n "$SD_COOL_NODE" ] && [ -e "$SD_COOL_NODE" ]; then return 0; fi
+    for p in "$SD_OPLUS_CHG/cool_down" "$SD_OPLUS_CHG/oplus_cool_down" \
+             /sys/class/oplus_chg/charger/cool_down; do
+        [ -e "$p" ] && { SD_COOL_NODE=$p; return 0; }
+    done
+    _sd_cool_none=1
+    return 1
+}
+
+sd_cool_tick() {
+    local want cur bt cap
+
+    [ "$(sd_state_int cool_guard 1 0 1)" = 1 ] || return 0
+
+    if ! sd_cool_node; then
+        if [ "$_sd_cool_log" != none ]; then
+            sd_warn charge "降流解除：本机没有 cool_down 节点，跳过"
+            _sd_cool_log=none
+        fi
+        return 0
+    fi
+
+    sd_batt_status_v
+    case "$_sd_rv" in Charging|Full) ;; *) return 0 ;; esac
+
+    # 灭屏时驱动自己给 0，不插手
+    [ "$_sd_screen_on" = 1 ] || return 0
+
+    bt=""
+    sd_batt_temp_v && bt=$_sd_rv
+    case "$bt" in ''|*[!0-9]*) bt=0 ;; esac
+    if [ "$bt" -ge 48 ]; then
+        if [ "$_sd_cool_log" != hot ]; then
+            sd_warn charge "降流解除：电池 ${bt}℃ 过热，交还驱动控制"
+            _sd_cool_log=hot
+        fi
+        return 0
+    fi
+
+    cap=""
+    sd_ps_attr_v capacity && cap=$_sd_rv
+    case "$cap" in ''|*[!0-9]*) cap=0 ;; esac
+
+    if [ "$bt" -ge 45 ]; then want=2
+    elif [ "$cap" -ge 85 ]; then want=1
+    else want=0
+    fi
+
+    sd_read1 "$SD_COOL_NODE" || return 0
+    cur=$_sd_rv
+    case "$cur" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$cur" = "$want" ] && return 0
+
+    if printf '%s\n' "$want" >"$SD_COOL_NODE" 2>/dev/null; then
+        if [ "$_sd_cool_log" != "$want" ]; then
+            sd_info charge "降流解除：cool_down ${cur} → ${want}（电池 ${bt}℃ 电量 ${cap}%）"
+            _sd_cool_log=$want
+        fi
+    elif [ "$_sd_cool_log" != fail ]; then
+        sd_warn charge "降流解除失败：$SD_COOL_NODE 写不进去"
+        _sd_cool_log=fail
     fi
 }
 

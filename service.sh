@@ -70,7 +70,7 @@ sd_apply_state() {
 
 sd_daemon() {
     local lock="$SD_RUN/daemon.lock" holder tick
-    local mode last_mode="" cnt=0 _hzr=0 _hz_n=0
+    local mode last_mode="" cnt=0 _hzr=0 _hz_n=0 _sd_chg=0 _ws=0
     local _log_out="" _log_cnt=0
     local _bst=""
     _sd_sp=""
@@ -148,9 +148,21 @@ sd_daemon() {
 
         sd_screen_tick
 
+        _sd_chg=0
         sd_batt_status_v
-        case "$_sd_rv" in Charging|Full) sd_curr_keep ;; esac
+        case "$_sd_rv" in Charging|Full) sd_curr_keep; _sd_chg=1 ;; esac
         sd_scr_tick
+        sd_cool_tick
+
+        # 亮屏充电时压到 2s：cool_down 会在亮屏瞬间跳回 7~13，慢一拍就白等一轮
+        if [ "$_sd_chg" = 1 ]; then
+            _ws=10
+            if [ "$_sd_screen_on" = 1 ] && [ "$(sd_state_int cool_guard 1 0 1)" = 1 ]; then
+                _ws=2
+            fi
+        else
+            _ws=$tick
+        fi
 
         sd_spoof_pending
         sd_batt_sp_guard
@@ -167,7 +179,7 @@ sd_daemon() {
             fi
             sd_hb_write
             sd_telemetry_write
-            _sd_pause "$tick"
+            _sd_pause "$_ws"
             continue
         fi
 
@@ -230,10 +242,7 @@ sd_daemon() {
             *)  _hz_n=0 ;;
         esac
 
-        case "$mode" in
-            charge) _sd_pause 10 ;;
-            *)      _sd_pause "$tick" ;;
-        esac
+        _sd_pause "$_ws"
     done
 
     rm -rf "$SD_RUN/daemon.lock" "$SD_RUN/daemon.pid"
