@@ -155,6 +155,10 @@ case "$(sd_state_get temp_mode off)" in
     off)    ui_print "- 温度改写: 已关闭，可在 WebUI 打开" ;;
 esac
 
+[ -f "$MODPATH/bin/qcmon" ] && {
+    chmod 755 "$MODPATH/bin/qcmon" 2>/dev/null
+    ui_print "- 守护实现: C 版 qcmon（热路径零 fork）"
+}
 ui_print "- 亮屏快充: 内置常开，亮屏不再按屏幕状态降档；息屏保留 +2℃"
 
 printf '%s\n' "$MODDIR" 2>/dev/null >"$SD_DATA/moddir"

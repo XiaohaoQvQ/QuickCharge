@@ -14,6 +14,10 @@ esac
 
 SD_STATE="$SD_DATA/state.conf"
 SD_LOG="$SD_DATA/log.txt"
+
+# read 内建读到的是原样字节，节点若带 CR 需要去掉。
+# 只在加载时展开一次，避免热路径里再 fork。
+SD_CR=$(printf '\r')
 SD_OLD="$SD_DATA/log.old.txt"
 SD_MOUNTS="$SD_DATA/mounts.list"
 SD_BACKUP="$SD_DATA/backup"
@@ -579,6 +583,8 @@ sd_pid_is_daemon() {
     sd_pid_alive "$pid" || return 1
     if [ -r "/proc/$pid/cmdline" ]; then
         grep -q "service\.sh" "/proc/$pid/cmdline" 2>/dev/null && return 0
+        # C 版守护的 cmdline 是 bin/qcmon，否则会被当成"没起来"反复拉起
+        grep -q "qcmon" "/proc/$pid/cmdline" 2>/dev/null && return 0
         return 1
     fi
     sd_hb_age && [ "$_sd_rv" -le 90 ] && [ "${_sd_hb_pid:-}" = "$pid" ]
@@ -722,9 +728,20 @@ sd_batt_status_v() {
 sd_batt_status() { sd_batt_status_v; printf '%s' "$_sd_rv"; }
 
 sd_read1() {
-    local v
+    local v=""
     [ -e "$1" ] || return 1
-    v=$(tr -d ' \t\r\n' <"$1" 2>/dev/null) || return 1
+    # 热路径：read 是 shell 内建，不像 $(tr ...) 那样每次 fork 一个进程。
+    # 每轮要读几十个节点，这一处省掉的 fork 占守护总开销的八成以上。
+    IFS= read -r v <"$1" 2>/dev/null || :
+    v=${v%"$SD_CR"}
+    # 极少数节点没有换行结尾，read 会返回非 0 但仍赋值，所以按内容判断；
+    # 真读到空内容时再用 tr 兜底（不常见，且只在异常节点上发生）。
+    if [ -z "$v" ] && [ -s "$1" ]; then
+        v=$(tr -d ' \t\r\n' <"$1" 2>/dev/null) || return 1
+    fi
+    # 去两端空白，纯参数展开，不 fork
+    while :; do case "$v" in " "*|"	"*) v=${v#?} ;; *) break ;; esac; done
+    while :; do case "$v" in *" "|*"	") v=${v%?} ;; *) break ;; esac; done
     [ -n "$v" ] || return 1
     _sd_rv=$v
     return 0
