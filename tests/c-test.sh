@@ -89,6 +89,7 @@ EOF
 run() { # 子命令
     SD_DATA=$BASE/data SD_SYSROOT=$ROOT SD_MODDIR=$BASE/mod \
     SD_SPOOF_DIR=$BASE/spoof SD_BL=$ROOT/sys/class/backlight \
+    SD_ADB=$BASE/adb \
     $BIN "$@"
 }
 
@@ -298,6 +299,33 @@ screen_on
 run sensor >/dev/null
 d=$(grep '^description=' "$BASE/mod/module.prop" | cut -d= -f2-)
 case "$d" in "QC · 温控档位"*) ok "描述已写回：$d" ;; *) bad "描述未同步：$d" ;; esac
+
+# 配置项计数：普通挂载走 mounts.list（去重），元模块走 nm.list（不去重）
+seq 1 49 | sed 's|^|/vendor/etc/f|' >"$BASE/data/mounts.list"
+run sensor >/dev/null
+case "$(grep '^description=' "$BASE/mod/module.prop")" in
+    *"配置 49 项"*) ok "普通挂载计数 49" ;;
+    *) bad "普通挂载计数：$(grep '^description=' "$BASE/mod/module.prop")" ;;
+esac
+
+mkdir -p "$BASE/adb/modules/meta-magic_mount"
+: >"$BASE/data/mounts.list"
+seq 1 37 | sed 's|^|system/vendor/etc/f|' >"$BASE/data/nm.list"
+printf 'description=QC\n' >"$BASE/mod/module.prop"
+run sensor >/dev/null
+case "$(grep '^description=' "$BASE/mod/module.prop")" in
+    *"配置 37 项"*) ok "元模块读 nm.list 计数 37" ;;
+    *) bad "元模块计数：$(grep '^description=' "$BASE/mod/module.prop")" ;;
+esac
+
+: >"$BASE/adb/modules/meta-magic_mount/disable"
+seq 1 12 | sed 's|^|/vendor/etc/g|' >"$BASE/data/mounts.list"
+printf 'description=QC\n' >"$BASE/mod/module.prop"
+run sensor >/dev/null
+case "$(grep '^description=' "$BASE/mod/module.prop")" in
+    *"配置 12 项"*) ok "元模块被 disable 时回退 mounts.list" ;;
+    *) bad "disable 回退：$(grep '^description=' "$BASE/mod/module.prop")" ;;
+esac
 
 # ============================================================ 11. 双实例保护
 echo "[11] 单实例锁"

@@ -48,7 +48,7 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 
 同一个版本号，两个包，功能一致，守护实现不同：
 
-| | `QuickCharge-v2.9.44.zip` | `QuickCharge-v2.9.44-c.zip` |
+| | `QuickCharge-v2.9.45.zip` | `QuickCharge-v2.9.45-c.zip` |
 |---|---|---|
 | 守护 | `lib/qc.sh` + shell 循环 | `bin/qcmon`（C，静态 arm64） |
 | 每 tick | 1.3 ms / 4 次 fork（首轮后 1 次） | 0.1~0.2 ms / 0 次 fork |

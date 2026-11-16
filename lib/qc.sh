@@ -3254,7 +3254,7 @@ sd_desc_text() {
     if [ "$n" -gt 0 ]; then
         t="$t · 配置 $n 项"
     else
-        t="$t · 未生效"
+        t="$t · 配置未挂载"
     fi
 
     printf 'QC · %s' "$t"

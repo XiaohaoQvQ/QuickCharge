@@ -28,7 +28,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-#define VER "2.9.44"
+#define VER "2.9.45"
 
 #define MAXZ 192
 #define MAXLINE 512
@@ -78,6 +78,7 @@ typedef struct {
 static conf_t g_c;
 
 static char g_data[MAXPATH] = "/data/adb/quickcharge";
+static char g_adb[128] = "/data/adb";   /* 元模块目录的父路径，测试可用 SD_ADB 覆盖 */
 static char g_state[300];
 static char g_log[320];
 static char g_log_old[320];
@@ -1781,24 +1782,83 @@ static int hz_guard(void)
 
 /* ------------------------------------------------------------------ 描述同步 */
 
-/* 与 shell 版的 sort -u | wc -l 对齐：同一路径重复挂载只算一项 */
-static int mounts_count(void)
+/* 元模块（NoMount / Magic Mount / Mountify / Hybrid Mount）激活时，
+ * 配置文件的清单记在 nm.list 而不是 mounts.list，shell 版也是这么分的。
+ * 目录名与 lib/qc.sh 里的 SD_MM_DIRS / sd_nm_active 保持一致。 */
+static const char *g_nm_dirs[] = { "/modules/meta-nomount", "/modules/nomount", NULL };
+
+static const char *g_mm_dirs[] = {
+    "/modules/meta-hybrid_mount", "/modules/hybrid_mount",
+    "/modules/meta-magic_mount", "/modules/meta-magic_mount-rs",
+    "/modules/meta-mm", "/modules/magic_mount", "/modules/mountify",
+    NULL
+};
+
+/* 目录存在、且没有 disable / remove 标记才算激活 */
+static int dir_active(const char *rel)
 {
-    char p[MAXPATH], b[256];
+    char p[MAXPATH];
+    struct stat st;
+
+    snprintf(p, sizeof p, "%s%s", g_adb, rel);
+    if (stat(p, &st) < 0 || !S_ISDIR(st.st_mode)) return 0;
+
+    snprintf(p, sizeof p, "%s%s/disable", g_adb, rel);
+    if (stat(p, &st) == 0) return 0;
+
+    snprintf(p, sizeof p, "%s%s/remove", g_adb, rel);
+    if (stat(p, &st) == 0) return 0;
+
+    return 1;
+}
+
+static int nm_or_mm_active(void)
+{
+    for (int i = 0; g_nm_dirs[i]; i++)
+        if (dir_active(g_nm_dirs[i])) return 1;
+    for (int i = 0; g_mm_dirs[i]; i++)
+        if (dir_active(g_mm_dirs[i])) return 1;
+    return 0;
+}
+
+/* 非空行计数（nm.list 用，shell 版是 wc -l，不去重） */
+static int count_lines(const char *path)
+{
+    char b[512];
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+
+    int n = 0;
+    while (fgets(b, sizeof b, f)) {
+        char *e = b;
+        while (*e && *e != '\n' && *e != '\r') e++;
+        *e = 0;
+        if (*b) n++;
+    }
+    fclose(f);
+    return n;
+}
+
+/* 与 shell 版的 sort -u | wc -l 对齐：同一路径重复挂载只算一项 */
+static int count_uniq(const char *path)
+{
+    char b[256];
     static char seen[64][MAXPATH];
     int n = 0, nseen = 0;
-    snprintf(p, sizeof p, "%s/mounts.list", g_data);
-    FILE *f = fopen(p, "r");
+
+    FILE *f = fopen(path, "r");
     if (!f) return 0;
     while (fgets(b, sizeof b, f)) {
         char *e = b;
         while (*e && *e != '\n' && *e != '\r') e++;
         *e = 0;
         if (!b[0]) continue;
+
         int dup = 0;
         for (int i = 0; i < nseen; i++)
             if (!strcmp(seen[i], b)) { dup = 1; break; }
         if (dup) continue;
+
         if (nseen < 64) {
             snprintf(seen[nseen], MAXPATH, "%s", b);
             nseen++;
@@ -1807,6 +1867,21 @@ static int mounts_count(void)
     }
     fclose(f);
     return n;
+}
+
+static int mounts_count(void)
+{
+    char p[MAXPATH];
+
+    /* 与 sd_desc_text 同一套分支：元模块激活且 nm.list 非空时用它 */
+    if (nm_or_mm_active()) {
+        snprintf(p, sizeof p, "%s/nm.list", g_data);
+        int n = count_lines(p);
+        if (n > 0) return n;
+    }
+
+    snprintf(p, sizeof p, "%s/mounts.list", g_data);
+    return count_uniq(p);
 }
 
 static void desc_build(char *out, size_t n)
@@ -1826,7 +1901,7 @@ static void desc_build(char *out, size_t n)
 
     int mt = mounts_count();
     if (mt > 0) snprintf(out, n, "QC · %s%s · 配置 %d 项", gear, shape, mt);
-    else snprintf(out, n, "QC · %s%s · 未生效", gear, shape);
+    else snprintf(out, n, "QC · %s%s · 配置未挂载", gear, shape);
 }
 
 static void sync_desc(void)
@@ -2124,6 +2199,9 @@ int main(int argc, char **argv)
 {
     const char *d = getenv("SD_DATA");
     if (d && *d) snprintf(g_data, sizeof g_data, "%s", d);
+    /* 元模块目录的父路径，测试时指到临时根，真机默认 /data/adb */
+    const char *ab = getenv("SD_ADB");
+    if (ab && *ab) snprintf(g_adb, sizeof g_adb, "%s", ab);
     const char *sr = getenv("SD_SYSROOT");
     if (sr && *sr) snprintf(g_sys, sizeof g_sys, "%s", sr);
     /* SD_MODDIR 是正式名；MODDIR 兼容 2.9.43 的 service.sh 只导出了 MODDIR */
