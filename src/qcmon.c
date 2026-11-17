@@ -29,7 +29,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-#define VER "2.9.48"
+#define VER "2.9.49"
 
 #define MAXZ 192
 #define MAXLINE 512
@@ -1475,6 +1475,129 @@ static void cool_tick(void)
     }
 }
 
+/* ---------------------------------------------------------------- 充电快照 */
+
+/* 以前查一次充电问题，要在终端里 cat 七八个节点：usb 电压、电流上限、
+ * 电池电流、cool_down、voocchg_ing、charge_technology……
+ * 这里一次读齐压成一行，状态一变就落日志，充电中每 10 分钟补一条，
+ * 日志自己就是时间线，排查只要一份 log。
+ */
+static char g_chg_last[384];
+static char g_chg_last_st[24];
+static long g_chg_at;
+static long g_chg_scan;
+
+static int path_num(const char *path, long *out)
+{
+    char b[48];
+    if (read_line(path, b, sizeof b) < 0) return -1;
+    char *p = b, *end = NULL;
+    while (*p == ' ' || *p == '\t') p++;
+    long v = strtol(p, &end, 10);
+    if (end == p) return -1;
+    *out = v;
+    return 0;
+}
+
+static int ps_num(const char *attr, long *out)
+{
+    char b[48];
+    if (ps_attr(attr, b, sizeof b) < 0) return -1;
+    char *p = b, *end = NULL;
+    while (*p == ' ' || *p == '\t') p++;
+    long v = strtol(p, &end, 10);
+    if (end == p) return -1;
+    *out = v;
+    return 0;
+}
+
+static int oplus_num(const char *attr, long *out)
+{
+    char p[MAXPATH + 96];
+    snprintf(p, sizeof p, "%s/%s", g_oplus, attr);
+    return path_num(p, out);
+}
+
+static void fmt_uv(long uv, int dec, char *out, size_t n)
+{
+    if (uv < 0) { snprintf(out, n, "?"); return; }
+    if (dec >= 3) snprintf(out, n, "%ld.%03ld", uv / 1000000, (uv % 1000000) / 1000);
+    else          snprintf(out, n, "%ld.%02ld", uv / 1000000, (uv % 1000000) / 10000);
+}
+
+/* 组装一行充电现场。charging 只影响内部节流，不参与内容。 */
+static void chg_line(char *out, size_t n)
+{
+    long vusb = -1, imax = -1, vbat = -1, ibat = -1;
+    long cool = -1, vooc = -1, tech = -1, cap = -1;
+    char type[32] = "", st[32] = "?";
+    char p[MAXPATH + 96];
+    char a[24], b2[24], b3[24];
+
+    batt_status(st, sizeof st);
+    ps_num("capacity", &cap);
+    ps_num("voltage_now", &vbat);
+    ps_num("current_now", &ibat);
+    snprintf(p, sizeof p, "%s/usb/voltage_now", g_ps);
+    path_num(p, &vusb);
+    snprintf(p, sizeof p, "%s/usb/current_max", g_ps);
+    path_num(p, &imax);
+    snprintf(p, sizeof p, "%s/usb/type", g_ps);
+    if (read_line(p, type, sizeof type) < 0) type[0] = 0;
+    for (char *q = type; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
+    oplus_num("cool_down", &cool);
+    oplus_num("voocchg_ing", &vooc);
+    oplus_num("charge_technology", &tech);
+
+    int bt = batt_temp_ps();
+
+    fmt_uv(vusb, 2, a, sizeof a);
+    fmt_uv(imax, 2, b2, sizeof b2);
+    fmt_uv(vbat, 3, b3, sizeof b3);
+    char tb[16], ib[24];
+    if (bt >= 0) snprintf(tb, sizeof tb, "%d℃", bt);
+    else snprintf(tb, sizeof tb, "?");
+    if (ibat != -1) snprintf(ib, sizeof ib, "%ldmA", ibat / 1000);
+    else snprintf(ib, sizeof ib, "?");
+    snprintf(out, n,
+             "vusb=%sV imax=%sA vbat=%sV ibat=%s %ld%% %s cool=%ld vooc=%ld tech=%ld type=%s scr=%d status=%s",
+             a, b2, b3, ib,
+             cap, tb,
+             cool, vooc, tech, type[0] ? type : "?", g_screen_on, st);
+}
+
+static void chg_snapshot(int charging)
+{
+    char sig[384], st[32] = "?";
+    long now = (long)time(NULL);
+
+    if (g_c.log_level < 2) return;
+    /* 没充电时降频，省得空跑读一堆节点 */
+    if (!charging && now - g_chg_scan < 30) return;
+    g_chg_scan = now;
+
+    batt_status(st, sizeof st);
+    chg_line(sig, sizeof sig);
+
+    const char *why = "变化";
+    if (strcmp(g_chg_last_st, st)) {
+        snprintf(g_chg_last_st, sizeof g_chg_last_st, "%s", st);
+        why = charging ? "插电" : "停充";
+    }
+
+    if (!strcmp(sig, g_chg_last)) {
+        /* 值没变就只在充电中每 10 分钟补一条，避免刷屏 */
+        if (charging && now - g_chg_at >= 600) {
+            log_msg("I", "chg", "定时 %s", sig);
+            g_chg_at = now;
+        }
+        return;
+    }
+    log_msg("I", "chg", "%s %s", why, sig);
+    snprintf(g_chg_last, sizeof g_chg_last, "%s", sig);
+    g_chg_at = now;
+}
+
 /* ------------------------------------------------------------------ 屏幕 */
 
 static int screen_sample(void)
@@ -2244,6 +2367,7 @@ static int loop_once(int *mode_changed)
 
     scr_tick();
     cool_tick();
+    chg_snapshot(charging);
     spoof_pending();
     batt_sp_guard();
 
@@ -2377,6 +2501,16 @@ int main(int argc, char **argv)
             int wall = 0;
             int tgt = curr_target(&wall);
             printf("wall=%d curr_target=%d\n", wall, tgt);
+            return 0;
+        }
+        if (!strcmp(argv[1], "chg")) {
+            /* 现场读一次充电快照，不写日志，供 action.sh / 面板用 */
+            zones_scan();
+            screen_tick();
+            screen_tick();
+            char line[384];
+            chg_line(line, sizeof line);
+            printf("%s\n", line);
             return 0;
         }
         if (!strcmp(argv[1], "sensor")) {

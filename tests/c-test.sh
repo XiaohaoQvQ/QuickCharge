@@ -57,6 +57,14 @@ setup() {
     printf '0\n'        >"$ROOT/sys/module/oplus_chg/parameters/ignore_screen_state"
     printf '7\n'        >"$ROOT/sys/class/oplus_chg/battery/cool_down"
     chmod 644 "$ROOT/sys/class/oplus_chg/battery/cool_down"
+    # 充电快照用到的节点
+    printf '8850000\n'  >"$ROOT/sys/class/power_supply/usb/voltage_now"
+    printf '2000000\n'  >"$ROOT/sys/class/power_supply/usb/current_max"
+    printf 'USB_DCP\n'  >"$ROOT/sys/class/power_supply/usb/type"
+    printf '4219000\n'  >"$ROOT/sys/class/power_supply/battery/voltage_now"
+    printf -- '-3000\n' >"$ROOT/sys/class/power_supply/battery/current_now"
+    printf '0\n'        >"$ROOT/sys/class/oplus_chg/battery/voocchg_ing"
+    printf '14\n'       >"$ROOT/sys/class/oplus_chg/battery/charge_technology"
     printf '0\n'        >"$ROOT/proc/shell-temp"
     printf '1234.56 900.0\n' >"$ROOT/proc/uptime"
 
@@ -394,6 +402,19 @@ rm -rf "$(z thermal_zone8)"
 out=$(run once)
 echo "$out" | grep -q 'real=34' && ok "连接器偏高 14℃ 时改用电量计" || bad "未回退电量计：$out"
 echo "$out" | grep -q 'zone=battery(ps)' && ok "温区标注为 battery(ps)" || bad "zone 标注错误：$out"
+
+# ============================================================ 14. 充电快照
+echo "[14] 充电快照"
+setup
+state static 30 42 off
+out=$(run chg)
+echo "$out" | grep -q 'vusb=8.85V'   && ok "vusb 换算 µV→V" || bad "vusb 错：$out"
+echo "$out" | grep -q 'imax=2.00A'   && ok "imax 换算 µA→A" || bad "imax 错：$out"
+echo "$out" | grep -q 'vbat=4.219V'  && ok "vbat 三位小数"   || bad "vbat 错：$out"
+echo "$out" | grep -q 'ibat=-3mA'    && ok "ibat 保留负号"   || bad "ibat 错：$out"
+echo "$out" | grep -q 'cool=7'       && ok "读 cool_down"    || bad "cool 错：$out"
+echo "$out" | grep -q 'tech=14'      && ok "读 charge_technology" || bad "tech 错：$out"
+echo "$out" | grep -q 'type=USB_DCP' && ok "读 usb/type"     || bad "type 错：$out"
 
 echo
 echo "结果：通过 $PASS，失败 $FAIL"

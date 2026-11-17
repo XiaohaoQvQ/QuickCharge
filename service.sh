@@ -153,6 +153,7 @@ sd_daemon() {
         case "$_sd_rv" in Charging|Full) sd_curr_keep; _sd_chg=1 ;; esac
         sd_scr_tick
         sd_cool_tick
+        sd_chg_snapshot "$_sd_chg"
 
         # 亮屏充电时压到 2s：cool_down 会在亮屏瞬间跳回 7~13，慢一拍就白等一轮
         if [ "$_sd_chg" = 1 ]; then

@@ -312,6 +312,20 @@
 </div>
 
 <div class="card">
+  <h2>诊断日志<span class="sm" id="lvNow">—</span></h2>
+  <div class="acts">
+    <button data-lv="0">关闭</button>
+    <button data-lv="2">精简</button>
+    <button data-lv="3">标准</button>
+    <button data-lv="4">详细</button>
+  </div>
+  <div style="padding:0 14px 14px;color:var(--dim);font-size:12px;line-height:1.7">
+    精简＝只留警告和充电快照；标准＝加常规信息；详细＝含每轮调试，最费电。
+    充电快照是一行 <code>vusb/imax/vbat/ibat/电量/温度/cool/协议</code>，插拔和档位一变就记一条，排查不用再敲命令。
+  </div>
+</div>
+
+<div class="card">
   <h2>操作</h2>
   <div class="acts">
     <button id="refresh">刷新</button>
@@ -739,6 +753,10 @@
     }
     $("wallOff").checked = d.wall === "off";
     $("wall").disabled = d.wall === "off";
+    if (d.level !== undefined && d.level !== null) {
+      var LVN = { "0": "关闭", "2": "精简", "3": "标准", "4": "详细" };
+      $("lvNow").textContent = LVN[String(d.level)] || ("级别 " + d.level);
+    }
     if (!rngBusy("shell")) {
       $("shell").max = d.wall === "off" ? 60 : Math.max(25, Number(d.wall) - 2);
     }
@@ -1393,6 +1411,12 @@
     });
     bindTap("refresh", function () {
       load(function (ok) { toast(ok ? "已刷新" : "刷新失败", !ok); });
+    });
+    document.querySelectorAll("[data-lv]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        apply("level " + b.getAttribute("data-lv"),
+          "日志级别 → " + b.textContent);
+      });
     });
     bindTap("rebuild", function () {
       var nm = S && S.mount_mode && S.mount_mode.indexOf("nomount") === 0;

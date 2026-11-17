@@ -218,7 +218,8 @@ sd_do_json() {
     printf '{"version":"%s","mode":"%s","shell_temp":%s,"shell_set":%s,"target":%s,"aggr":%s,"gap":%s,' \
         "$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)" \
         "$mode" "$shv" "$shset" "$tgt" "$aggr" "$((2 + aggr))"
-    printf '"wall":"%s","core":"%s","noncore":"%s",' "$wall" "$c" "$nc"
+    printf '"wall":"%s","core":"%s","noncore":"%s","level":"%s",' \
+        "$wall" "$c" "$nc" "$(sd_state_get log_level 3)"
     printf '"sentinel":"%s","real":%s,"limit":"%s","real_src":"%s","real_age":%s,"real_why":"%s","emul_ok":%s,' \
         "$sname" "$rj" "${slim:-off}" "$src" "$rage" "${_sd_rr_why:-}" "${_sd_rr_emul:--1}"
     printf '"curr_max":%s,"curr_target":%s,"curr_edge":%s,"fast_cap":%s,' \
@@ -547,7 +548,12 @@ sd_menu() {
     done
 }
 
-[ -n "${1:-}" ] && sd_session cmd "命令行: $*"
+# 只给会改状态的命令写段头。power/json/status 这些面板每 3 秒就要调一次，
+# 每次写 6 行会把日志刷满，真正有用的记录全被埋掉。
+case "${1:-}" in
+    ''|power|json|status|log|dump|diag|chg|env|zones|probe|check|ver|version|help) ;;
+    *) [ "${_sd_lv:-3}" -ge 3 ] && sd_session cmd "命令行: $*" ;;
+esac
 
 _CMD="${1:-}"
 
@@ -635,6 +641,13 @@ case "$1" in
                  *)          echo "用法: hzguard on|off"; exit 1 ;;
              esac ;;
     power)   sd_power_json ;;
+    chg)     if [ -x "$MODDIR/bin/qcmon" ]; then
+                 "$MODDIR/bin/qcmon" chg 2>/dev/null || sd_chg_line
+             else
+                 sd_chg_line
+             fi
+             echo ;;
+    snap)    sd_chg_snapshot 1; echo "已写入日志：$(sd_chg_line)" ;;
     pscale)  shift; sd_set_pscale "${1:-100}" ;;
     fast)    shift; sd_set_fast "${1:-55}" ;;
     sentinel) shift; sd_set_limit sentinel_limit "${1:-85}" 60 110 "SoC 哨兵" 85 ;;
