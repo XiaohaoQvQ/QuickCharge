@@ -81,6 +81,7 @@
   }
   .acts button:active{background:var(--line)}
   .acts button.on{background:rgba(255,107,53,.14);border-color:var(--accent);color:var(--accent)}
+  .acts button.off{opacity:.45}
   .acts button.wide{grid-column:1/-1}
   footer{margin-top:18px;text-align:center;font-size:12px;color:var(--dim);line-height:1.9}
   footer a,footer .lnk{color:var(--accent-2);text-decoration:none}
@@ -317,11 +318,9 @@
     <span class="chev"></span>
   </div>
   <div class="bd" id="foldLogBd"><div class="bd-in">
-  <div class="switch" style="margin-top:2px">
-    <input type="checkbox" id="logOn"><label for="logOn">打开</label>
-  </div>
-  <div class="switch" style="margin-top:10px">
-    <input type="checkbox" id="logDetail"><label for="logDetail">详细</label>
+  <div class="acts">
+    <button id="logOn">打开</button>
+    <button id="logDetail">详细</button>
   </div>
   </div></div>
 </div>
@@ -758,9 +757,8 @@
       var lv = Number(d.level) || 0;
       var LVN = { "0": "关闭", "1": "精简", "2": "精简", "3": "标准", "4": "详细" };
       $("lvNow").textContent = LVN[String(lv)] || ("级别 " + lv);
-      $("logOn").checked = lv > 0;
-      $("logDetail").checked = lv >= 4;
-      $("logDetail").disabled = !(lv > 0);
+      $("logOn").className = lv > 0 ? "on" : "";
+      $("logDetail").className = lv >= 4 ? "on" : (lv > 0 ? "" : "off");
     }
     if (!rngBusy("shell")) {
       $("shell").max = d.wall === "off" ? 60 : Math.max(25, Number(d.wall) - 2);
@@ -1418,12 +1416,14 @@
     bindTap("refresh", function () {
       load(function (ok) { toast(ok ? "已刷新" : "刷新失败", !ok); });
     });
-    $("logOn").addEventListener("change", function () {
-      var on = this.checked;
+    bindTap("logOn", function () {
+      var on = !(S && Number(S.level) > 0);
       apply("level " + (on ? 3 : 0), on ? "日志已打开" : "日志已关闭");
     });
-    $("logDetail").addEventListener("change", function () {
-      var on = this.checked;
+    bindTap("logDetail", function () {
+      var lv = S ? Number(S.level) || 0 : 0;
+      if (lv <= 0) { toast("先打开日志", true); return; }
+      var on = lv < 4;
       apply("level " + (on ? 4 : 3), on ? "日志 → 详细" : "日志 → 标准");
     });
     bindTap("rebuild", function () {
