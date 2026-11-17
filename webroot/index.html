@@ -754,10 +754,9 @@
     $("wall").disabled = d.wall === "off";
     if (d.level !== undefined && d.level !== null) {
       var lv = Number(d.level) || 0;
-      var LVN = { "0": "关闭", "1": "精简", "2": "精简", "3": "标准", "4": "详细" };
-      $("lvNow").textContent = LVN[String(lv)] || ("级别 " + lv);
+      $("lvNow").textContent = lv > 0 ? "详细" : "关闭";
       $("logClose").className = lv === 0 ? "on" : "";
-      $("logDetail").className = lv >= 4 ? "on" : "";
+      $("logDetail").className = lv > 0 ? "on" : "";
     }
     if (!rngBusy("shell")) {
       $("shell").max = d.wall === "off" ? 60 : Math.max(25, Number(d.wall) - 2);
@@ -1416,13 +1415,12 @@
       load(function (ok) { toast(ok ? "已刷新" : "刷新失败", !ok); });
     });
     bindTap("logClose", function () {
-      var off = S && Number(S.level) === 0;
-      apply("level " + (off ? 3 : 0), off ? "日志已打开" : "日志已关闭");
+      if (S && Number(S.level) === 0) { toast("日志已经是关闭的"); return; }
+      apply("level 0", "日志已关闭");
     });
     bindTap("logDetail", function () {
-      var lv = S ? Number(S.level) || 0 : 0;
-      var on = lv < 4;
-      apply("level " + (on ? 4 : 3), on ? "日志 → 详细" : "日志 → 标准");
+      if (S && Number(S.level) >= 4) { toast("已经是详细日志"); return; }
+      apply("level 4", "日志 → 详细");
     });
     bindTap("rebuild", function () {
       var nm = S && S.mount_mode && S.mount_mode.indexOf("nomount") === 0;

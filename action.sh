@@ -158,7 +158,7 @@ sd_do_status() {
     read -r bc 2>/dev/null <"$SD_DATA/boot.count"
     case "$bc" in ''|*[!0-9]*) bc=0 ;; esac
     [ "$bc" -gt 3 ] && printf '⚠ 安全模式：连续 %s 次开机未完成，本次未挂载配置\n' "$bc"
-    printf '日志级别  %s\n' "$(sd_state_int log_level 3 0 4)"
+    printf '日志级别  %s\n' "$(sd_state_int log_level 0 0 4)"
 }
 
 sd_do_json() {
@@ -219,7 +219,7 @@ sd_do_json() {
         "$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)" \
         "$mode" "$shv" "$shset" "$tgt" "$aggr" "$((2 + aggr))"
     printf '"wall":"%s","core":"%s","noncore":"%s","level":"%s",' \
-        "$wall" "$c" "$nc" "$(sd_state_get log_level 3)"
+        "$wall" "$c" "$nc" "$(sd_state_get log_level 0)"
     printf '"sentinel":"%s","real":%s,"limit":"%s","real_src":"%s","real_age":%s,"real_why":"%s","emul_ok":%s,' \
         "$sname" "$rj" "${slim:-off}" "$src" "$rage" "${_sd_rr_why:-}" "${_sd_rr_emul:--1}"
     printf '"curr_max":%s,"curr_target":%s,"curr_edge":%s,"fast_cap":%s,' \
@@ -237,7 +237,7 @@ sd_do_json() {
         "$([ "$(sd_state_get horae 1)" = 0 ] && echo off || echo on)"
     printf '"battery_limit":%s,"sentinel_limit":%s,' "$blj" "$slj"
     printf '"log_level":%s,"tick":%s,"mounted":%s,"daemon":%s,"daemon_age":%s,"boot_count":%s,"safety":%s,' \
-        "$(sd_state_int log_level 3 0 4)" "$(sd_state_int tick 15 5 300)" \
+        "$(sd_state_int log_level 0 0 4)" "$(sd_state_int tick 15 5 300)" \
         "$mt" "$dm" "$dage" "$bc" "$([ "$bc" -gt 3 ] && echo true || echo false)"
     zc=0; for _e in $_sd_zones; do zc=$((zc + 1)); done
     nmn=0

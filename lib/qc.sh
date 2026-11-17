@@ -462,7 +462,7 @@ sd_state_load() {
     _st_log_level=""; _st_tick=""; _st_defrev=""
     _st_hz=""; _st_hz_prev_peak=""; _st_hz_prev_min=""; _st_hz_hard=""; _st_hz_prev_mcfr=""; _st_power_scale=""
     _st_cells_mode=""; _st_batt_spoof=""; _st_cool_guard=""
-    [ -f "$SD_STATE" ] || { _st_log_level=3; _sd_lv=3; return 0; }
+    [ -f "$SD_STATE" ] || { _st_log_level=0; _sd_lv=0; return 0; }
     local k v
     while IFS='=' read -r k v; do
         case "$k" in
@@ -471,7 +471,7 @@ sd_state_load() {
             *) eval "_st_$k=\$v" ;;
         esac
     done 2>/dev/null <"$SD_STATE"
-    case "$_st_log_level" in 0|1|2|3|4) _sd_lv=$_st_log_level ;; *) _st_log_level=3; _sd_lv=3 ;; esac
+    case "$_st_log_level" in 0|1|2|3|4) _sd_lv=$_st_log_level ;; *) _st_log_level=0; _sd_lv=0 ;; esac
     return 0
 }
 
@@ -493,7 +493,7 @@ sd_state_get() {
         curr_max)       printf '%s' "${_st_curr_max:-${2:-0}}" ;;
         curr_edge)      printf '%s' "${_st_curr_edge:-${2:-4}}" ;;
         defrev)         printf '%s' "${_st_defrev:-${2:-2}}" ;;
-        log_level)      printf '%s' "${_st_log_level:-${2:-3}}" ;;
+        log_level)      printf '%s' "${_st_log_level:-${2:-0}}" ;;
         tick)           printf '%s' "${_st_tick:-${2:-15}}" ;;
         hz)             printf '%s' "${_st_hz:-${2:-off}}" ;;
         hz_prev_peak)   printf '%s' "${_st_hz_prev_peak:-${2:-}}" ;;
