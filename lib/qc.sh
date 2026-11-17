@@ -2904,10 +2904,17 @@ sd_cool_tick() {
 # 以前查一次充电问题要 cat 七八个节点：usb 电压、电流上限、电池电流、
 # cool_down、voocchg_ing、charge_technology…… 这里压成一行，状态一变就落
 # 日志，充电中每 10 分钟补一条，日志自己就是时间线。
+# 判重分两套：
+#   充电中 —— 整行比较（电压电流本来就在爬，每个变化都有意义）
+#   未充电 —— 只比"状态签名"（电量按 5%、温度按 2℃ 归并）。
+#             否则 vbat 在几十 mV 里来回抖，灭屏待机也会每 30s 落一条。
 _sd_chg_last=""
 _sd_chg_last_st=""
 _sd_chg_at=0
 _sd_chg_scan=0
+_sd_chg_key=""
+_sd_chg_line_v=""
+_sd_chg_sig_v=""
 
 _sd_chg_fmt() {
     awk -v a="$1" -v b="$2" -v c="$3" -v d="$4" 'BEGIN {
@@ -2919,30 +2926,69 @@ _sd_chg_fmt() {
     }'
 }
 
-sd_chg_line() {
-    local cap vbat ibat vusb imax type cool vooc tech bt st f
+# 电池电流，统一换算成 µA。灭屏后 power_supply 的 current_now 常停在 0 不刷新，
+# 而 bcc_parms 仍在更新，所以先问 bcc，再回退 current_now / bms / current_avg。
+sd_chg_current_v() {
+    local v ok=0
+    sd_bcc_parse
+    if [ "$_sd_cell_ok" = 1 ] && [ -n "$_sd_cell_ma" ]; then
+        ok=1
+        v=$((_sd_cell_ma * 1000))
+        [ "$v" -ne 0 ] && { _sd_rv=$v; return 0; }
+    fi
+    if sd_ps_attr_v current_now; then
+        ok=1
+        v=$_sd_rv
+        case "$v" in ''|*[!0-9-]*) v="" ;; esac
+        [ -n "$v" ] && [ "$v" -ne 0 ] && { _sd_rv=$v; return 0; }
+    fi
+    for v in "$SD_PS/bms/current_now" "$SD_PS/battery/current_avg"; do
+        sd_read1 "$v" || continue
+        ok=1
+        v=$_sd_rv
+        case "$v" in ''|*[!0-9-]*) continue ;; esac
+        [ "$v" -ne 0 ] && { _sd_rv=$v; return 0; }
+    done
+    if [ "$ok" = 1 ]; then _sd_rv=0; return 0; fi
+    return 1
+}
+
+# 填 _sd_chg_line_v（日志行）与 _sd_chg_sig_v（判重签名）。
+# 用全局变量而不是命令替换，两个结果才都留得住。
+sd_chg_line_fill() {
+    local cap vbat ibat vusb imax type cool vooc tech bt st f capk btk
     st=""; sd_batt_status_v && st=$_sd_rv
     cap=""; sd_ps_attr_v capacity && cap=$_sd_rv
     vbat=""; sd_ps_attr_v voltage_now && vbat=$_sd_rv
-    ibat=""; sd_ps_attr_v current_now && ibat=$_sd_rv
-    vusb=$(cat "$SD_PS/usb/voltage_now" 2>/dev/null)
-    imax=$(cat "$SD_PS/usb/current_max" 2>/dev/null)
-    type=$(cat "$SD_PS/usb/type" 2>/dev/null)
-    cool=$(cat "$SD_OPLUS_CHG/cool_down" 2>/dev/null)
-    vooc=$(cat "$SD_OPLUS_CHG/voocchg_ing" 2>/dev/null)
-    tech=$(cat "$SD_OPLUS_CHG/charge_technology" 2>/dev/null)
+    ibat=""; sd_chg_current_v && ibat=$_sd_rv
+    vusb=""; sd_read1 "$SD_PS/usb/voltage_now" && vusb=$_sd_rv
+    imax=""; sd_read1 "$SD_PS/usb/current_max" && imax=$_sd_rv
+    type=""; sd_read1 "$SD_PS/usb/type" && type=$_sd_rv
+    cool=""; sd_read1 "$SD_OPLUS_CHG/cool_down" && cool=$_sd_rv
+    vooc=""; sd_read1 "$SD_OPLUS_CHG/voocchg_ing" && vooc=$_sd_rv
+    tech=""; sd_read1 "$SD_OPLUS_CHG/charge_technology" && tech=$_sd_rv
     bt=""; sd_batt_temp_v && bt=$_sd_rv
 
     f=$(_sd_chg_fmt "$vusb" "$imax" "$vbat" "$ibat")
     # shellcheck disable=SC2086
     set -- $f
-    printf 'vusb=%sV imax=%sA vbat=%sV ibat=%smA %s%% %s℃ cool=%s vooc=%s tech=%s type=%s scr=%s status=%s' \
+    _sd_chg_line_v=$(printf 'vusb=%sV imax=%sA vbat=%sV ibat=%smA %s%% %s℃ cool=%s vooc=%s tech=%s type=%s scr=%s status=%s' \
         "$1" "$2" "$3" "$4" "${cap:-?}" "${bt:-?}" "${cool:-?}" "${vooc:-?}" \
-        "${tech:-?}" "${type:-?}" "${_sd_screen_on:-?}" "${st:-?}"
+        "${tech:-?}" "${type:-?}" "${_sd_screen_on:-?}" "${st:-?}")
+
+    capk=${cap:-0}; btk=${bt:-0}
+    case "$capk" in ''|*[!0-9]*) capk=0 ;; esac
+    case "$btk" in ''|*[!0-9]*) btk=0 ;; esac
+    _sd_chg_sig_v="st=${st:-?} cap=$((capk / 5 * 5)) bt=$((btk / 2 * 2)) usb=${vusb:-?} imax=${imax:-?} type=${type:-?} cool=${cool:-?} vooc=${vooc:-?} tech=${tech:-?} scr=${_sd_screen_on:-?}"
+}
+
+sd_chg_line() {
+    sd_chg_line_fill
+    printf '%s' "$_sd_chg_line_v"
 }
 
 sd_chg_snapshot() {
-    local charging="${1:-0}" line st now why
+    local charging="${1:-0}" line st now why key
     [ "${_sd_lv:-3}" -ge 2 ] || return 0
     now=$(date +%s)
     # 插拔的瞬间必须记下来，只有"状态没变"时才按 30s 节流
@@ -2954,7 +3000,9 @@ sd_chg_snapshot() {
     _sd_chg_last_chg=$charging
 
     st=""; sd_batt_status_v && st=$_sd_rv
-    line=$(sd_chg_line)
+    sd_chg_line_fill
+    line=$_sd_chg_line_v
+    if [ "$charging" = 1 ]; then key=$line; else key=$_sd_chg_sig_v; fi
 
     why=变化
     if [ "$st" != "$_sd_chg_last_st" ]; then
@@ -2962,7 +3010,7 @@ sd_chg_snapshot() {
         if [ "$charging" = 1 ]; then why=插电; else why=停充; fi
     fi
 
-    if [ "$line" = "$_sd_chg_last" ]; then
+    if [ "$key" = "$_sd_chg_key" ]; then
         if [ "$charging" = 1 ] && [ $((now - _sd_chg_at)) -ge 600 ]; then
             _sd_emit S chg "定时 $line"
             _sd_chg_at=$now
@@ -2970,6 +3018,7 @@ sd_chg_snapshot() {
         return 0
     fi
     _sd_emit S chg "$why $line"
+    _sd_chg_key=$key
     _sd_chg_last=$line
     _sd_chg_at=$now
 }

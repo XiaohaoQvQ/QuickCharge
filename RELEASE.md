@@ -1,50 +1,73 @@
-# Quick Charge v2.9.53（shell 版）
+# Quick Charge v2.9.54（shell 版）
 
-> 对应包：`QuickCharge-v2.9.53.zip` · `versioncode 29530`
+> 对应包：`QuickCharge-v2.9.54.zip` · `versioncode 29540`
 
-这一版把「诊断日志」收敛成**两个状态**：详细，或者关闭。中间的精简、标准不再出现在面板上。
-守护逻辑、温度策略、参数默认值（日志除外）没有变动。
+修两个日志缺陷，都是在一份 26 分钟的真机日志里暴露出来的。守护的温控、充电策略没有改动。
 
-## 现在只有两种
+## 一、未充电时快照刷屏
 
-| 点击 | 结果 |
-|---|---|
-| 详细 | `log_level=4`，记录全部调试信息 |
-| 关闭 | `log_level=0`，一条不记 |
+**现象**：灭屏待机 26 分钟，日志里写了 52 条快照，几乎全是这样：
 
-- 两个按钮等宽并排，尺寸与「操作」卡里的"刷新""重挂"一致
-- 当前状态对应的按钮橙底高亮，标题右侧同步显示"详细"或"关闭"
-- 点已经在用的那个不会重复下发，只提示一句"已经是详细日志"
-
-## 默认值改成关闭
-
-`log_level` 的默认值从 `3`（标准）改成 `0`（关闭）。理由是既然只有"开"和"关"两种选择，
-默认就该是关——不排查问题的时候不必长期往盘里写。
-
-这个改动只影响**新装**和**恢复默认**：已经装过模块的设备，`state.conf` 里的值不会被覆盖。
-如果你之前的配置是 `3`，面板会显示"详细"，但实际仍是标准级别；点一下「详细」就写成真正的 `4`。
-
-## 精简级别去哪了
-
-`level 2`（精简）和 `level 3`（标准）在后端仍然有效，只是面板不再提供。
-确实需要的话用命令设：
-
-```sh
-su -c 'sh /data/adb/modules/quickcharge/action.sh level 2'
 ```
+22:04:15 vusb=0.00V imax=0.50A vbat=4.341V ibat=0mA 100% 33℃ ... Discharging
+22:04:47 vusb=0.00V imax=0.50A vbat=4.366V ibat=0mA 100% 33℃ ... Discharging
+22:05:18 vusb=0.00V imax=0.50A vbat=4.365V ibat=0mA 100% 33℃ ... Discharging
+```
+
+**原因**：判重比的是整行字符串，`vbat` 在几十 mV 范围内来回抖，每次都算"变化"。
+设计写的"未充电且不变不写"实际上永远不会成立。
+
+**改法**：判重分两套。
+
+| 状态 | 判据 |
+|---|---|
+| 充电中 | 整行比较（电压电流在爬，每个变化都有意义） |
+| 未充电 | 只比状态签名：状态、电量（按 5% 归并）、温度（按 2℃ 归并）、vusb、imax、type、cool、vooc、tech、屏幕 |
+
+同样的待机，现在只有在插拔、亮灭屏、电量跨 5%、温度跨 2℃ 时才落一条。
+
+## 二、`ibat` 恒为 0mA
+
+**现象**：52 条快照里电池电流一条没变过，全是 `ibat=0mA`，而面板上功率显示 5-10W。
+
+**原因**：快照取的是 `power_supply/battery/current_now`，灭屏后这个节点不刷新，
+一直返回 0；面板走的是 `bcc_parms`，两个数据源不同步。
+
+**改法**：电流按优先级取，全部换算成 µA：
+
+```
+bcc_parms（mA ×1000） → battery/current_now → bms/current_now → battery/current_avg
+```
+
+一个都读不到才显示 `?`。C 版（qcmon）补上了同样的 bcc 解析，之前它完全没有读 bcc。
+
+## 顺带
+
+快照读取从 7 次 `cat` 改成 `sd_read1`（shell 内建 read），每轮少 7 个进程。
+热路径的 fork 开销本来就占大头，这一处省得不算小。
+
+## 测试
+
+| 套件 | 结果 |
+|---|---|
+| `chg-unit` | 22 通过（新增 6 条：签名判重 3 条、bcc 优先 3 条） |
+| `c-test` | 67 通过（新增 2 条 bcc 断言） |
+| `cool-unit` | 9 通过 |
+| `zone-rank` | 6 通过 |
+| `mount-unit` | 4 通过 |
+| `sim` | 621 通过 |
 
 ## 升级
 
-直接覆盖安装，配置、日志、已调参数全部保留，不用清数据、不用重启守护。
+直接覆盖安装，配置、日志、已调参数全部保留。
 
-- 2.9.52 → 2.9.53：`versioncode` 29520 → 29530
-- 面板其它卡片的展开状态按本地记录恢复
+- 2.9.53 → 2.9.54：`versioncode` 29530 → 29540
 
 ## 文件
 
 | 项 | 值 |
 |---|---|
-| 大小 | 70,805 字节 |
+| 大小 | 71,545 字节 |
 | 文件数 | 18 |
 | 最低要求 | Magisk / KernelSU / APatch 任一 |
 | 架构 | 全架构（纯 shell，无二进制） |
@@ -52,17 +75,10 @@ su -c 'sh /data/adb/modules/quickcharge/action.sh level 2'
 ## 校验值
 
 ```
-d9895b0511a1f326d3a7cefdd41daf18c5d9e55658fd91113847d134bb251dff  QuickCharge-v2.9.53.zip
+966aeaf8ca3d7306377e90f8946ccc88cd321a728b51da983938cbdf66735544  QuickCharge-v2.9.54.zip
 ```
-
-```sh
-sha256sum QuickCharge-v2.9.53.zip
-```
-
-这个包的构建是可复现的：同一份源码、同一套打包逻辑，任何时候重打都得到相同的字节和相同的
-sha256（打包时统一了 zip 内时间戳并去掉了高精度时间字段）。
 
 ## 另一个版本
 
-同版本另有 C 守护版 `QuickCharge-v2.9.53-c.zip`（`bin/qcmon`，热路径零 fork），WebUI 改动完全一致。
-两版功能等价、可随时互换，详见 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C) 的 README 与 Release。
+同版本另有 C 守护版 `QuickCharge-v2.9.54-c.zip`，`chg_snapshot` / `chg_line` 做了同样的修改，
+并补上了 bcc 直读。两版功能等价，详见 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)。

@@ -84,6 +84,49 @@ setup
 line=$(run_sh 'rm -f "$SD_PS/usb/voltage_now"; sd_chg_line')
 echo "$line" | grep -q 'vusb=?V' && ok "缺节点显示 ?" || bad "缺节点输出: $line"
 
+echo "[5] 未充电时的判重（只看状态签名）"
+setup
+# 每次调用前把节流计时清零，模拟"已经过去 30 秒"
+run_sh 'printf "Discharging\n" >"$SD_PS/battery/status"
+        _sd_chg_scan=0; sd_chg_snapshot 0
+        printf "4253000\n" >"$SD_PS/battery/voltage_now"
+        _sd_chg_scan=0; sd_chg_snapshot 0
+        printf "4201000\n" >"$SD_PS/battery/voltage_now"
+        _sd_chg_scan=0; sd_chg_snapshot 0'
+chk "电压在几十 mV 内抖动不追加" "$(cnt)" "1"
+
+setup
+run_sh 'printf "Discharging\n" >"$SD_PS/battery/status"
+        _sd_chg_scan=0; sd_chg_snapshot 0
+        printf "46\n" >"$SD_PS/battery/capacity"
+        _sd_chg_scan=0; sd_chg_snapshot 0'
+chk "电量跨 5% 档追加一条" "$(cnt)" "2"
+
+setup
+run_sh 'printf "Discharging\n" >"$SD_PS/battery/status"
+        _sd_chg_scan=0; sd_chg_snapshot 0
+        printf "42\n" >"$SD_PS/battery/capacity"
+        _sd_chg_scan=0; sd_chg_snapshot 0'
+chk "电量同档内变化不追加" "$(cnt)" "1"
+
+echo "[6] 电池电流优先取 bcc"
+setup
+printf '1,2,3,4,5,6,4200,8,-350,10,11,0,12,13,14,15,16,17,18\n' \
+    >"$ROOT/oplus/battery/bcc_parms"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'ibat=-350mA' && ok "current_now=-3mA 时用 bcc 的 -350mA" || bad "ibat: $line"
+
+setup
+printf '1,2,3,4,5,6,4200,8,-350,10,11,0,12,13,14,15,16,17,18\n' \
+    >"$ROOT/oplus/battery/bcc_parms"
+printf '0\n' >"$ROOT/ps/battery/current_now"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'ibat=-350mA' && ok "灭屏 current_now=0 时用 bcc" || bad "ibat: $line"
+
+setup
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'ibat=-3mA' && ok "无 bcc 时回退 current_now" || bad "ibat: $line"
+
 echo
 echo "结果：通过 $PASS，失败 $FAIL"
 [ "$FAIL" -eq 0 ]

@@ -416,6 +416,22 @@ echo "$out" | grep -q 'cool=7'       && ok "读 cool_down"    || bad "cool 错�
 echo "$out" | grep -q 'tech=14'      && ok "读 charge_technology" || bad "tech 错：$out"
 echo "$out" | grep -q 'type=USB_DCP' && ok "读 usb/type"     || bad "type 错：$out"
 
+echo "[15] 电池电流优先取 bcc"
+setup
+state static 30 42 off
+printf '1,2,3,4,5,6,4200,8,-350,10,11,0,12,13,14,15,16,17,18\n' \
+    >"$ROOT/sys/class/oplus_chg/battery/bcc_parms"
+out=$(run chg)
+echo "$out" | grep -q 'ibat=-350mA' && ok "current_now=-3mA 时用 bcc 的 -350mA" || bad "ibat 错：$out"
+
+setup
+state static 30 42 off
+printf '0\n' >"$ROOT/sys/class/power_supply/battery/current_now"
+printf '1,2,3,4,5,6,4200,8,-350,10,11,0,12,13,14,15,16,17,18\n' \
+    >"$ROOT/sys/class/oplus_chg/battery/bcc_parms"
+out=$(run chg)
+echo "$out" | grep -q 'ibat=-350mA' && ok "灭屏 current_now=0 时用 bcc" || bad "ibat 错：$out"
+
 echo
 echo "结果：通过 $PASS，失败 $FAIL"
 [ "$FAIL" -eq 0 ]

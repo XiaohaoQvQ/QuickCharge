@@ -1483,6 +1483,7 @@ static void cool_tick(void)
  * 日志自己就是时间线，排查只要一份 log。
  */
 static char g_chg_last[384];
+static char g_chg_key[384];
 static char g_chg_last_st[24];
 static long g_chg_at;
 static long g_chg_scan;
@@ -1525,8 +1526,51 @@ static void fmt_uv(long uv, int dec, char *out, size_t n)
     else          snprintf(out, n, "%ld.%02ld", uv / 1000000, (uv % 1000000) / 10000);
 }
 
-/* 组装一行充电现场。charging 只影响内部节流，不参与内容。 */
-static void chg_line(char *out, size_t n)
+/* bcc_parms：19 段逗号分隔，第 7 段电芯电压 mV、第 9 段电流 mA。
+ * 灭屏后 power_supply 的 current_now 常常停在 0 不刷新，而这里仍在更新。 */
+static long bcc_current(void)
+{
+    char b[256];
+    char p[MAXPATH + 64];
+    snprintf(p, sizeof p, "%s/bcc_parms", g_oplus);
+    if (read_line(p, b, sizeof b) < 0) return 0;
+    int idx = 0;
+    char *s = b;
+    long ma = 0;
+    for (;;) {
+        idx++;
+        char *c = strchr(s, ',');
+        if (c) *c = 0;
+        if (idx == 9) {
+            char *e = NULL;
+            long v = strtol(s, &e, 10);
+            if (e != s) ma = v;
+            break;
+        }
+        if (!c) break;
+        s = c + 1;
+    }
+    return ma;
+}
+
+/* 电池电流，统一 µA：bcc 优先，再回退 current_now / bms / current_avg */
+static long chg_current(void)
+{
+    long v = 0;
+    long ma = bcc_current();
+    if (ma != 0) return ma * 1000;
+    if (ps_num("current_now", &v) == 0 && v != 0) return v;
+    char p[MAXPATH + 32];
+    snprintf(p, sizeof p, "%s/bms/current_now", g_ps);
+    if (path_num(p, &v) == 0 && v != 0) return v;
+    snprintf(p, sizeof p, "%s/battery/current_avg", g_ps);
+    if (path_num(p, &v) == 0 && v != 0) return v;
+    return 0;
+}
+
+/* 组装一行充电现场。sig 非空时同时输出判重签名：
+ * 电量按 5%、温度按 2℃ 归并，未充电时只比它，避免电压抖几十 mV 就落一条。 */
+static void chg_line(char *out, size_t n, char *sig, size_t sn)
 {
     long vusb = -1, imax = -1, vbat = -1, ibat = -1;
     long cool = -1, vooc = -1, tech = -1, cap = -1;
@@ -1537,7 +1581,7 @@ static void chg_line(char *out, size_t n)
     batt_status(st, sizeof st);
     ps_num("capacity", &cap);
     ps_num("voltage_now", &vbat);
-    ps_num("current_now", &ibat);
+    ibat = chg_current();
     snprintf(p, sizeof p, "%s/usb/voltage_now", g_ps);
     path_num(p, &vusb);
     snprintf(p, sizeof p, "%s/usb/current_max", g_ps);
@@ -1564,11 +1608,17 @@ static void chg_line(char *out, size_t n)
              a, b2, b3, ib,
              cap, tb,
              cool, vooc, tech, type[0] ? type : "?", g_screen_on, st);
+    if (sig && sn) {
+        snprintf(sig, sn,
+                 "st=%s cap=%ld bt=%d usb=%s imax=%s type=%s cool=%ld vooc=%ld tech=%ld scr=%d",
+                 st, cap < 0 ? 0 : cap / 5 * 5, bt < 0 ? 0 : bt / 2 * 2,
+                 a, b2, type[0] ? type : "?", cool, vooc, tech, g_screen_on);
+    }
 }
 
 static void chg_snapshot(int charging)
 {
-    char sig[384], st[32] = "?";
+    char line[384], sig[384], st[32] = "?";
     long now = (long)time(NULL);
 
     if (g_c.log_level < 2) return;
@@ -1577,7 +1627,8 @@ static void chg_snapshot(int charging)
     g_chg_scan = now;
 
     batt_status(st, sizeof st);
-    chg_line(sig, sizeof sig);
+    chg_line(line, sizeof line, sig, sizeof sig);
+    const char *key = charging ? line : sig;
 
     const char *why = "变化";
     if (strcmp(g_chg_last_st, st)) {
@@ -1585,16 +1636,17 @@ static void chg_snapshot(int charging)
         why = charging ? "插电" : "停充";
     }
 
-    if (!strcmp(sig, g_chg_last)) {
+    if (!strcmp(key, g_chg_key)) {
         /* 值没变就只在充电中每 10 分钟补一条，避免刷屏 */
         if (charging && now - g_chg_at >= 600) {
-            log_msg("I", "chg", "定时 %s", sig);
+            log_msg("I", "chg", "定时 %s", line);
             g_chg_at = now;
         }
         return;
     }
-    log_msg("I", "chg", "%s %s", why, sig);
-    snprintf(g_chg_last, sizeof g_chg_last, "%s", sig);
+    log_msg("I", "chg", "%s %s", why, line);
+    snprintf(g_chg_key, sizeof g_chg_key, "%s", key);
+    snprintf(g_chg_last, sizeof g_chg_last, "%s", line);
     g_chg_at = now;
 }
 
@@ -2509,7 +2561,7 @@ int main(int argc, char **argv)
             screen_tick();
             screen_tick();
             char line[384];
-            chg_line(line, sizeof line);
+            chg_line(line, sizeof line, NULL, 0);
             printf("%s\n", line);
             return 0;
         }
