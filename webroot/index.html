@@ -311,18 +311,19 @@
   </div></div>
 </div>
 
-<div class="card">
-  <h2>诊断日志<span class="sm" id="lvNow">—</span></h2>
-  <div class="acts">
-    <button data-lv="0">关闭</button>
-    <button data-lv="2">精简</button>
-    <button data-lv="3">标准</button>
-    <button data-lv="4">详细</button>
+<div class="card fold closed" id="foldLog">
+  <div class="hd" id="foldLogHd" role="button" aria-expanded="false">
+    <h2>诊断日志<span class="sm" id="lvNow">—</span></h2>
+    <span class="chev"></span>
   </div>
-  <div style="padding:0 14px 14px;color:var(--dim);font-size:12px;line-height:1.7">
-    精简＝只留警告和充电快照；标准＝加常规信息；详细＝含每轮调试，最费电。
-    充电快照是一行 <code>vusb/imax/vbat/ibat/电量/温度/cool/协议</code>，插拔和档位一变就记一条，排查不用再敲命令。
+  <div class="bd" id="foldLogBd"><div class="bd-in">
+  <div class="switch" style="margin-top:2px">
+    <input type="checkbox" id="logOn"><label for="logOn">打开</label>
   </div>
+  <div class="switch" style="margin-top:10px">
+    <input type="checkbox" id="logDetail"><label for="logDetail">详细</label>
+  </div>
+  </div></div>
 </div>
 
 <div class="card">
@@ -754,8 +755,12 @@
     $("wallOff").checked = d.wall === "off";
     $("wall").disabled = d.wall === "off";
     if (d.level !== undefined && d.level !== null) {
-      var LVN = { "0": "关闭", "2": "精简", "3": "标准", "4": "详细" };
-      $("lvNow").textContent = LVN[String(d.level)] || ("级别 " + d.level);
+      var lv = Number(d.level) || 0;
+      var LVN = { "0": "关闭", "1": "精简", "2": "精简", "3": "标准", "4": "详细" };
+      $("lvNow").textContent = LVN[String(lv)] || ("级别 " + lv);
+      $("logOn").checked = lv > 0;
+      $("logDetail").checked = lv >= 4;
+      $("logDetail").disabled = !(lv > 0);
     }
     if (!rngBusy("shell")) {
       $("shell").max = d.wall === "off" ? 60 : Math.max(25, Number(d.wall) - 2);
@@ -1266,6 +1271,7 @@
     bindFold("foldHz", "qc.fold.hz", false);
     bindFold("foldCpu", "qc.fold.cpu", false);
     bindFold("foldExtreme", "qc.fold.ext", false);
+    bindFold("foldLog", "qc.fold.log", false);
   }
   function openUrl(u) {
     exec("am start -a android.intent.action.VIEW -d '" + u + "'", function (r) {
@@ -1412,11 +1418,13 @@
     bindTap("refresh", function () {
       load(function (ok) { toast(ok ? "已刷新" : "刷新失败", !ok); });
     });
-    document.querySelectorAll("[data-lv]").forEach(function (b) {
-      b.addEventListener("click", function () {
-        apply("level " + b.getAttribute("data-lv"),
-          "日志级别 → " + b.textContent);
-      });
+    $("logOn").addEventListener("change", function () {
+      var on = this.checked;
+      apply("level " + (on ? 3 : 0), on ? "日志已打开" : "日志已关闭");
+    });
+    $("logDetail").addEventListener("change", function () {
+      var on = this.checked;
+      apply("level " + (on ? 4 : 3), on ? "日志 → 详细" : "日志 → 标准");
     });
     bindTap("rebuild", function () {
       var nm = S && S.mount_mode && S.mount_mode.indexOf("nomount") === 0;
