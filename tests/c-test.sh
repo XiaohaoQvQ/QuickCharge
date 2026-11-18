@@ -363,9 +363,13 @@ chk "电池 49℃ → 不干预" "$(val "$COOL")" "7"
 
 printf '7\n' >"$COOL"; printf '34000\n' >"$BT"; printf '90\n' >"$CAP"
 run sensor >/dev/null 2>&1
-chk "电量 90% → 1" "$(val "$COOL")" "1"
+chk "电量 90% 也写 0（写 1 会掉协议）" "$(val "$COOL")" "0"
 
-printf '7\n' >"$COOL"; printf '40\n' >"$CAP"
+printf '7\n' >"$COOL"; printf '46000\n' >"$BT"; printf '90\n' >"$CAP"
+run sensor >/dev/null 2>&1
+chk "电量 90% 且 46℃ → 2" "$(val "$COOL")" "2"
+
+printf '7\n' >"$COOL"; printf '34000\n' >"$BT"; printf '40\n' >"$CAP"
 screen_off
 run sensor >/dev/null 2>&1
 chk "灭屏也解除（驱动本来给 0）" "$(val "$COOL")" "0"

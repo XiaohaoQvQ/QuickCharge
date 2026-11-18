@@ -2910,8 +2910,10 @@ sd_cool_tick() {
     sd_ps_attr_v capacity && cap=$_sd_rv
     case "$cap" in ''|*[!0-9]*) cap=0 ;; esac
 
+    # 电量 ≥85% 曾经写 1（"恒压段只轻放"）。实测这条会掉协议：PKX110 上
+    # cool_down 0→1 之后 charge_technology 从 7 变成 14、电流 3.6A → 1.0A，
+    # 功率 32W → 9W。恒压段电流本来就由驱动收，不需要再加一档降流。
     if [ "$bt" -ge 45 ]; then want=2
-    elif [ "$cap" -ge 85 ]; then want=1
     else want=0
     fi
 

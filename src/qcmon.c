@@ -1496,8 +1496,11 @@ static void cool_tick(void)
 
     int cap = batt_capacity();
     int want;
+    /* 电量 ≥85% 曾经写 1（"恒压段只轻放"）。实测这条会掉协议：
+     * PKX110 上 cool_down 0→1 之后 charge_technology 从 7 变成 14、
+     * 电流从 3.6A 掉到 1.0A，功率 32W → 9W。恒压段电流本来就由驱动
+     * 收，不需要再加一档降流，所以只在真过热（≥45℃）时才留 2。 */
     if (bt > -100 && bt >= 45) want = 2;  /* 偏热：留轻度降流 */
-    else if (cap >= 85) want = 1;         /* 接近满电：恒压段，只轻放 */
     else want = 0;
 
     int cur = 0;

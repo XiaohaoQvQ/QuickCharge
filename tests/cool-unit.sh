@@ -49,7 +49,10 @@ setup; setb temp 49000; run_cool 1
 chk "49℃ → 不干预" "$(cool)" "7"
 
 setup; setb capacity 90; run_cool 1
-chk "90% → 1" "$(cool)" "1"
+chk "90% 也写 0（写 1 会掉协议，见 qcmon.c cool_tick）" "$(cool)" "0"
+
+setup; setb capacity 90; setb temp 46000; run_cool 1
+chk "90% 且 46℃ → 2（过热优先）" "$(cool)" "2"
 
 echo "[2] 不该动的场景"
 setup; run_cool 0
