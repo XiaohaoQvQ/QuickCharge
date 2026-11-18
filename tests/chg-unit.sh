@@ -127,6 +127,14 @@ setup
 line=$(run_sh 'sd_chg_line')
 echo "$line" | grep -q 'ibat=-3mA' && ok "无 bcc 时回退 current_now" || bad "ibat: $line"
 
+setup
+# bcc 第 9 段是个位数噪声（PJD110 实机就是这样），不能盖掉真实电流
+printf '1,2,3,4,5,6,4210,8,-3,10,11,0,12,13,14,15,16,17,18\n' \
+    >"$ROOT/oplus/battery/bcc_parms"
+printf -- '-2500000\n' >"$ROOT/ps/battery/current_now"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'ibat=-2500mA' && ok "bcc 噪声 -3mA 时改用 current_now" || bad "ibat: $line"
+
 echo
 echo "结果：通过 $PASS，失败 $FAIL"
 [ "$FAIL" -eq 0 ]

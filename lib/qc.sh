@@ -2277,34 +2277,37 @@ sd_curr_nodes() {
 _sd_curr_pct=""
 _sd_wall_eff=""
 
-_sd_bl_node=""
+_sd_bl_nodes=""
 _sd_screen_on=1
 _sd_screen_n=0
 _sd_screen_ticks=0
+_sd_scr_log=0
 
-sd_screen_node() {
+# 把候选亮度节点收成一份列表，只扫一次目录。
+# 不能"取第一个存在的节点就完事"：PJD110 的 panel0-backlight/actual_brightness
+# 恒为 0，排在前面的节点一旦是这种，屏幕就永远判成灭屏。全部读到 0 才算灭屏。
+sd_screen_nodes() {
     local p
-    if [ -n "$_sd_bl_node" ]; then
-        [ "$_sd_bl_node" = none ] && return 1
-        [ -e "$_sd_bl_node" ] && return 0
-        _sd_bl_node=""
-    fi
-    for p in "$SD_BL/panel0-backlight/actual_brightness" \
-             "$SD_BL"/*/actual_brightness \
-             "$SD_BL"/*/brightness; do
-        [ -e "$p" ] && { _sd_bl_node="$p"; return 0; }
+    [ -n "$_sd_bl_nodes" ] && return 0
+    for p in "$SD_BL"/*/actual_brightness "$SD_BL"/*/brightness \
+             /sys/class/leds/lcd-backlight/brightness; do
+        [ -e "$p" ] && _sd_bl_nodes="$_sd_bl_nodes $p"
     done
-    _sd_bl_node="none"
-    return 1
+    [ -n "$_sd_bl_nodes" ]
 }
 
 sd_screen_sample_v() {
-    local v
-    if sd_screen_node; then
-        sd_read1 "$_sd_bl_node" || return 1
-        v=$_sd_rv
-        case "$v" in ''|*[!0-9]*) return 1 ;; esac
-        [ "$v" -gt 0 ] && _sd_screen_raw=1 || _sd_screen_raw=0
+    local p v max=0 any=0
+    if sd_screen_nodes; then
+        for p in $_sd_bl_nodes; do
+            sd_read1 "$p" || continue
+            v=$_sd_rv
+            case "$v" in ''|*[!0-9]*) continue ;; esac
+            any=1
+            [ "$v" -gt "$max" ] && max=$v
+        done
+        [ "$any" = 1 ] || return 1
+        [ "$max" -gt 0 ] && _sd_screen_raw=1 || _sd_screen_raw=0
         return 0
     fi
     if [ -e "$SD_FB" ]; then
@@ -2860,8 +2863,9 @@ sd_cool_tick() {
     sd_batt_status_v
     case "$_sd_rv" in Charging|Full) ;; *) return 0 ;; esac
 
-    # 灭屏时驱动自己给 0，不插手
-    [ "$_sd_screen_on" = 1 ] || return 0
+    # 这里不再看屏幕状态。原先是"灭屏交给驱动"，但有的机型（如 PJD110，
+    # backlight 节点恒读 0）屏幕判定长期为灭屏，cool_down 停在 7~13 没人清，
+    # 亮屏游戏就只剩 5~10W。灭屏时驱动自己给 0，写 0 对它是空操作，没有副作用。
 
     bt=""
     sd_batt_temp_v && bt=$_sd_rv
@@ -2929,27 +2933,37 @@ _sd_chg_fmt() {
 # 电池电流，统一换算成 µA。灭屏后 power_supply 的 current_now 常停在 0 不刷新，
 # 而 bcc_parms 仍在更新，所以先问 bcc，再回退 current_now / bms / current_avg。
 sd_chg_current_v() {
-    local v ok=0
+    local v abs babs=0 best=0 have=0
     sd_bcc_parse
     if [ "$_sd_cell_ok" = 1 ] && [ -n "$_sd_cell_ma" ]; then
-        ok=1
-        v=$((_sd_cell_ma * 1000))
-        [ "$v" -ne 0 ] && { _sd_rv=$v; return 0; }
+        best=$((_sd_cell_ma * 1000))
+        case "$best" in ''|*[!0-9-]*) best=0 ;; esac
+        have=1
+        babs=$best; [ "$babs" -lt 0 ] && babs=$((-babs))
+        # 绝对值 ≥50mA 才认 bcc 的第 9 段；有的机型这一段不是总电流，
+        # 读出来就是 -1~-5mA 这种噪声，会盖掉真实值。
+        [ "$babs" -ge 50000 ] && { _sd_rv=$best; return 0; }
     fi
-    if sd_ps_attr_v current_now; then
-        ok=1
-        v=$_sd_rv
-        case "$v" in ''|*[!0-9-]*) v="" ;; esac
-        [ -n "$v" ] && [ "$v" -ne 0 ] && { _sd_rv=$v; return 0; }
-    fi
-    for v in "$SD_PS/bms/current_now" "$SD_PS/battery/current_avg"; do
-        sd_read1 "$v" || continue
-        ok=1
+    for v in current_now bms/current_now battery/current_avg; do
+        case "$v" in
+            current_now)
+                sd_ps_attr_v current_now || sd_read1 "$SD_PS/battery/current_now" || continue
+                ;;
+            *)
+                sd_read1 "$SD_PS/$v" || continue
+                ;;
+        esac
         v=$_sd_rv
         case "$v" in ''|*[!0-9-]*) continue ;; esac
-        [ "$v" -ne 0 ] && { _sd_rv=$v; return 0; }
+        abs=$v; [ "$abs" -lt 0 ] && abs=$((-abs))
+        [ "$abs" -eq 0 ] && continue
+        have=1
+        if [ "$best" -eq 0 ] || [ "$abs" -gt "$babs" ]; then
+            best=$v
+            babs=$abs
+        fi
     done
-    if [ "$ok" = 1 ]; then _sd_rv=0; return 0; fi
+    [ "$have" = 1 ] && { _sd_rv=$best; return 0; }
     return 1
 }
 

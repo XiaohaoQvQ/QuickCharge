@@ -108,7 +108,8 @@ static volatile sig_atomic_t g_reload = 0;
 
 static int g_screen_on = 1;
 static int g_screen_n = 0;
-static char g_bl_node[MAXPATH] = "";
+static char g_bl_list[16][MAXPATH];
+static int g_bl_cnt = -1;
 static int g_fb_blank = -1;
 
 static int g_last_pct = 100;
@@ -1439,8 +1440,9 @@ static void cool_tick(void)
     batt_status(st, sizeof st);
     if (strcmp(st, "Charging") && strcmp(st, "Full")) return;
 
-    /* 灭屏时驱动自己给 0，不插手，省得来回写 */
-    if (!g_screen_on) return;
+    /* 不再看屏幕状态：有的机型亮度节点恒读 0，判定成灭屏后这里直接 return，
+     * cool_down 就永远停在 7~13，亮屏游戏只剩 5~10W。灭屏时驱动本来给 0，
+     * 写 0 对它是空操作，没有副作用。 */
 
     int bt = batt_temp_ps();
     if (bt > -100 && bt >= 48) {          /* 过热：彻底放手 */
@@ -1553,19 +1555,34 @@ static long bcc_current(void)
     return ma;
 }
 
-/* 电池电流，统一 µA：bcc 优先，再回退 current_now / bms / current_avg */
+/* 电池电流，统一 µA：bcc 优先，再回退 current_now / bms / current_avg。
+ * bcc 绝对值小于 50mA 视为噪声（有的机型第 9 段不是总电流），继续往下找更大的值。 */
 static long chg_current(void)
 {
-    long v = 0;
+    long best = 0, babs = 0;
     long ma = bcc_current();
-    if (ma != 0) return ma * 1000;
-    if (ps_num("current_now", &v) == 0 && v != 0) return v;
+    if (ma != 0) {
+        best = ma * 1000;
+        babs = best < 0 ? -best : best;
+        if (babs >= 50000) return best;
+    }
+    long c;
+    if (ps_num("current_now", &c) == 0 && c != 0) {
+        long a = c < 0 ? -c : c;
+        if (a > babs) { best = c; babs = a; }
+    }
     char p[MAXPATH + 32];
     snprintf(p, sizeof p, "%s/bms/current_now", g_ps);
-    if (path_num(p, &v) == 0 && v != 0) return v;
+    if (path_num(p, &c) == 0 && c != 0) {
+        long a = c < 0 ? -c : c;
+        if (a > babs) { best = c; babs = a; }
+    }
     snprintf(p, sizeof p, "%s/battery/current_avg", g_ps);
-    if (path_num(p, &v) == 0 && v != 0) return v;
-    return 0;
+    if (path_num(p, &c) == 0 && c != 0) {
+        long a = c < 0 ? -c : c;
+        if (a > babs) { best = c; babs = a; }
+    }
+    return best;
 }
 
 /* 组装一行充电现场。sig 非空时同时输出判重签名：
@@ -1652,42 +1669,45 @@ static void chg_snapshot(int charging)
 
 /* ------------------------------------------------------------------ 屏幕 */
 
+/* 收集所有亮度节点，只扫一次。
+ * 不能"取第一个存在的就完事"：PJD110 的 panel0-backlight/actual_brightness
+ * 恒为 0，排在前面的节点一旦是这种，屏幕就永远判成灭屏。全部读到 0 才算灭屏。 */
+static void screen_scan(void)
+{
+    struct dirent *de;
+    DIR *d;
+    int n = 0;
+    char p[MAXPATH];
+
+    if (g_bl_cnt >= 0) return;
+    if ((d = opendir(g_bl))) {
+        while ((de = readdir(d)) && n < 16) {
+            if (de->d_name[0] == '.') continue;
+            snprintf(p, sizeof p, "%s/%s/actual_brightness", g_bl, de->d_name);
+            if (access(p, F_OK) == 0) { snprintf(g_bl_list[n], MAXPATH, "%s", p); n++; }
+        }
+        rewinddir(d);
+        while ((de = readdir(d)) && n < 16) {
+            if (de->d_name[0] == '.') continue;
+            snprintf(p, sizeof p, "%s/%s/brightness", g_bl, de->d_name);
+            if (access(p, F_OK) == 0) { snprintf(g_bl_list[n], MAXPATH, "%s", p); n++; }
+        }
+        closedir(d);
+    }
+    g_bl_cnt = n;
+}
+
 static int screen_sample(void)
 {
-    if (g_bl_node[0]) {
-        if (access(g_bl_node, F_OK) != 0) g_bl_node[0] = 0;
-    }
-    if (!g_bl_node[0]) {
-        /* 与 sd_screen_node 一致：panel0 优先，其次任取一个子目录的 actual_brightness */
-        char p[MAXPATH];
-        snprintf(p, sizeof p, "%s/panel0-backlight/actual_brightness", g_bl);
-        if (access(p, F_OK) == 0) snprintf(g_bl_node, sizeof g_bl_node, "%s", p);
-    }
-    if (!g_bl_node[0]) {
-        DIR *d = opendir(g_bl);
-        if (d) {
-            struct dirent *de;
-            while ((de = readdir(d))) {
-                if (de->d_name[0] == '.') continue;
-                char p[MAXPATH];
-                snprintf(p, sizeof p, "%s/%s/actual_brightness", g_bl, de->d_name);
-                if (access(p, F_OK) == 0) { snprintf(g_bl_node, sizeof g_bl_node, "%s", p); break; }
-            }
-            if (!g_bl_node[0]) {
-                rewinddir(d);
-                while ((de = readdir(d))) {
-                    if (de->d_name[0] == '.') continue;
-                    char p[MAXPATH];
-                    snprintf(p, sizeof p, "%s/%s/brightness", g_bl, de->d_name);
-                    if (access(p, F_OK) == 0) { snprintf(g_bl_node, sizeof g_bl_node, "%s", p); break; }
-                }
-            }
-            closedir(d);
-        }
-    }
+    int i, v, max = -1;
 
-    int v = 0;
-    if (g_bl_node[0] && read_int(g_bl_node, &v) == 0) return v > 0 ? 1 : 0;
+    screen_scan();
+    for (i = 0; i < g_bl_cnt; i++) {
+        int x;
+        if (read_int(g_bl_list[i], &x) != 0) continue;
+        if (x > max) max = x;
+    }
+    if (max >= 0) return max > 0 ? 1 : 0;
     if (g_fb_blank >= 0) return g_fb_blank;   /* blank 文件里 0 才是亮 */
     if (read_int(g_fb, &v) == 0) { g_fb_blank = v == 0 ? 1 : 0; return g_fb_blank; }
     return -1;
@@ -2393,11 +2413,11 @@ static void apply_core_nc(int force)
     }
 }
 
-/* 亮屏充电时把 tick 压到 2s：cool_down 会在亮屏瞬间跳回 7~13，
- * 15s 才复查一次意味着最多白等 15 秒，2s 足够跟上且开销可忽略。 */
+/* 充电且开着降流解除时把 tick 压到 3s：cool_down 被驱动抬高后要尽快清零。
+ * 以前只在亮屏时压，但屏幕判定靠不住，改成充电即压。 */
 static int next_tick(int charging)
 {
-    if (charging && g_screen_on && g_c.cool_guard) return 2;
+    if (charging && g_c.cool_guard) return 3;
     return charging ? 10 : g_c.tick;
 }
 
@@ -2411,6 +2431,18 @@ static int loop_once(int *mode_changed)
 
     if (!g_scanned || g_temp_fail >= 2 || g_tick_n % 40 == 0) zones_scan();
     screen_tick();
+    /* 屏幕判定只影响日志与轮询间隔，不再决定是否解除降流；每轮守护启动记一次 */
+    {
+        static int scr_logged = 0;
+        if (!scr_logged) {
+            scr_logged = 1;
+            if (g_bl_cnt > 0)
+                log_msg("I", "daemon", "屏幕 判定=%s 节点数=%d",
+                        g_screen_on ? "亮" : "灭", g_bl_cnt);
+            else
+                log_msg("I", "daemon", "屏幕 无亮度节点，按亮屏处理");
+        }
+    }
 
     char st[32];
     batt_status(st, sizeof st);

@@ -148,6 +148,17 @@ sd_daemon() {
 
         sd_screen_tick
 
+        # 屏幕判定只影响日志与轮询间隔，不再影响是否解除降流。
+        # 但判错了会影响读数，所以每轮守护启动记一次，排查时一眼能看出。
+        if [ "$_sd_scr_log" != 1 ]; then
+            _sd_scr_log=1
+            if [ -n "${_sd_bl_nodes# }" ]; then
+                sd_info daemon "屏幕 判定=$([ "$_sd_screen_on" = 1 ] && echo 亮 || echo 灭) 节点=[${_sd_bl_nodes# }]"
+            else
+                sd_info daemon "屏幕 无亮度节点，按亮屏处理"
+            fi
+        fi
+
         _sd_chg=0
         sd_batt_status_v
         case "$_sd_rv" in Charging|Full) sd_curr_keep; _sd_chg=1 ;; esac
@@ -155,12 +166,11 @@ sd_daemon() {
         sd_cool_tick
         sd_chg_snapshot "$_sd_chg"
 
-        # 亮屏充电时压到 2s：cool_down 会在亮屏瞬间跳回 7~13，慢一拍就白等一轮
+        # 充电时压到 3s：cool_down 被驱动抬高后要尽快清零，慢一拍就白等一轮。
+        # 以前只在亮屏时压，但有的机型屏幕判定靠不住，干脆充电即压。
         if [ "$_sd_chg" = 1 ]; then
             _ws=10
-            if [ "$_sd_screen_on" = 1 ] && [ "$(sd_state_int cool_guard 1 0 1)" = 1 ]; then
-                _ws=2
-            fi
+            [ "$(sd_state_int cool_guard 1 0 1)" = 1 ] && _ws=3
         else
             _ws=$tick
         fi

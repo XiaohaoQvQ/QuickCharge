@@ -368,7 +368,7 @@ chk "电量 90% → 1" "$(val "$COOL")" "1"
 printf '7\n' >"$COOL"; printf '40\n' >"$CAP"
 screen_off
 run sensor >/dev/null 2>&1
-chk "灭屏 → 不干预" "$(val "$COOL")" "7"
+chk "灭屏也解除（驱动本来给 0）" "$(val "$COOL")" "0"
 
 printf '7\n' >"$COOL"
 screen_on

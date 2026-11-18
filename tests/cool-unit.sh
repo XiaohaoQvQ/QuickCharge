@@ -53,7 +53,7 @@ chk "90% → 1" "$(cool)" "1"
 
 echo "[2] 不该动的场景"
 setup; run_cool 0
-chk "灭屏 → 不干预" "$(cool)" "7"
+chk "灭屏也解除（驱动本来给 0，写 0 无副作用）" "$(cool)" "0"
 
 setup; setb status Discharging; run_cool 1
 chk "未充电 → 不干预" "$(cool)" "7"
@@ -63,7 +63,26 @@ printf 'cool_guard=0\n' >>"$BASE/data/state.conf"
 setcool 7; run_cool 1
 chk "cool_guard=0 → 不干预" "$(cool)" "7"
 
-echo "[3] 节点缺失与幂等"
+echo "[3] 屏幕判定：任一亮度节点有值就算亮屏"
+run_screen() {
+    SD_DATA=$BASE/data SD_PS=$ROOT/ps SD_OPLUS_CHG=$ROOT/oplus/battery \
+    SD_BL=$ROOT/bl SD_FB=$ROOT/none MODDIR=$MOD \
+    sh -c '. "$MODDIR/lib/qc.sh"; sd_screen_tick; sd_screen_tick; echo "$_sd_screen_on"' 2>/dev/null
+}
+
+setup; mkdir -p "$ROOT/bl/dsi-backlight"
+printf '0\n'   >"$ROOT/bl/dsi-backlight/actual_brightness"
+chk "panel0=0 但 dsi=512 → 亮" "$(run_screen)" "1"
+
+setup; mkdir -p "$ROOT/bl/dsi-backlight"
+printf '0\n'   >"$ROOT/bl/dsi-backlight/actual_brightness"
+printf '0\n'   >"$ROOT/bl/panel0-backlight/actual_brightness"
+chk "全部为 0 → 灭" "$(run_screen)" "0"
+
+setup; rm -rf "$ROOT/bl"
+chk "无亮度节点 → 按亮屏" "$(run_screen)" "1"
+
+echo "[4] 节点缺失与幂等"
 setup; rm -f "$ROOT/oplus/battery/cool_down"; run_cool 1
 chk "无 cool_down 节点不报错" "$?" "0"
 
