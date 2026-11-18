@@ -25,6 +25,7 @@ SD_RUN="$SD_DATA/run"
 SD_SPOOF_DIR="${SD_SPOOF_DIR:-}"
 SD_SPOOF_DEF="${SD_SPOOF_DEF:-/dev/qc}"
 SD_SPOOF_FLAG="$SD_RUN/spoof.pending"
+SD_PWR_HIST="$SD_RUN/power.hist"
 SD_BUILT="$SD_DATA/built.id"
 SD_PS="${SD_PS:-/sys/class/power_supply}"
 SD_BL="${SD_BL:-/sys/class/backlight}"
@@ -615,7 +616,7 @@ sd_stale_clean() {
     sd_pid_is_daemon "$l" && return 1
     _sd_stale_pid="${l:-$h}"
     rm -rf "$SD_RUN/daemon.lock" 2>/dev/null
-    rm -f "$SD_RUN/daemon.pid" "$SD_RUN/hb" "$SD_RUN/sensor" 2>/dev/null
+    rm -f "$SD_RUN/daemon.pid" "$SD_RUN/hb" "$SD_RUN/sensor" "$SD_PWR_HIST" 2>/dev/null
     return 0
 }
 
@@ -2997,7 +2998,7 @@ sd_chg_current_v() {
 # 填 _sd_chg_line_v（日志行）与 _sd_chg_sig_v（判重签名）。
 # 用全局变量而不是命令替换，两个结果才都留得住。
 sd_chg_line_fill() {
-    local cap vbat ibat vusb imax type cool vooc tech bt st f capk btk vbq ibq
+    local cap vbat ibat vusb imax type cool vooc tech bt st f capk btk pwk pwc ibm
     st=""; sd_batt_status_v && st=$_sd_rv
     cap=""; sd_ps_attr_v capacity && cap=$_sd_rv
     vbat=""; sd_ps_attr_v voltage_now && vbat=$_sd_rv
@@ -3021,15 +3022,21 @@ sd_chg_line_fill() {
     case "$capk" in ''|*[!0-9]*) capk=0 ;; esac
     case "$btk" in ''|*[!0-9]*) btk=0 ;; esac
 
-    # 电压 100mV、电流 200mA 一档：只滤掉读数噪声，真正的档位切换不会漏
-    vbq=${vbat:-0}
-    case "$vbq" in ''|*[!0-9-]*) vbq=0 ;; esac
-    if [ "$vbq" -lt 0 ]; then vbq=$(( -(((-vbq) / 100000)) )); else vbq=$(( vbq / 100000 )); fi
-    ibq=${ibat:-0}
-    case "$ibq" in ''|*[!0-9-]*) ibq=0 ;; esac
-    if [ "$ibq" -lt 0 ]; then ibq=$(( -(((-ibq) / 200000)) )); else ibq=$(( ibq / 200000 )); fi
+    # 判重不再看 vbat/ibat 的瞬时值：它们每 3 秒就掉一次档再弹回来（见 sd_power_median
+    # 的注释），按 100mV/200mA 分档照样每轮跨档，日志会被灌成 3 秒一条。
+    # 改用中值功率分档（1W），脉动被滤掉，真实降档依然跨档。
+    pwk=0
+    if [ -n "$ibat" ] && [ -n "$vbat" ]; then
+        case "$st" in *Charging*|Full) pwc=1 ;; *) pwc=0 ;; esac
+        ibm=$ibat
+        [ "$ibm" -lt 0 ] && ibm=$((-ibm))
+        ibm=$((ibm / 1000))
+        sd_power_median "$ibm" "$pwc" && ibm=$_sd_rv
+        case "$ibm" in ''|*[!0-9]*) ibm=0 ;; esac
+        pwk=$(( ibm * vbat / 1000000000 ))
+    fi
 
-    _sd_chg_sig_v="st=${st:-?} cap=$((capk / 5 * 5)) bt=$((btk / 2 * 2)) usb=${vusb:-?} imax=${imax:-?} vb=$((vbq * 100))mV ib=$((ibq * 200))mA type=${type:-?} cool=${cool:-?} vooc=${vooc:-?} tech=${tech:-?} scr=${_sd_screen_on:-?}"
+    _sd_chg_sig_v="st=${st:-?} pw=${pwk}W cap=$((capk / 5 * 5)) bt=$((btk / 2 * 2)) usb=${vusb:-?} imax=${imax:-?} type=${type:-?} cool=${cool:-?} vooc=${vooc:-?} tech=${tech:-?} scr=${_sd_screen_on:-?}"
 }
 
 sd_chg_line() {
@@ -3430,9 +3437,54 @@ sd_volt_pack() {
     return 0
 }
 
+# 电池电流的 5 点中值。
+# 欧加机器的 bcc 电流是瞬时值，充电时会在两档之间来回脉动：4.4V 电芯内阻约 60mΩ，
+# 电流 ±600mA 恰好对应 ±40mV 的 vbat 摆动，读数看着像"乱跳"，其实是真实脉动。
+# 面板要的是平均功率，取最近 5 次的中值既能压住脉动，又不会掩盖真实降档（2 个采样就跟上）。
+# 充电/放电切换时旧样本全部作废，避免插拔瞬间的中值被两组数据掺在一起。
+sd_power_median() {
+    local raw="$1" code="$2" now t c v tmp n sorted mid
+    _sd_rv=""
+    case "$raw" in ''|*[!0-9-]*) return 1 ;; esac
+    now=$(date +%s)
+    tmp="$SD_RUN/power.tmp.$$"
+    : >"$tmp" 2>/dev/null || return 1
+    if [ -f "$SD_PWR_HIST" ]; then
+        while read -r t c v; do
+            case "$t" in ''|*[!0-9]*) continue ;; esac
+            [ "$c" = "$code" ] || continue
+            case "$v" in ''|*[!0-9-]*) continue ;; esac
+            # 时间戳必须落在最近 60 秒内。开机后 RTC 才校准的机器时钟会往回跳，
+            # 只做 now-t<=60 会把"未来"的旧样本一直留在窗口里。
+            [ "$t" -le "$now" ] && [ "$t" -ge $((now - 60)) ] || continue
+            printf '%s %s %s\n' "$t" "$c" "$v"
+        done <"$SD_PWR_HIST" >>"$tmp" 2>/dev/null
+    fi
+    printf '%s %s %s\n' "$now" "$code" "$raw" >>"$tmp"
+
+    n=$(wc -l <"$tmp" 2>/dev/null | tr -d ' \t')
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    # 只留最近 5 条
+    if [ "$n" -gt 5 ]; then
+        sed -n "$((n - 4)),\$p" "$tmp" >"$tmp.2" 2>/dev/null && mv "$tmp.2" "$tmp"
+        n=5
+    fi
+    mv "$tmp" "$SD_PWR_HIST" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+
+    if [ "$n" -lt 3 ]; then _sd_rv="$raw"; return 0; fi
+    sorted=$(sed -n 's/^[0-9]* [0-9]* //p' "$SD_PWR_HIST" 2>/dev/null | sort -n)
+    n=$(printf '%s' "$sorted" | grep -c . 2>/dev/null)
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    [ "$n" -ge 3 ] || { _sd_rv="$raw"; return 0; }
+    mid=$(( (n + 1) / 2 ))
+    _sd_rv=$(printf '%s\n' "$sorted" | sed -n "${mid}p")
+    [ -n "$_sd_rv" ] || _sd_rv="$raw"
+    return 0
+}
+
 sd_power_json() {
     local c mv w st cap t ma src=ps cells=1 neg="" scale
-    local v0 v1 bv pv
+    local v0 v1 bv pv ma_raw="" w_raw="" pw_code=0
 
     st=""
     sd_ps_attr_v status && st=$_sd_rv
@@ -3504,11 +3556,18 @@ sd_power_json() {
         scale=$(sd_state_int power_scale 100 50 200)
         [ "$scale" -ne 100 ] && c=$((c * scale / 100))
         ma=$c
+        ma_raw=$c
+        # 充电记 1、其余记 0：插拔那一刻两组样本不能混着算中值
+        case "$st" in *Charging*|Full) pw_code=1 ;; *) pw_code=0 ;; esac
+        sd_power_median "$ma" "$pw_code" && ma=$_sd_rv
     fi
 
     w=""
     if [ -n "$ma" ] && [ -n "$mv" ]; then
         w=$(awk -v a="$ma" -v b="$mv" 'BEGIN { printf "%.2f", (a < 0 ? -a : a) * b / 1000000 }')
+    fi
+    if [ -n "$ma_raw" ] && [ -n "$mv" ]; then
+        w_raw=$(awk -v a="$ma_raw" -v b="$mv" 'BEGIN { printf "%.2f", (a < 0 ? -a : a) * b / 1000000 }')
     fi
 
     case "$t" in ''|*[!0-9]*) t="" ;; esac
@@ -3520,8 +3579,8 @@ sd_power_json() {
     sd_plat_resolve
     sd_proto_resolve
 
-    printf '{"ma":%s,"mv":%s,"w":%s,"status":"%s","cap":%s,"temp":%s,"cells":%s,"cells_src":"%s","src":"%s","plat":"%s","proto":"%s"}\n' \
-        "${ma:-null}" "${mv:-null}" "${w:-null}" "${st:-Unknown}" "${cap:-null}" "${t:-null}" \
+    printf '{"ma":%s,"mv":%s,"w":%s,"wr":%s,"status":"%s","cap":%s,"temp":%s,"cells":%s,"cells_src":"%s","src":"%s","plat":"%s","proto":"%s"}\n' \
+        "${ma:-null}" "${mv:-null}" "${w:-null}" "${w_raw:-null}" "${st:-Unknown}" "${cap:-null}" "${t:-null}" \
         "$cells" "${_sd_cell_src:-default}" "$src" "$_sd_plat" "$_sd_proto"
 }
 

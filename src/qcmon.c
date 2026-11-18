@@ -1626,6 +1626,36 @@ static long chg_current(void)
     return best;
 }
 
+/* 电流 5 点中值，只为判重和快照分档服务。
+ * 欧加机器报的 bcc 电流是瞬时值，充电时在两档之间脉动，直接分档会每轮都"变化"。
+ * 充电/放电切换时整组作废，避免插拔瞬间把两种工况掺在一起算。 */
+static long g_pw_ring[5];
+static int  g_pw_n = 0;
+static int  g_pw_st = -1;
+
+static long pw_median(long ma, int chg)
+{
+    int i, j, k;
+    long x, v[5];
+
+    if (chg != g_pw_st) { g_pw_n = 0; g_pw_st = chg; }
+    if (g_pw_n < 5) {
+        g_pw_ring[g_pw_n++] = ma;
+    } else {
+        for (i = 1; i < 5; i++) g_pw_ring[i - 1] = g_pw_ring[i];
+        g_pw_ring[4] = ma;
+    }
+    k = g_pw_n;
+    for (i = 0; i < k; i++) v[i] = g_pw_ring[i];
+    /* 排序副本，环形数组本身必须保持插入顺序 */
+    for (i = 1; i < k; i++) {
+        x = v[i];
+        for (j = i - 1; j >= 0 && v[j] > x; j--) v[j + 1] = v[j];
+        v[j + 1] = x;
+    }
+    return v[k / 2];
+}
+
 /* 组装一行充电现场。sig 非空时同时输出判重签名：
  * 电量按 5%、温度按 2℃ 归并，未充电时只比它，避免电压抖几十 mV 就落一条。 */
 static void chg_line(char *out, size_t n, char *sig, size_t sn)
@@ -1667,13 +1697,20 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
              cap, tb,
              cool, vooc, tech, type[0] ? type : "?", g_screen_on, st);
     if (sig && sn) {
-        /* 电压 100mV、电流 200mA 一档：只滤读数噪声，真正的档位切换不会漏 */
-        long vbq = vbat > 0 ? vbat / 100000 * 100 : 0;
-        long ibq = ibat != -1 ? ibat / 200000 * 200 : 0;
+        /* 判重不看 vbat/ibat 瞬时值：bcc 电流会在两档间脉动（4.4V 电芯 ~60mΩ 内阻，
+         * ±600mA 正好对应 ±40mV），按 100mV/200mA 分档照样每轮跨档，日志被灌成 3 秒一条。
+         * 改用 5 点中值功率分档（1W），脉动滤掉，真实降档依然跨档。 */
+        long pwk = 0;
+        if (ibat != -1 && vbat > 0) {
+            long ibm = ibat < 0 ? -ibat / 1000 : ibat / 1000;
+            int chg = strstr(st, "Charging") || !strcmp(st, "Full") ? 1 : 0;
+            ibm = pw_median(ibm, chg);
+            pwk = ibm * vbat / 1000000000L;
+        }
         snprintf(sig, sn,
-                 "st=%s cap=%ld bt=%d usb=%s imax=%s vb=%ldmV ib=%ldmA type=%s cool=%ld vooc=%ld tech=%ld scr=%d",
-                 st, cap < 0 ? 0 : cap / 5 * 5, bt < 0 ? 0 : bt / 2 * 2,
-                 a, b2, vbq, ibq, type[0] ? type : "?", cool, vooc, tech, g_screen_on);
+                 "st=%s pw=%ldW cap=%ld bt=%d usb=%s imax=%s type=%s cool=%ld vooc=%ld tech=%ld scr=%d",
+                 st, pwk, cap < 0 ? 0 : cap / 5 * 5, bt < 0 ? 0 : bt / 2 * 2,
+                 a, b2, type[0] ? type : "?", cool, vooc, tech, g_screen_on);
     }
 }
 

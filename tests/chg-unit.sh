@@ -109,15 +109,24 @@ run_sh 'printf "Discharging\n" >"$SD_PS/battery/status"
         _sd_chg_scan=0; sd_chg_snapshot 0'
 chk "电量同档内变化不追加" "$(cnt)" "1"
 
-echo "[5b] 充电时的判重（电流 200mA、电压 100mV 一档）"
+echo "[5b] 充电判重：按中值功率分档，脉动不跨档、真降档能跟上"
 setup
-run_sh 'printf "4500000\n" >"$SD_PS/battery/current_now"
+run_sh 'printf -- "-4500000\n" >"$SD_PS/battery/current_now"
         _sd_chg_scan=0; sd_chg_snapshot 1
-        printf "4400000\n" >"$SD_PS/battery/current_now"
+        printf -- "-4400000\n" >"$SD_PS/battery/current_now"
         _sd_chg_scan=0; sd_chg_snapshot 1
-        printf "3000000\n" >"$SD_PS/battery/current_now"
+        printf -- "-3800000\n" >"$SD_PS/battery/current_now"
         _sd_chg_scan=0; sd_chg_snapshot 1'
-chk "4.5→4.4A 同档不追加，3.0A 跨档追加" "$(cnt)" "2"
+chk "4.5→4.4→3.8A 的脉动不追加" "$(cnt)" "1"
+
+run_sh 'printf -- "-3000000\n" >"$SD_PS/battery/current_now"
+        for i in 1 2 3; do _sd_chg_scan=0; sd_chg_snapshot 1; done'
+# 真降档会经过一档中间值（16W），最终落到 12W，所以最多 3 条；
+# 关键是它不再像以前那样每 3 秒一条。
+c=$(cnt)
+[ "$c" -le 3 ] && ok "降到 3.0A 后收敛（$c 条，不再刷屏）" || bad "降档后写了 $c 条"
+tail -n 1 "$BASE/data/log.txt" | grep -q 'ibat=-3000mA' \
+    && ok "末条是降档后的新值" || bad "末条不是 3.0A：$(tail -n 1 "$BASE/data/log.txt")"
 
 echo "[6] 电池电流优先取 bcc"
 setup
@@ -144,6 +153,34 @@ printf '1,2,3,4,5,6,4210,8,-3,10,11,0,12,13,14,15,16,17,18\n' \
 printf -- '-2500000\n' >"$ROOT/ps/battery/current_now"
 line=$(run_sh 'sd_chg_line')
 echo "$line" | grep -q 'ibat=-2500mA' && ok "bcc 噪声 -3mA 时改用 current_now" || bad "ibat: $line"
+
+echo "[7] 功率取 5 点中值"
+# bcc 电流是瞬时值，充电时在两档之间脉动（±600mA ↔ vbat ±40mV）；
+# 直接画出来就是一条锯齿。最近 5 次取中值，既压住脉动又跟得上真实降档。
+setup
+med() { run_sh "sd_power_median $1 1; printf '%s' \"\$_sd_rv\""; }
+chk "第 1 个样本原样输出" "$(med 2445)" "2445"
+chk "第 2 个样本仍原样输出" "$(med 3148)" "3148"
+chk "满 3 个取中值" "$(med 3614)" "3148"
+med 3587 >/dev/null
+chk "5 个样本取中值" "$(med 3603)" "3587"
+
+n=$(wc -l <"$BASE/data/run/power.hist" | tr -d ' ')
+chk "历史只留 5 条" "$n" "5"
+
+# 插拔那一刻两种工况不能混算：状态码一变，旧样本直接作废
+setup
+med 2445 >/dev/null; med 3148 >/dev/null
+chk "状态码变化后重新起算" "$(run_sh 'sd_power_median 900 0; printf "%s" "$_sd_rv"')" "900"
+
+# 时钟往回跳（开机后 RTC 才校准）时，过旧和"未来"的样本都必须丢掉，
+# 否则它们会一直占着 5 个窗口，把中值拖到错误的档位
+setup; mkdir -p "$BASE/data/run"
+now=$(date +%s)
+printf '%s 1 9999\n%s 1 8888\n%s 1 1111\n%s 1 2222\n%s 1 3333\n' \
+    "$((now - 3600))" "$((now + 3600))" "$((now - 3))" "$((now - 2))" "$((now - 1))" \
+    >"$BASE/data/run/power.hist"
+chk "过旧/未来样本不参与中值" "$(med 4444)" "2222"
 
 echo
 echo "结果：通过 $PASS，失败 $FAIL"
