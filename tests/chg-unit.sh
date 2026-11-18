@@ -109,6 +109,16 @@ run_sh 'printf "Discharging\n" >"$SD_PS/battery/status"
         _sd_chg_scan=0; sd_chg_snapshot 0'
 chk "电量同档内变化不追加" "$(cnt)" "1"
 
+echo "[5b] 充电时的判重（电流 200mA、电压 100mV 一档）"
+setup
+run_sh 'printf "4500000\n" >"$SD_PS/battery/current_now"
+        _sd_chg_scan=0; sd_chg_snapshot 1
+        printf "4400000\n" >"$SD_PS/battery/current_now"
+        _sd_chg_scan=0; sd_chg_snapshot 1
+        printf "3000000\n" >"$SD_PS/battery/current_now"
+        _sd_chg_scan=0; sd_chg_snapshot 1'
+chk "4.5→4.4A 同档不追加，3.0A 跨档追加" "$(cnt)" "2"
+
 echo "[6] 电池电流优先取 bcc"
 setup
 printf '1,2,3,4,5,6,4200,8,-350,10,11,0,12,13,14,15,16,17,18\n' \

@@ -29,7 +29,11 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-#define VER "2.9.49"
+/* 版本号由 build-qcmon.sh 从 module.prop 注入，手改源码不会再和包版本脱节 */
+#ifndef QC_VER
+#define QC_VER "dev"
+#endif
+#define VER QC_VER
 
 #define MAXZ 192
 #define MAXLINE 512
@@ -144,6 +148,9 @@ static long g_batt_sp_hold = 0;
 /* 亮屏快充 */
 static int g_scr_on = 0;
 static char g_scr_way_s[16] = "";
+static int g_scr_cur = 0;          /* 接管时 FCC 节点实读值，只用于日志 */
+static char g_scr_node[64] = "";
+static long g_scr_off_at = 0;      /* 熄屏起始时间，延迟释放用 */
 
 /* 高刷 */
 static int g_hz_bad = 0;
@@ -1142,11 +1149,14 @@ static int scr_node(char *out, size_t n)
     return -1;
 }
 
-/* 优先级：电池侧 FCC → 电池侧 current_max → USB 输入上限 */
+/* 优先级：电池侧 FCC → 电池侧 current_max → 欧加 chg_current_max → USB 输入上限。
+ * chg_current_max 才是欧加真正的充电电流上限；漏掉它会一路落到 usb/current_max
+ * （充电器能力值，常见固定 2A），把 2A 当目标反而压功率。 */
 static int scr_fcc_node(char *out, size_t n)
 {
     curr_prepare();
-    const char *pref[] = { "constant_charge_current_max", "battery/current_max", "usb/current_max", NULL };
+    const char *pref[] = { "constant_charge_current_max", "battery/current_max",
+                           "chg_current_max", "usb/current_max", NULL };
     for (int p = 0; pref[p]; p++) {
         for (int i = 0; i < g_curr_n; i++) {
             if (!strstr(g_curr_nodes[i], pref[p])) continue;
@@ -1156,8 +1166,10 @@ static int scr_fcc_node(char *out, size_t n)
     for (int i = 0; i < g_curr_n; i++) {
         const char *q = g_curr_nodes[i];
         size_t l = strlen(q);
-        if ((l > 11 && !strcmp(q + l - 11, "/current_max")) ||
-            (l > 21 && !strcmp(q + l - 21, "/constant_charge_current"))) {
+        /* 长度要按整段后缀算："/current_max" 是 12 字节，"/constant_charge_current" 是 24，
+         * 之前写成 11/21，strcmp 永远不等，这条兜底其实一直没生效过。 */
+        if ((l > 12 && !strcmp(q + l - 12, "/current_max")) ||
+            (l > 24 && !strcmp(q + l - 24, "/constant_charge_current"))) {
             if (access(q, F_OK) == 0) { snprintf(out, n, "%s", q); return 0; }
         }
     }
@@ -1277,7 +1289,21 @@ static int scr_apply(void)
 
     int cur = 0;
     if (scr_read_ma(fcc, &cur) < 0) return 1;
+    g_scr_cur = cur;
+    {
+        const char *base = strrchr(fcc, '/');
+        snprintf(g_scr_node, sizeof g_scr_node, "%s", base ? base + 1 : fcc);
+    }
     if (cur >= tgt) {
+        g_scr_on = 1;
+        snprintf(g_scr_way_s, sizeof g_scr_way_s, "fcc");
+        write_str(g_scr_way, "fcc\n");
+        unlink(g_scr_fail);
+        return 0;
+    }
+    /* 死区：离目标不到 25% 不写。驱动自己也在按温度和电压动态算 FCC，
+     * 贴着目标值来回覆盖，电流就在两档之间反复跳，曲线成锯齿。 */
+    if (cur >= tgt * 3 / 4) {
         g_scr_on = 1;
         snprintf(g_scr_way_s, sizeof g_scr_way_s, "fcc");
         write_str(g_scr_way, "fcc\n");
@@ -1333,9 +1359,22 @@ static void scr_tick(void)
 
     if (!g_screen_on) {
         scr_learn();
-        if (scr_active()) { scr_release(); logged[0] = 0; }
+        if (scr_active()) {
+            /* 内核参数那条一写就是「永久忽略屏幕」，熄屏立即还原；
+             * FCC 路径延迟 30s，避开亮灭屏边界反复写导致的电流阶跃。 */
+            char node[MAXPATH];
+            long delay = scr_node(node, sizeof node) == 0 ? 0 : 30;
+            long now = (long)time(NULL);
+            if (!g_scr_off_at) g_scr_off_at = now;
+            if (now - g_scr_off_at >= delay) {
+                scr_release();
+                logged[0] = 0;
+                g_scr_off_at = 0;
+            }
+        }
         return;
     }
+    g_scr_off_at = 0;
 
     int bt = batt_temp_ps();
     if (bt > -100 && bt >= 42) {
@@ -1356,7 +1395,9 @@ static void scr_tick(void)
                 else {
                     char b[32] = "";
                     read_line(g_fcc_norm, b, sizeof b);
-                    log_msg("I", "charge", "亮屏快充：已接管（回写 FCC，目标 %smA）", b[0] ? b : "?");
+                    log_msg("I", "charge",
+                            "亮屏快充：已接管（回写 FCC，目标 %smA，节点 %s 实读 %dmA）",
+                            b[0] ? b : "?", g_scr_node[0] ? g_scr_node : "?", g_scr_cur);
                 }
                 snprintf(logged, sizeof logged, "%s", g_scr_way_s);
             }
@@ -1626,10 +1667,13 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
              cap, tb,
              cool, vooc, tech, type[0] ? type : "?", g_screen_on, st);
     if (sig && sn) {
+        /* 电压 100mV、电流 200mA 一档：只滤读数噪声，真正的档位切换不会漏 */
+        long vbq = vbat > 0 ? vbat / 100000 * 100 : 0;
+        long ibq = ibat != -1 ? ibat / 200000 * 200 : 0;
         snprintf(sig, sn,
-                 "st=%s cap=%ld bt=%d usb=%s imax=%s type=%s cool=%ld vooc=%ld tech=%ld scr=%d",
+                 "st=%s cap=%ld bt=%d usb=%s imax=%s vb=%ldmV ib=%ldmA type=%s cool=%ld vooc=%ld tech=%ld scr=%d",
                  st, cap < 0 ? 0 : cap / 5 * 5, bt < 0 ? 0 : bt / 2 * 2,
-                 a, b2, type[0] ? type : "?", cool, vooc, tech, g_screen_on);
+                 a, b2, vbq, ibq, type[0] ? type : "?", cool, vooc, tech, g_screen_on);
     }
 }
 
@@ -1645,7 +1689,7 @@ static void chg_snapshot(int charging)
 
     batt_status(st, sizeof st);
     chg_line(line, sizeof line, sig, sizeof sig);
-    const char *key = charging ? line : sig;
+    const char *key = sig;
 
     const char *why = "变化";
     if (strcmp(g_chg_last_st, st)) {

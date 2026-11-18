@@ -89,6 +89,31 @@ chk "无 cool_down 节点不报错" "$?" "0"
 setup; setcool 0; run_cool 1
 chk "已是 0 时保持" "$(cool)" "0"
 
+echo "[5] 亮屏快充 FCC 死区"
+# 驱动自己也在动态算 FCC；贴目标值反复覆盖会让电流在两档间跳成锯齿。
+# 目标是 2000mA 时：1400 才写，1500（差 25% 以内）不动。
+FCC=$ROOT/oplus_chg/battery/chg_current_max
+run_scr() {
+    SD_DATA=$BASE/data SD_PS=$ROOT/ps SD_OPLUS_CHG=$ROOT/oplus/battery \
+    SD_CURR_NODES=$FCC SD_BL=$ROOT/bl SD_FB=$ROOT/none MODDIR=$MOD \
+    sh -c '. "$MODDIR/lib/qc.sh"; sd_state_load; _sd_st_loaded=1; _sd_screen_on=1; sd_scr_apply >/dev/null; cat "$SD_CURR_NODES"' 2>/dev/null
+}
+
+setup; mkdir -p "$BASE/data/run" "$ROOT/oplus_chg/battery"
+printf '2000\n' >"$BASE/data/run/fcc.norm"
+printf '1500\n' >"$FCC"
+chk "1500 在死区内 → 不写" "$(run_scr | tr -d ' \r\n')" "1500"
+
+setup; mkdir -p "$BASE/data/run" "$ROOT/oplus_chg/battery"
+printf '2000\n' >"$BASE/data/run/fcc.norm"
+printf '1400\n' >"$FCC"
+chk "1400 低于 3/4 → 写回 2000" "$(run_scr | tr -d ' \r\n')" "2000"
+
+setup; mkdir -p "$BASE/data/run" "$ROOT/oplus_chg/battery"
+printf '2000\n' >"$BASE/data/run/fcc.norm"
+printf '2300\n' >"$FCC"
+chk "2300 已超目标 → 不动" "$(run_scr | tr -d ' \r\n')" "2300"
+
 echo
 echo "结果：通过 $PASS，失败 $FAIL"
 [ "$FAIL" -eq 0 ]

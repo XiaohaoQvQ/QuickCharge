@@ -969,6 +969,17 @@
       note("json " + r.out.length + " 字节：" + r.out.replace(/\s+/g, " ").slice(0, 240));
     });
   }
+  /* 三点中值：单点毛刺（采样瞬间的 -300mA 之类）直接抹掉，
+     三个点以上的真实变化（降档、插拔）原样保留。 */
+  function sparSmooth(a) {
+    var r = [], i, n = a.length, s;
+    for (i = 0; i < n; i++) {
+      if (i === 0 || i === n - 1) { r.push(a[i]); continue; }
+      s = [a[i - 1], a[i], a[i + 1]].sort(function (x, y) { return x - y; });
+      r.push(s[1]);
+    }
+    return r;
+  }
   function drawSpark() {
     var c = $("spark");
     if (!c || !c.getContext) return;
@@ -982,13 +993,19 @@
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, w, h);
     if (pwr.length < 2) return;
-    var max = Math.max.apply(null, pwr), min = Math.min.apply(null, pwr);
-    if (max === min) { max += 1; min -= 1; }
+    var pts = sparSmooth(pwr);
+    var max = Math.max.apply(null, pts), min = Math.min.apply(null, pts);
+    /* 纵轴至少留 10W 跨度：原来贴着 min~max 画，±0.3W 的读数抖动
+       会被放大成整屏锯齿，看着像功率在乱跳。 */
+    var mid = (max + min) / 2, span = Math.max(max - min, 10);
+    var lo = mid - span * 0.62, hi = mid + span * 0.62;
+    if (lo < 0) { hi -= lo; lo = 0; }
+    if (hi - lo < 1) hi = lo + 1;
     var pad = 3, i, x, y;
     g.beginPath();
-    for (i = 0; i < pwr.length; i++) {
-      x = pad + (w - pad * 2) * i / (pwr.length - 1);
-      y = h - pad - (h - pad * 2) * (pwr[i] - min) / (max - min);
+    for (i = 0; i < pts.length; i++) {
+      x = pad + (w - pad * 2) * i / (pts.length - 1);
+      y = h - pad - (h - pad * 2) * (pts[i] - lo) / (hi - lo);
       if (i) g.lineTo(x, y); else g.moveTo(x, y);
     }
     var accent = getComputedStyle(document.documentElement).getPropertyValue("--accent");
@@ -1001,6 +1018,11 @@
     g.lineTo(pad, h - pad);
     g.closePath();
     g.fillStyle = "rgba(255,107,53,.12)";
+    g.fill();
+    /* 末点圆点：曲线末端是当前值，一眼能对上上面的数字 */
+    g.beginPath();
+    g.arc(w - pad, h - pad - (h - pad * 2) * (pts[pts.length - 1] - lo) / (hi - lo), 2.4, 0, Math.PI * 2);
+    g.fillStyle = accent;
     g.fill();
   }
   function samplePower() {

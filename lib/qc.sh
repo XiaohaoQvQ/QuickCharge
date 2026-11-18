@@ -2431,6 +2431,9 @@ SD_FCC_NORM="$SD_RUN/fcc.norm"
 _sd_scr_on=0
 _sd_scr_way=""
 _sd_scr_log=""
+_sd_scr_cur=0
+_sd_scr_node=""
+_sd_scr_off_at=0
 
 sd_scr_node() {
     if [ -n "$SD_SCR_NODE" ]; then
@@ -2452,9 +2455,11 @@ sd_scr_node() {
 sd_scr_fcc_node() {
     _sd_curr_prepare
     local n pref
-    # 优先级：电池侧 FCC → 电池侧 current_max → USB 输入上限
-    # 有些欧加机只暴露 usb/current_max（模块的限流也走它），不能漏
-    for pref in constant_charge_current_max battery/current_max usb/current_max; do
+    # 优先级：电池侧 FCC → 电池侧 current_max → 欧加 chg_current_max → USB 输入上限
+    # chg_current_max 才是欧加真正的充电电流上限；漏掉它就会一路落到
+    # usb/current_max（充电器能力值，通常固定 2A），拿 2A 当目标反而压功率。
+    # 有些欧加机只暴露 usb/current_max（模块的限流也走它），所以留作兜底。
+    for pref in constant_charge_current_max battery/current_max chg_current_max usb/current_max; do
         for n in $_sd_curr_nodes; do
             case "$n" in
                 *"$pref") [ -e "$n" ] && { _sd_sf=$n; return 0; } ;;
@@ -2539,7 +2544,17 @@ sd_scr_apply() {
     tgt=$_sd_rv
     sd_scr_read_ma "$_sd_sf" || return 1
     cur=$_sd_rv
+    _sd_scr_cur=$cur
+    _sd_scr_node=${_sd_sf##*/}
     if [ "$cur" -ge "$tgt" ]; then
+        _sd_scr_on=1; _sd_scr_way=fcc
+        printf 'fcc\n' >"$SD_SCR_WAY" 2>/dev/null
+        rm -f "$SD_SCR_FAIL" 2>/dev/null
+        return 0
+    fi
+    # 死区：离目标不到 25% 不写。驱动自己也在按温度和电压动态算 FCC，
+    # 贴着目标值来回覆盖，电流就在两档之间反复跳，曲线成锯齿。
+    if [ "$cur" -ge $((tgt * 3 / 4)) ]; then
         _sd_scr_on=1; _sd_scr_way=fcc
         printf 'fcc\n' >"$SD_SCR_WAY" 2>/dev/null
         rm -f "$SD_SCR_FAIL" 2>/dev/null
@@ -2622,9 +2637,21 @@ sd_scr_tick() {
 
     if [ "$_sd_screen_on" = 0 ]; then
         sd_scr_learn
-        if sd_scr_active; then sd_scr_release; _sd_scr_log=""; fi
+        # 内核参数那条一写就是「永久忽略屏幕」，熄屏立即还原；
+        # FCC 路径延迟 30s，避开亮灭屏边界反复写导致的电流阶跃。
+        if sd_scr_active; then
+            if sd_scr_node; then
+                sd_scr_release; _sd_scr_log=""; _sd_scr_off_at=0
+            else
+                [ "${_sd_scr_off_at:-0}" = 0 ] && _sd_scr_off_at=$(date +%s)
+                if [ $(( $(date +%s) - _sd_scr_off_at )) -ge 30 ]; then
+                    sd_scr_release; _sd_scr_log=""; _sd_scr_off_at=0
+                fi
+            fi
+        fi
         return 0
     fi
+    _sd_scr_off_at=0
 
     # 默认开启后所有人都会走到这里，两条路径共用一道温度闸：
     # 内核参数那条一写就是「永远不看屏幕」，高温时更不能开。
@@ -2649,7 +2676,7 @@ sd_scr_tick() {
             if [ "$_sd_scr_way" != "$_sd_scr_log" ]; then
                 case "$_sd_scr_way" in
                     kernel) sd_info charge "亮屏快充：已接管（内核 ignore_screen_state）" ;;
-                    fcc)    sd_info charge "亮屏快充：已接管（回写 FCC，目标 $(cat "$SD_FCC_NORM" 2>/dev/null)mA）" ;;
+                    fcc)    sd_info charge "亮屏快充：已接管（回写 FCC，目标 $(cat "$SD_FCC_NORM" 2>/dev/null)mA，节点 ${_sd_scr_node:-?} 实读 ${_sd_scr_cur:-?}mA）" ;;
                 esac
                 _sd_scr_log=$_sd_scr_way
             fi ;;
@@ -2908,10 +2935,10 @@ sd_cool_tick() {
 # 以前查一次充电问题要 cat 七八个节点：usb 电压、电流上限、电池电流、
 # cool_down、voocchg_ing、charge_technology…… 这里压成一行，状态一变就落
 # 日志，充电中每 10 分钟补一条，日志自己就是时间线。
-# 判重分两套：
-#   充电中 —— 整行比较（电压电流本来就在爬，每个变化都有意义）
-#   未充电 —— 只比"状态签名"（电量按 5%、温度按 2℃ 归并）。
-#             否则 vbat 在几十 mV 里来回抖，灭屏待机也会每 30s 落一条。
+# 判重一律用"状态签名"：
+#   电量 5%、温度 2℃、电池电压 20mV、电池电流 200mA 归并，其余状态字段原样。
+#   整行比较会把 vbat 几十 mV、ibat 几十 mA 的抖动当成变化，充电时每 3 秒落
+#   一条，日志全被这种噪声占满；档位切换（几百 mA 以上）仍然照记。
 _sd_chg_last=""
 _sd_chg_last_st=""
 _sd_chg_at=0
@@ -2970,7 +2997,7 @@ sd_chg_current_v() {
 # 填 _sd_chg_line_v（日志行）与 _sd_chg_sig_v（判重签名）。
 # 用全局变量而不是命令替换，两个结果才都留得住。
 sd_chg_line_fill() {
-    local cap vbat ibat vusb imax type cool vooc tech bt st f capk btk
+    local cap vbat ibat vusb imax type cool vooc tech bt st f capk btk vbq ibq
     st=""; sd_batt_status_v && st=$_sd_rv
     cap=""; sd_ps_attr_v capacity && cap=$_sd_rv
     vbat=""; sd_ps_attr_v voltage_now && vbat=$_sd_rv
@@ -2993,7 +3020,16 @@ sd_chg_line_fill() {
     capk=${cap:-0}; btk=${bt:-0}
     case "$capk" in ''|*[!0-9]*) capk=0 ;; esac
     case "$btk" in ''|*[!0-9]*) btk=0 ;; esac
-    _sd_chg_sig_v="st=${st:-?} cap=$((capk / 5 * 5)) bt=$((btk / 2 * 2)) usb=${vusb:-?} imax=${imax:-?} type=${type:-?} cool=${cool:-?} vooc=${vooc:-?} tech=${tech:-?} scr=${_sd_screen_on:-?}"
+
+    # 电压 100mV、电流 200mA 一档：只滤掉读数噪声，真正的档位切换不会漏
+    vbq=${vbat:-0}
+    case "$vbq" in ''|*[!0-9-]*) vbq=0 ;; esac
+    if [ "$vbq" -lt 0 ]; then vbq=$(( -(((-vbq) / 100000)) )); else vbq=$(( vbq / 100000 )); fi
+    ibq=${ibat:-0}
+    case "$ibq" in ''|*[!0-9-]*) ibq=0 ;; esac
+    if [ "$ibq" -lt 0 ]; then ibq=$(( -(((-ibq) / 200000)) )); else ibq=$(( ibq / 200000 )); fi
+
+    _sd_chg_sig_v="st=${st:-?} cap=$((capk / 5 * 5)) bt=$((btk / 2 * 2)) usb=${vusb:-?} imax=${imax:-?} vb=$((vbq * 100))mV ib=$((ibq * 200))mA type=${type:-?} cool=${cool:-?} vooc=${vooc:-?} tech=${tech:-?} scr=${_sd_screen_on:-?}"
 }
 
 sd_chg_line() {
@@ -3016,7 +3052,7 @@ sd_chg_snapshot() {
     st=""; sd_batt_status_v && st=$_sd_rv
     sd_chg_line_fill
     line=$_sd_chg_line_v
-    if [ "$charging" = 1 ]; then key=$line; else key=$_sd_chg_sig_v; fi
+    key=$_sd_chg_sig_v
 
     why=变化
     if [ "$st" != "$_sd_chg_last_st" ]; then
