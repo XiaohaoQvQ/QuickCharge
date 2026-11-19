@@ -168,6 +168,31 @@ static void sync_desc(void);
 /* 壳温写入带缓存，模式切换时要能重置 */
 static void shell_emul_reset(void);
 
+/* 静态二进制拿不到 Android 的时区库（没有 /usr/share/zoneinfo），
+ * localtime_r 会直接落到 UTC，日志比本地时间早 8 小时，和脚本打的行对不上。
+ * 启动时问一次 busybox 的日期偏移，拼成 POSIX TZ 串（+0800 → "XXX-8"），
+ * 这种写法不依赖 tzdata。 */
+static void tz_init(void)
+{
+    FILE *f = popen("date +%z 2>/dev/null", "r");
+    if (!f) return;
+    char b[16] = {0};
+    if (fgets(b, sizeof b, f) && (b[0] == '+' || b[0] == '-') &&
+        isdigit((unsigned char)b[1]) && isdigit((unsigned char)b[2]) &&
+        isdigit((unsigned char)b[3]) && isdigit((unsigned char)b[4])) {
+        int hh = (b[1] - '0') * 10 + (b[2] - '0');
+        int mm = (b[3] - '0') * 10 + (b[4] - '0');
+        if (hh <= 14 && mm < 60) {
+            char tz[32];
+            /* POSIX 的符号与直觉相反：TZ="XXX-8" 表示 UTC+8 */
+            snprintf(tz, sizeof tz, "XXX%c%d:%02d", b[0] == '-' ? '+' : '-', hh, mm);
+            setenv("TZ", tz, 1);
+            tzset();
+        }
+    }
+    pclose(f);
+}
+
 static void ts_str(char *out, size_t n)
 {
     time_t t = time(NULL);
@@ -1565,6 +1590,19 @@ static int oplus_num(const char *attr, long *out)
     return path_num(p, out);
 }
 
+/* bcc_parms 的第 9 段是 mA、第 7 段是 mV，单位固定；但 power_supply 的
+ * voltage_now / current_max 各机型不一样：多数报 µV/µA，也有的报 mV/mA
+ * （PJD110 之外的机型见过 4000 表示 4.0V）。量级差 1000 倍，靠数值大小判：
+ * 小于 20 的千位（即 <20V 或 <20A）先乘 1000，再看结果是否落在合理区间，
+ * 这样 0.03V（30000µV）这类空载值不会被误乘。 */
+static long uv_norm(long v)
+{
+    if (v <= 0 || v >= 20000) return v;
+    long t = v * 1000;
+    if (t >= 100000 && t <= 30000000) return t;
+    return v;
+}
+
 static void fmt_uv(long uv, int dec, char *out, size_t n)
 {
     if (uv < 0) { snprintf(out, n, "?"); return; }
@@ -1684,6 +1722,12 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
     oplus_num("voocchg_ing", &vooc);
     oplus_num("charge_technology", &tech);
 
+    /* 有的机型 voltage_now / current_max 报 mV/mA，不归一会让 vbat 显示成
+     * 0.004V、判重功率恒 0。 */
+    vbat = uv_norm(vbat);
+    vusb = uv_norm(vusb);
+    imax = uv_norm(imax);
+
     int bt = batt_temp_ps();
 
     fmt_uv(vusb, 2, a, sizeof a);
@@ -1778,6 +1822,22 @@ static void screen_scan(void)
         }
         closedir(d);
     }
+    /* /sys/class/backlight 是空的机型（亮度走 leds 或 panel 子节点），
+     * 再试几个常见落点，否则整台机器判不出屏幕状态。 */
+    if (n == 0) {
+        static const char *rel[] = {
+            "/sys/class/leds/lcd-backlight/actual_brightness",
+            "/sys/class/leds/lcd-backlight/brightness",
+            "/sys/class/leds/lcd/brightness",
+            "/sys/class/backlight/panel0-backlight/brightness",
+            NULL
+        };
+        char q[MAXPATH];
+        for (int i = 0; rel[i] && n < 16; i++) {
+            snprintf(q, sizeof q, "%s%s", g_sys, rel[i]);
+            if (access(q, F_OK) == 0) { snprintf(g_bl_list[n], MAXPATH, "%s", q); n++; }
+        }
+    }
     g_bl_cnt = n;
 }
 
@@ -1793,7 +1853,20 @@ static int screen_sample(void)
     }
     if (max >= 0) return max > 0 ? 1 : 0;
     if (g_fb_blank >= 0) return g_fb_blank;   /* blank 文件里 0 才是亮 */
-    if (read_int(g_fb, &v) == 0) { g_fb_blank = v == 0 ? 1 : 0; return g_fb_blank; }
+    {
+        static const char *fb_rel[] = {
+            "/sys/graphics/fb0/blank",
+            "/sys/class/graphics/fb0/blank",
+            "/sys/devices/virtual/graphics/fb0/blank",
+            NULL
+        };
+        char q[MAXPATH];
+        for (int i = 0; fb_rel[i]; i++) {
+            if (i == 0 && g_fb[0]) snprintf(q, sizeof q, "%s", g_fb);
+            else snprintf(q, sizeof q, "%s%s", g_sys, fb_rel[i]);
+            if (read_int(q, &v) == 0) { g_fb_blank = v == 0 ? 1 : 0; return g_fb_blank; }
+        }
+    }
     return -1;
 }
 
@@ -2630,6 +2703,7 @@ int main(int argc, char **argv)
     if (md && *md) snprintf(g_moddir, sizeof g_moddir, "%s", md);
 
     paths_init();
+    tz_init();
     mkdir_p(g_data);
     mkdir_p(g_run);
 

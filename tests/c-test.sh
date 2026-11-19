@@ -420,6 +420,11 @@ echo "$out" | grep -q 'cool=7'       && ok "读 cool_down"    || bad "cool 错�
 echo "$out" | grep -q 'tech=14'      && ok "读 charge_technology" || bad "tech 错：$out"
 echo "$out" | grep -q 'type=USB_DCP' && ok "读 usb/type"     || bad "type 错：$out"
 
+# 这个节点的单位各机型不统一：多数 µV，也有报 mV 的（4219 表示 4.219V）
+printf '4219\n' >"$ROOT/sys/class/power_supply/battery/voltage_now"
+out=$(run chg)
+echo "$out" | grep -q 'vbat=4.219V' && ok "vbat 报 mV 时归一" || bad "mV 未归一：$out"
+
 echo "[15] 电池电流优先取 bcc"
 setup
 state static 30 42 off

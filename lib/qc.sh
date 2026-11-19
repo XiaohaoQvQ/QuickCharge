@@ -2950,6 +2950,20 @@ _sd_chg_key=""
 _sd_chg_line_v=""
 _sd_chg_sig_v=""
 
+# 有的机型 power_supply 的 voltage_now / current_max 报 mV/mA（4000 表示 4.0V），
+# 多数报 µV/µA，两者差 1000 倍。按量级归一：小于 20000 的先乘 1000，再看结果
+# 是否落在合理区间，避免把 0.03V（30000µV）这种空载值也乘上去。
+sd_uv_norm() {
+    local v="$1"
+    case "$v" in ''|*[!0-9-]*) _sd_rv=$v; return 1 ;; esac
+    if [ "$v" -gt 0 ] && [ "$v" -lt 20000 ]; then
+        local t=$((v * 1000))
+        if [ "$t" -ge 100000 ] && [ "$t" -le 30000000 ]; then _sd_rv=$t; return 0; fi
+    fi
+    _sd_rv=$v
+    return 0
+}
+
 _sd_chg_fmt() {
     awk -v a="$1" -v b="$2" -v c="$3" -v d="$4" 'BEGIN {
         printf "%s %s %s %s",
@@ -3012,6 +3026,10 @@ sd_chg_line_fill() {
     vooc=""; sd_read1 "$SD_OPLUS_CHG/voocchg_ing" && vooc=$_sd_rv
     tech=""; sd_read1 "$SD_OPLUS_CHG/charge_technology" && tech=$_sd_rv
     bt=""; sd_batt_temp_v && bt=$_sd_rv
+    # 归一单位，否则报 mV 的机型日志里 vbat=0.004V、判重功率恒 0
+    [ -n "$vbat" ] && sd_uv_norm "$vbat" && vbat=$_sd_rv
+    [ -n "$vusb" ] && sd_uv_norm "$vusb" && vusb=$_sd_rv
+    [ -n "$imax" ] && sd_uv_norm "$imax" && imax=$_sd_rv
 
     f=$(_sd_chg_fmt "$vusb" "$imax" "$vbat" "$ibat")
     # shellcheck disable=SC2086
