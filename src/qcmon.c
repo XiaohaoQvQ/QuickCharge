@@ -2522,9 +2522,10 @@ static void desc_build(char *out, size_t n)
     else snprintf(shape, sizeof shape, " · 高刷 %dHz", hv);
 
     int mt = mounts_count();
-    /* 不带 QC 前缀：模块名已经写着 Quick Charge，重复只挤占首屏 */
-    if (mt > 0) snprintf(out, n, "%s%s · 配置 %d 项", gear, shape, mt);
-    else snprintf(out, n, "%s%s · 配置未挂载", gear, shape);
+    /* 状态段：这里只可能是「运行中」——描述是守护自己写的。刚装完/没跑起来
+     * 那两种由 customize.sh 和 action.sh 走 shell 版 sd_desc_text 落下去。 */
+    if (mt > 0) snprintf(out, n, "✅ 运行中 · %s%s · 配置 %d 项", gear, shape, mt);
+    else snprintf(out, n, "✅ 运行中 · %s%s · 配置未挂载", gear, shape);
 }
 
 static void sync_desc(void)

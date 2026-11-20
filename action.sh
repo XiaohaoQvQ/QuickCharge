@@ -563,7 +563,10 @@ _CMD="${1:-}"
 
 case "$1" in
     status)  sd_do_status ;;
-    json)    sd_do_json ;;
+    json)    sd_do_json
+             # 面板每次拉状态顺手校正一次描述：守护被外部杀掉后，模块页那边
+             # 没人再写 module.prop，只能靠这次刷新把「未运行」落下去
+             sd_sync_desc ;;
     env)     sd_dump_env; grep '\[env\]' "$SD_LOG" 2>/dev/null | tail -n 4 ;;
     probe)   sd_probe ;;
     zones)   sd_zones_report ;;
@@ -595,6 +598,7 @@ case "$1" in
              if sd_ensure_daemon; then
                  echo "守护已重启"
              else
+                 sd_sync_desc
                  echo "守护启动失败（残留锁已清）。再执行一次 restart；仍失败用 sh action.sh logs e 20 查看原因"
                  exit 1
              fi ;;

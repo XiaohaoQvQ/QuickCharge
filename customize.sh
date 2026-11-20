@@ -51,6 +51,11 @@ done
 
 ui_print "- 扫描温控 / 充电配置…"
 sd_state_load
+# 描述里的状态靠这个标记区分「刚装完等重启」和「装好了却没跑起来」，
+# 开机后由 post-fs-data 清掉；写失败也不影响功能，只是退化成靠 boot 时间判断。
+# 必须写在 sd_sync_desc 之前，否则描述会先按旧状态刷一遍。
+mkdir -p "$SD_DATA" 2>/dev/null
+date +%s >"$SD_DATA/need_reboot" 2>/dev/null || : >"$SD_DATA/need_reboot"
 sd_zone_scan
 sd_umount_overrides
 rm -f "$SD_BUILT"
@@ -173,10 +178,6 @@ else
 fi
 ui_print "- 温控  $tm_text"
 ui_print "- 反馈  QQ 群（浏览器自动打开）"
-# 状态牌靠这个标记区分「刚装完等重启」和「装好了却没跑起来」，开机后由
-# post-fs-data 清掉；写失败也不影响功能，只是退化成靠 boot 时间判断。
-mkdir -p "$SD_DATA" 2>/dev/null
-date +%s >"$SD_DATA/need_reboot" 2>/dev/null || : >"$SD_DATA/need_reboot"
 ui_print "- 完成，重启后生效"
 sd_dbg install "QQ群 $SD_QQ_URL"
 

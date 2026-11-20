@@ -220,6 +220,25 @@ chmod +x /opt/qc/*.sh
 SDD=/data/adb/quickcharge
 mkdir -p "$SDD"
 
+# 描述里的状态段取自真实守护。测描述时用这个假现场：cmdline 带 service.sh，
+# 与 sd_pid_is_daemon 的判定路径一致，不必真起一个守护。
+# 必须忽略 USR1：action.sh 改完参数会 sd_daemon_kick，默认动作是终止进程，
+# 第一脚就把假守护踢死，后面全变成「未运行」。
+FAKE_DPID=""
+fake_daemon_start() {
+    mkdir -p /tmp/qcfake "$SDD/run"
+    printf '#!/bin/sh\ntrap "" USR1\nwhile :; do sleep 5; done\n' >/tmp/qcfake/service.sh
+    sh /tmp/qcfake/service.sh </dev/null >/dev/null 2>&1 &
+    FAKE_DPID=$!
+    printf '%s\n' "$FAKE_DPID" >"$SDD/run/daemon.pid"
+    printf '%s %s\n' "$(cut -d. -f1 /proc/uptime)" "$FAKE_DPID" >"$SDD/run/hb"
+}
+fake_daemon_stop() {
+    [ -n "$FAKE_DPID" ] && kill -9 "$FAKE_DPID" 2>/dev/null
+    FAKE_DPID=""
+    rm -f "$SDD/run/daemon.pid" "$SDD/run/hb" 2>/dev/null
+}
+
 echo "===== T1 安装 ====="
 rm -f /tmp/am.args
 MODPATH=/opt/qc sh -c '. /usr/local/bin/ui_print 2>/dev/null; MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install.log 2>&1
@@ -590,14 +609,23 @@ sleep 1
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
 SD_MODDIR=/opt/qc sh /opt/qc/post-fs-data.sh >/dev/null 2>&1
 
-# 装机默认 temp_mode=charge，描述应如实写"仅充电"
+# 装完还没重启：描述只留状态，不写档位（配置还没生效，写摘要反而误导）
 D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
-case "$D" in *"仅充电"*) ok "默认仅充电状态写进描述" ;; *) ng "默认状态不符: $D" ;; esac
-case "$D" in *"配置 9 项"*) ok "描述含挂载数" ;; *) ng "描述缺挂载数: $D" ;; esac
+case "$D" in *"请重启"*) ok "安装后描述提示重启" ;; *) ng "安装后描述: $D" ;; esac
+case "$D" in *"温控档位"*) ng "未重启不该写档位: $D" ;; *) ok "未重启不写档位摘要" ;; esac
 eq "$(grep -c '^description=' /opt/qc/module.prop)" "1" "description 只有一行"
 eq "$(grep '^version=' /opt/qc/module.prop)" "$(grep '^version=' /mod/module.prop)" "版本行未被改写"
 eq "$(grep '^author=' /opt/qc/module.prop)" "author=Xiaohao" "作者行未被改写"
 eq "$(grep '^id=' /opt/qc/module.prop)" "id=quickcharge" "id 行未被改写"
+
+# 守护起来之后才写摘要，状态排在最前
+fake_daemon_start
+MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_sync_desc' >/dev/null 2>&1
+D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
+case "$D" in "✅ 运行中 · 温控档位"*) ok "运行中描述：状态在前，档位紧接" ;; *) ng "运行中描述: $D" ;; esac
+# 装机默认 temp_mode=charge，描述应如实写"仅充电"
+case "$D" in *"仅充电"*) ok "默认仅充电状态写进描述" ;; *) ng "默认状态不符: $D" ;; esac
+case "$D" in *"配置 9 项"*) ok "描述含挂载数" ;; *) ng "描述缺挂载数: $D" ;; esac
 
 # 幂等：状态没变时不该再写盘
 M1=$(md5sum /opt/qc/module.prop | awk '{print $1}')
@@ -647,8 +675,9 @@ SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh gear 11 >/dev/null 2>&1
 B2=$(md5sum /opt/qc/module.prop | awk '{print $1}')
 eq "$B2" "$B1" "被拒绝的 gear 11 不改描述"
 
-# 管理器列表会截断长描述，档位必须排在最前面
-case "$D" in "温控档位"*) ok "描述以档位开头，截断时仍可见" ;; *) ng "描述格式异常: $D" ;; esac
+# 管理器列表会截断长描述：状态必须排最前，档位紧随其后
+case "$D" in "✅ 运行中 · 温控档位"*) ok "描述状态在前、档位紧随" ;; *) ng "描述格式异常: $D" ;; esac
+fake_daemon_stop
 
 echo "===== T14 功耗读取（bcc_parms 双电芯）====="
 mkdir -p /sys/class/oplus_chg/battery
@@ -818,7 +847,9 @@ echo "$J" | grep -q '"hz":"144"'        && ok "JSON: hz=144"       || ng "JSON h
 echo "$J" | grep -q '"hz_hard":1'       && ok "JSON: hz_hard=1"    || ng "JSON hz_hard: $J"
 echo "$J" | grep -q '"hz_state":"ok"'   && ok "JSON: hz_state=ok"  || ng "JSON hz_state: $J"
 
-# --- 描述
+# --- 描述（要守护在跑才写摘要，造个现场）
+fake_daemon_start
+MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_sync_desc' >/dev/null 2>&1
 D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
 case "$D" in *"高刷 144Hz 锁定"*) ok "描述标注「锁定」" ;; *) ng "描述缺锁定: $D" ;; esac
 
@@ -828,6 +859,7 @@ eq "$(settings get secure match_content_frame_rate)" "3" "关闭锁定: 内容�
 eq "$(settings get system peak_refresh_rate)" "144" "关闭锁定: 档位仍是 144Hz"
 D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
 case "$D" in *"锁定"*) ng "关闭锁定后描述仍写锁定" ;; *) ok "关闭锁定后描述不再写锁定" ;; esac
+fake_daemon_stop
 
 # --- 完全关闭：逐键还原
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz off >/dev/null 2>&1
@@ -1032,8 +1064,12 @@ grep -q "NoMount 接管" /tmp/t18inst.log && ok "安装日志说明 NoMount 接�
 eq "$(find /opt/qc/system -name "*.xml" | wc -l | tr -d " ")" "5" "注入路径结构与系统一致"
 
 # 简介：NoMount 下 mounts.list 恒空，必须按注入数算，否则管理器里永远写"未挂载"
+# 安装后是「待重启」，摘要要等守护起来才写，这里造个守护现场
+fake_daemon_start
+MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_sync_desc' >/dev/null 2>&1
 grep -q '配置 9 项' /opt/qc/module.prop && ok "简介显示配置 9 项" || ng "简介未按注入数显示"
 grep -q '未挂载' /opt/qc/module.prop && ng "简介仍写未挂载" || ok "简介不再写未挂载"
+fake_daemon_stop
 
 # post-fs-data：走注入，一条 bind mount 都不产生
 SD_MODDIR=/opt/qc sh /opt/qc/post-fs-data.sh >/tmp/t18pfd.log 2>&1
@@ -1271,6 +1307,7 @@ echo "===== T20 覆盖安装后简介恢复 ====="
 printf 'temp_mode=charge\naggr=10\nhz=off\ncurr_max=0\ndefrev=3\n' >"$SDD/state.conf"
 mkdir -p "$SDD/run"
 rm -f "$SDD/run/desc.last"
+fake_daemon_start
 # 出厂状态：module.prop 是安装包里的原始文案，从未同步过
 cp /mod/module.prop /opt/qc/module.prop
 MODDIR=/opt/qc SD_DATA=$SDD sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_sync_desc'
@@ -1290,6 +1327,7 @@ sleep 1
 MODDIR=/opt/qc SD_DATA=$SDD sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_sync_desc'
 T2=$(stat -c '%y' /opt/qc/module.prop)
 eq "$T2" "$T1" "内容一致时不重写"
+fake_daemon_stop
 
 # ============================================================ T25 温度源兜底
 echo

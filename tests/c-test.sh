@@ -325,7 +325,7 @@ state static 30
 screen_on
 run sensor >/dev/null
 d=$(grep '^description=' "$BASE/mod/module.prop" | cut -d= -f2-)
-case "$d" in "温控档位"*) ok "描述已写回：$d" ;; *) bad "描述未同步：$d" ;; esac
+case "$d" in "✅ 运行中 · 温控档位"*) ok "描述已写回：$d" ;; *) bad "描述未同步：$d" ;; esac
 
 # 配置项计数：普通挂载走 mounts.list（去重），元模块走 nm.list（不去重）
 seq 1 49 | sed 's|^|/vendor/etc/f|' >"$BASE/data/mounts.list"

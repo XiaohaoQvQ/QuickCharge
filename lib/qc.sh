@@ -765,7 +765,9 @@ sd_boot_seen() {
     cur=$(sd_boot_ts)
     case "$cur" in ''|*[!0-9]*) return 0 ;; esac
     [ "$cur" -gt 0 ] || return 0
-    old=$(tr -d '\r\n' <"$SD_DATA/.boot_id" 2>/dev/null)
+    # 用 cat 而不是 <file：文件不在时重定向本身就会往 stderr 甩一行
+    # "cannot open"，2>/dev/null 压不住（它在重定向之后才生效）
+    old=$(cat "$SD_DATA/.boot_id" 2>/dev/null | tr -d '\r\n')
     case "$old" in ''|*[!0-9]*) return 1 ;; esac
     d=$((cur - old))
     [ "$d" -lt 0 ] && d=$((-d))
@@ -3949,7 +3951,16 @@ sd_desc_text() {
         t="$t · 配置未挂载"
     fi
 
-    # 描述前不再挂 QC 前缀：模块名本身已经写着 Quick Charge，重复一遍只会挤占首屏
+    # 状态段放在最前面：管理器模块页第一眼看到的就是跑没跑。
+    # 管理器把 description 当纯文本渲染（KernelSU 的 ModuleMaterial 直接 Text()），
+    # 所以颜色只能靠 emoji 自带的那一层，字体设不了色。
+    sd_module_state
+    case "$_sd_ms" in
+        ok)     t="✅ 运行中 · $t" ;;
+        reboot) t="❌ 请重启 · 重启后开始工作" ;;
+        *)      t="❌ 未运行 · 把 /data/adb/quickcharge/ 的日志发给作者" ;;
+    esac
+
     printf '%s' "$t"
 }
 

@@ -73,7 +73,8 @@ fi
 
 sd_mount_overrides
 
-sd_sync_desc
+# 这里不刷描述：本阶段守护还没起来，状态判定只会得出「未运行」，描述会被
+# 刷成故障、几秒后 service.sh 再改回来。交给 service.sh 的 sd_apply_state 刷。
 
 sd_dump_env
 
