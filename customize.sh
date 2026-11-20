@@ -23,9 +23,8 @@ SD_VERBOSE=
 SD_QQ_URL="https://qun.qq.com/universal-share/share?ac=1&authKey=sxretTuuUbT6DSq6WUsRcAhqpzEtEmLdUgjcJW5EFkih769NPI7mFOtBWBsiLb56&busi_data=eyJncm91cENvZGUiOiIxMDAzNDgxNjYwIiwidG9rZW4iOiJnaGZRMVVNSCtOZFNyWUV4cEk2bU9Jd05neVpwUmVkOTIxV3VpcVRwS2Iram1rNC81TmtnNUJ3MjRxYm9JcGJEIiwidWluIjoiMjExMTgzNTIyMCJ9&data=Gr9CwynFwy41T0Lgv3epv7_E3bgXVe1lKsqwWOnF338a3I7veanebrcFNu2aJI8_5AZAHr7NXTdhgkf2iFtq-g&svctype=4&tempid=h5_group_info"
 
 ui_print "*******************************"
-ui_print "  Quick Charge (QC)  v$(grep '^version=' "$MODDIR/module.prop" | cut -d= -f2)"
+ui_print "  Quick Charge  v$(grep '^version=' "$MODDIR/module.prop" | cut -d= -f2)"
 ui_print "  by Xiaohao"
-ui_print "  代码由 AI 辅助完成"
 ui_print "*******************************"
 
 DEV_MFR=$(getprop ro.product.odm.manufacturer)
@@ -34,8 +33,7 @@ DEV_MFR=$(getprop ro.product.odm.manufacturer)
 DEV_MODEL=$(getprop ro.vendor.oplus.market.name)
 DEV_SOC=$(getprop ro.soc.model | tr 'a-z' 'A-Z')
 
-ui_print "- 机型: ${DEV_MODEL:-未知} ($(getprop ro.product.model))"
-ui_print "- 平台: ${DEV_SOC:-未知} · Android $(getprop ro.build.version.release) · 补丁 $(getprop ro.build.version.security_patch)"
+ui_print "- 机型  ${DEV_MODEL:-未知} ($(getprop ro.product.model)) · ${DEV_SOC:-未知} · Android $(getprop ro.build.version.release)"
 
 case "$DEV_MFR" in
     OPPO|oppo|OnePlus|oneplus|realme|Realme) ;;
@@ -51,7 +49,7 @@ for bin in mount umount sed awk; do
     command -v "$bin" >/dev/null 2>&1 || { ui_print "! 缺少 $bin，中止安装"; exit 1; }
 done
 
-ui_print "- 扫描并改写系统温控/充电配置…"
+ui_print "- 扫描温控 / 充电配置…"
 sd_state_load
 sd_zone_scan
 sd_umount_overrides
@@ -59,31 +57,27 @@ rm -f "$SD_BUILT"
 sd_build_overrides
 
 n=$(find "$SD_OVERRIDES" -type f 2>/dev/null | wc -l | tr -d ' ')
-if [ "$n" -eq 0 ]; then
-    ui_print "! 未匹配到可改写的配置文件"
-    ui_print "! 模块仍会安装，但只有运行时温度伪装可用"
-else
-    ui_print "- 已生成 $n 个覆盖文件"
-fi
+nm_n=0
+nm_tag=""
 
 if sd_nm_active; then
     sd_nm_mirror
     rc=$?
     if [ "$rc" -ne 2 ]; then
-        nl=$(wc -l <"$SD_NM_LIST" 2>/dev/null | tr -d ' ')
-        ui_print "- NoMount 注入文件 ${nl:-0} 个（无挂载）"
+        nm_n=$(wc -l <"$SD_NM_LIST" 2>/dev/null | tr -d ' ')
+        nm_tag="NoMount"
     else
-        ui_print "! NoMount 镜像写入失败，重启后会改用 bind mount"
+        ui_print "! NoMount 写入失败，重启后改用 bind mount"
     fi
 elif sd_mm_active; then
     mmn=$(sd_mm_name)
     sd_nm_mirror
     rc=$?
     if [ "$rc" -ne 2 ]; then
-        nl=$(wc -l <"$SD_NM_LIST" 2>/dev/null | tr -d ' ')
-        ui_print "- $mmn 交付文件 ${nl:-0} 个（重启后由它挂载）"
+        nm_n=$(wc -l <"$SD_NM_LIST" 2>/dev/null | tr -d ' ')
+        nm_tag="$mmn"
     else
-        ui_print "! $mmn 镜像写入失败，重启后会改用 bind mount"
+        ui_print "! $mmn 写入失败，重启后改用 bind mount"
     fi
 fi
 
@@ -150,16 +144,13 @@ fi
 }
 
 case "$(sd_state_get temp_mode off)" in
-    charge) ui_print "- 温度改写: 仅充电时生效，重启后自动启动" ;;
-    static) ui_print "- 温度改写: 全场景生效，重启后自动启动" ;;
-    off)    ui_print "- 温度改写: 已关闭，可在 WebUI 打开" ;;
+    charge) tm_text="仅充电时改写 · 重启后自动启动" ;;
+    static) tm_text="全场景改写 · 重启后自动启动" ;;
+    off)    tm_text="已关闭 · 可在面板打开" ;;
+    *)      tm_text="未知" ;;
 esac
 
-[ -f "$MODPATH/bin/qcmon" ] && {
-    chmod 755 "$MODPATH/bin/qcmon" 2>/dev/null
-    ui_print "- 守护实现: C 版 qcmon（热路径零 fork）"
-}
-ui_print "- 亮屏快充: 内置常开，亮屏不再按屏幕状态降档；息屏保留 +2℃"
+[ -f "$MODPATH/bin/qcmon" ] && chmod 755 "$MODPATH/bin/qcmon" 2>/dev/null
 
 printf '%s\n' "$MODDIR" 2>/dev/null >"$SD_DATA/moddir"
 
@@ -173,10 +164,16 @@ done
 
 sd_sync_desc
 
-ui_print "- 安装完成，重启后生效"
-ui_print "    状态: sh $MODDIR/action.sh status"
-ui_print "    配置: sh $MODDIR/action.sh temp static     # 开温度伪装"
-ui_print "- 作者: Xiaohao ｜ QQ群: 点击链接加入群聊【Quick Charge】"
+if [ "${n:-0}" -eq 0 ]; then
+    ui_print "! 未匹配到可改写的配置，只有运行时温度伪装可用"
+elif [ "${nm_n:-0}" -gt 0 ]; then
+    ui_print "- 覆盖  $n 个配置 · ${nm_tag:-NoMount} 接管 $nm_n 个"
+else
+    ui_print "- 覆盖  $n 个配置（bind mount）"
+fi
+ui_print "- 温控  $tm_text"
+ui_print "- 反馈  QQ 群（浏览器自动打开）"
+ui_print "- 完成，重启后生效"
 sd_dbg install "QQ群 $SD_QQ_URL"
 
 if command -v am >/dev/null 2>&1; then

@@ -3799,7 +3799,9 @@ sd_desc_text() {
 
     hz=${_st_hz:-off}
     case "$hz" in
-        off|'') t="$t · 高刷关闭" ;;
+        # 没开高刷就什么都不写：描述是给面板/管理器看的摘要，
+        # 只有「开了」才值得占一段位置
+        off|'') ;;
         *)      if [ "${_st_hz_hard:-0}" = "1" ]; then
                     t="$t · 高刷 ${hz}Hz 锁定"
                 else

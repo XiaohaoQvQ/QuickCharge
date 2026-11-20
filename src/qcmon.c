@@ -2459,7 +2459,8 @@ static void desc_build(char *out, size_t n)
     else snprintf(gear, sizeof gear, "温度伪装关闭");
 
     int hv = hz_want();
-    if (!hv) snprintf(shape, sizeof shape, " · 高刷关闭");
+    /* 没开高刷就什么都不写：描述是摘要，「高刷关闭」没有信息量 */
+    if (!hv) shape[0] = 0;
     else if (g_c.hz_hard) snprintf(shape, sizeof shape, " · 高刷 %dHz 锁定", hv);
     else snprintf(shape, sizeof shape, " · 高刷 %dHz", hv);
 
