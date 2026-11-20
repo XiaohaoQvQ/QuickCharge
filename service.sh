@@ -18,6 +18,10 @@ fi
 
 . "$MODDIR/lib/qc.sh"
 
+# 先读一次配置：日志级别在 state.conf 里，晚读一步，`service 阶段启动` 这类
+# 会话标记就会因为 _sd_lv 还是 0 被吞掉，日志只剩后面的 env 头。
+sd_state_load
+
 if [ "${SD_PHASE:-}" = "post-fs-data" ]; then
     sd_warn boot "拒绝执行：service.sh 不能在 post-fs-data 阶段运行"
     echo "QC: service.sh 不能在 post-fs-data 阶段运行，已跳过" >&2

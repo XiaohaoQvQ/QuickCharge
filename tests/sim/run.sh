@@ -224,15 +224,15 @@ echo "===== T1 安装 ====="
 rm -f /tmp/am.args
 MODPATH=/opt/qc sh -c '. /usr/local/bin/ui_print 2>/dev/null; MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install.log 2>&1
 eq "$?" "0" "customize.sh 退出码 0"
-grep -q "代码由 AI 辅助完成" /tmp/install.log && ok "横幅含 AI 辅助声明" || ng "缺 AI 辅助声明"
-grep -q "作者: Xiaohao" /tmp/install.log && ok "安装末尾显示作者" || ng "缺作者提示"
-grep -q "QQ群: 点击链接加入群聊" /tmp/install.log && ok "安装末尾显示 QQ 群" || ng "缺 QQ 群提示"
+grep -q "Quick Charge  v" /tmp/install.log && ok "横幅含模块名与版本" || ng "横幅缺模块名/版本"
+grep -q "by Xiaohao" /tmp/install.log && ok "横幅含作者" || ng "缺作者"
+grep -q "反馈  QQ 群" /tmp/install.log && ok "安装末尾显示反馈入口" || ng "缺反馈入口"
 case "$(cat /tmp/install.log)" in *coolapk*) ng "安装输出仍有酷安链接" ;; *) ok "安装输出已无酷安链接" ;; esac
 sleep 1
 # 链接含 & 与 +，必须整串传给 am；被截断就说明少加了引号
 grep -q 'qun.qq.com/universal-share/share?ac=1&authKey=' /tmp/am.args 2>/dev/null && ok "刷写后调用 am 跳转加群页" || ng "未触发加群跳转"
 grep -q 'svctype=4&tempid=h5_group_info' /tmp/am.args 2>/dev/null && ok "加群链接完整未被 & 截断" || ng "加群链接被截断"
-grep -q "已生成" /tmp/install.log && ok "安装日志有生成计数" || ng "安装日志缺生成计数"
+grep -q "覆盖  9 个配置" /tmp/install.log && ok "安装日志有覆盖计数" || ng "安装日志缺覆盖计数"
 
 OV=/opt/qc/files
 n=$(find "$OV" -type f 2>/dev/null | wc -l | tr -d ' ')
@@ -646,7 +646,7 @@ B2=$(md5sum /opt/qc/module.prop | awk '{print $1}')
 eq "$B2" "$B1" "被拒绝的 gear 11 不改描述"
 
 # 管理器列表会截断长描述，档位必须排在最前面
-case "$D" in "QC · 温控档位"*) ok "描述以档位开头，截断时仍可见" ;; *) ng "描述格式异常: $D" ;; esac
+case "$D" in "温控档位"*) ok "描述以档位开头，截断时仍可见" ;; *) ng "描述格式异常: $D" ;; esac
 
 echo "===== T14 功耗读取（bcc_parms 双电芯）====="
 mkdir -p /sys/class/oplus_chg/battery
@@ -1026,7 +1026,7 @@ MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/t18inst.log
 eq "$?" "0" "NoMount 环境下安装成功"
 eq "$(find /opt/qc/system -type f 2>/dev/null | wc -l | tr -d ' ')" "9" "安装即生成 9 个注入文件"
 eq "$(wc -l <"$SDD/nm.list" 2>/dev/null | tr -d ' ')" "9" "注入清单 9 行"
-grep -q "无挂载" /tmp/t18inst.log && ok "安装日志说明无挂载" || ng "安装日志未说明无挂载"
+grep -q "NoMount 接管" /tmp/t18inst.log && ok "安装日志说明 NoMount 接管" || ng "安装日志未说明 NoMount 接管"
 eq "$(find /opt/qc/system -name "*.xml" | wc -l | tr -d " ")" "5" "注入路径结构与系统一致"
 
 # 简介：NoMount 下 mounts.list 恒空，必须按注入数算，否则管理器里永远写"未挂载"
@@ -2225,10 +2225,12 @@ eq "$(sed -n 's/^core_temp=//p' "$D10/state.conf")" "45" "温度读不到：状�
 
 # 页面结构：按钮少一个 / 跨列类丢了，编译期发现不了，只能在这里钉住
 H=/opt/qc/webroot/index.html
-for _p in 'id="boost" class="wide"' 'id="coreT"' 'acts button.wide{grid-column:1/-1}' \
-          'id="joinQun"' 'id="followAuthor"' 'android.intent.action.VIEW' \
-          'coolapk.com/u/27316679'; do
+for _p in 'acts acts3' 'id="coreT"' 'id="refresh"' 'id="rebuild"' 'id="restart"'; do
     grep -qF "$_p" "$H" && ok "页面含 $_p" || ng "页面缺 $_p"
+done
+# 环境自检、暴力模式、跨列样式都已删除：留着就是死代码
+for _p in 'id="boost"' 'id="diagCard"' 'diagPre' 'acts button.wide'; do
+    grep -qF "$_p" "$H" && ng "页面仍含已删元素 $_p" || ok "已删元素不残留: $_p"
 done
 
 # ============================================================ T40 残留守护锁

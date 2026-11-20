@@ -514,7 +514,7 @@ sd_state_load() {
     _st_log_level=""; _st_tick=""; _st_defrev=""
     _st_hz=""; _st_hz_prev_peak=""; _st_hz_prev_min=""; _st_hz_hard=""; _st_hz_prev_mcfr=""; _st_power_scale=""
     _st_cells_mode=""; _st_batt_spoof=""; _st_cool_guard=""
-    [ -f "$SD_STATE" ] || { _st_log_level=0; _sd_lv=0; return 0; }
+    [ -f "$SD_STATE" ] || { _st_log_level=1; _sd_lv=1; return 0; }
     local k v
     while IFS='=' read -r k v; do
         case "$k" in
@@ -523,7 +523,7 @@ sd_state_load() {
             *) eval "_st_$k=\$v" ;;
         esac
     done 2>/dev/null <"$SD_STATE"
-    case "$_st_log_level" in 0|1|2|3|4) _sd_lv=$_st_log_level ;; *) _st_log_level=0; _sd_lv=0 ;; esac
+    case "$_st_log_level" in 0|1|2|3|4) _sd_lv=$_st_log_level ;; *) _st_log_level=1; _sd_lv=1 ;; esac
     return 0
 }
 
@@ -545,7 +545,7 @@ sd_state_get() {
         curr_max)       printf '%s' "${_st_curr_max:-${2:-0}}" ;;
         curr_edge)      printf '%s' "${_st_curr_edge:-${2:-4}}" ;;
         defrev)         printf '%s' "${_st_defrev:-${2:-2}}" ;;
-        log_level)      printf '%s' "${_st_log_level:-${2:-0}}" ;;
+        log_level)      printf '%s' "${_st_log_level:-${2:-1}}" ;;
         tick)           printf '%s' "${_st_tick:-${2:-15}}" ;;
         hz)             printf '%s' "${_st_hz:-${2:-off}}" ;;
         hz_prev_peak)   printf '%s' "${_st_hz_prev_peak:-${2:-}}" ;;
@@ -1298,6 +1298,47 @@ sd_batt_best_v() {
     return 0
 }
 
+# 熔断专用：温区与电量计都读，取较高的一侧。
+# 「连接器侧偏高就用低值」适合展示，不适合保护——单点传感器挂了或读数滞后，
+# 就会变成漏熔断。两个源都在时宁可早熔断，也不要赌低的那个是真的。
+sd_batt_guard_v() {
+    local z="$1" zv="" pv=""
+    if _sd_batt_spoof_on; then
+        sd_batt_real_v
+        return $?
+    fi
+    if [ -n "$z" ] && sd_sentinel_temp_v "$z"; then
+        zv=$_sd_rv
+        case "$zv" in ''|*[!0-9]*) zv="" ;; esac
+        [ -n "$zv" ] && { [ "$zv" -lt 8 ] || [ "$zv" -gt 90 ] && zv="" ; }
+    fi
+    if sd_batt_temp_v; then
+        pv=$_sd_rv
+        case "$pv" in ''|*[!0-9]*) pv="" ;; esac
+        [ -n "$pv" ] && { [ "$pv" -lt 5 ] || [ "$pv" -gt 80 ] && pv="" ; }
+    fi
+    if [ -n "$zv" ] && [ -n "$pv" ]; then
+        if [ "$pv" -gt "$zv" ]; then _sd_rv=$pv; _sd_temp_src=ps
+        else _sd_rv=$zv; _sd_temp_src=zone; fi
+        return 0
+    fi
+    [ -n "$zv" ] && { _sd_rv=$zv; _sd_temp_src=zone; return 0; }
+    [ -n "$pv" ] && { _sd_rv=$pv; _sd_temp_src=ps; return 0; }
+    return 1
+}
+
+# 熔断读数入口：电池类走 sd_batt_guard_v，其余温区只有一个源
+sd_guard_read_v() {
+    local z="$1" t="${2:-}"
+    [ -n "$t" ] || { sd_read1 "$z/type" && t=$_sd_rv; }
+    sd_zone_class "$t"
+    if [ "$_sd_zc" = battery ]; then
+        sd_batt_guard_v "$z"
+        return $?
+    fi
+    sd_sentinel_temp_v "$z"
+}
+
 sd_sentinel_best_v() {
     local z="$1" t="${2:-}"
     if [ -z "$t" ]; then sd_read1 "$z/type" && t=$_sd_rv; fi
@@ -1741,7 +1782,7 @@ sd_guard_one() {
     sd_limit_for_type_v "$t"
     limit=$_sd_rv
     case "$limit" in ''|0|off) return 1 ;; esac
-    sd_sentinel_best_v "$z" "$t" || return 1
+    sd_guard_read_v "$z" "$t" || return 1
     cur=$_sd_rv
     [ "$cur" -ge "$limit" ] || return 1
 
@@ -1763,7 +1804,7 @@ sd_guard_cooled() {
         sd_limit_for_type_v "$t"; limit=$_sd_rv
         case "$limit" in ''|0|off) continue ;; esac
         checked=$((checked + 1))
-        if ! sd_sentinel_best_v "$z" "$t"; then
+        if ! sd_guard_read_v "$z" "$t"; then
             ok=0; blind=1
             continue
         fi
@@ -3837,7 +3878,8 @@ sd_desc_text() {
         t="$t · 配置未挂载"
     fi
 
-    printf 'QC · %s' "$t"
+    # 描述前不再挂 QC 前缀：模块名本身已经写着 Quick Charge，重复一遍只会挤占首屏
+    printf '%s' "$t"
 }
 
 sd_sync_desc() {

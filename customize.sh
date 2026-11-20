@@ -97,7 +97,7 @@ hz=off
 power_scale=100
 cells_mode=auto
 off_manual=0
-log_level=0
+log_level=1
 tick=15"
 
 [ -f "$SD_STATE" ] || : >"$SD_STATE"

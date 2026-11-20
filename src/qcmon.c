@@ -317,7 +317,8 @@ static void conf_defaults(void)
     g_c.tick = 15;
     g_c.fast_cap = 55;
     g_c.horae = 1;
-    g_c.log_level = 0;
+    /* 默认事件级：0 只留 E，日志面板会空得没法排查 */
+    g_c.log_level = 1;
     g_c.cool_guard = 1;
 }
 
@@ -374,7 +375,7 @@ static void conf_load(void)
         else if (!strcmp(k, "tick")) g_c.tick = parse_i(v, 15);
         else if (!strcmp(k, "fast_cap")) g_c.fast_cap = parse_i(v, 55);
         else if (!strcmp(k, "horae")) g_c.horae = parse_i(v, 1);
-        else if (!strcmp(k, "log_level")) g_c.log_level = parse_i(v, 0);
+        else if (!strcmp(k, "log_level")) g_c.log_level = parse_i(v, 1);
         else if (!strcmp(k, "hz")) snprintf(g_c.hz, sizeof g_c.hz, "%s", v);
         else if (!strcmp(k, "hz_hard")) g_c.hz_hard = parse_i(v, 0);
         else if (!strcmp(k, "hz_prev_mcfr")) snprintf(g_c.hz_prev_mcfr, sizeof g_c.hz_prev_mcfr, "%s", v);
@@ -392,7 +393,7 @@ static void conf_load(void)
     if (g_c.aggr < 0 || g_c.aggr > 10) g_c.aggr = 10;
     if (g_c.fast_cap < 20 || g_c.fast_cap > 90) g_c.fast_cap = 55;
     if (g_c.shell_temp < 25 || g_c.shell_temp > 60) g_c.shell_temp = 30;
-    if (g_c.log_level < 0 || g_c.log_level > 4) g_c.log_level = 0;
+    if (g_c.log_level < 0 || g_c.log_level > 4) g_c.log_level = 1;
     if (g_c.temp_mode[0] == 0) snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "off");
     /* dyn 是旧键值，等价 static */
     if (!strcmp(g_c.temp_mode, "dyn")) snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "static");
@@ -721,6 +722,23 @@ static int pick_sentinel(int *zi, int *cls_out)
     return -1;
 }
 
+/* 熔断专用：温区与电量计都读，取较高的一侧。
+ * 展示用 batt_best 会偏向较低的电量计（连接器侧偏高），但保护逻辑不能赌，
+ * 单点传感器异常或读数滞后就会变成漏熔断。 */
+static int batt_max(int zi, int *out)
+{
+    int zv = -1000, pv = -1000;
+    if (zi >= 0) {
+        zv = zone_temp(&g_z[zi]);
+        if (zv < 8 || zv > 90) zv = -1000;
+    }
+    pv = batt_temp_ps();
+    if (pv < 5 || pv > 80) pv = -1000;
+    if (pv > -100 && (zv < -100 || pv > zv)) { g_batt_ps = 1; *out = pv; return 0; }
+    if (zv > -100) { g_batt_ps = 0; *out = zv; return 0; }
+    return -1;
+}
+
 static int batt_spoof_on(void)
 {
     return g_c.batt_spoof >= 20 && g_c.batt_spoof <= 45;
@@ -741,6 +759,20 @@ static int sentinel_temp(int zi, int *out)
     if (v < -100) return -1;
     *out = v;
     return 0;
+}
+
+/* 熔断读数入口：电池类取两源较高值，其余温区只有一个源 */
+static int guard_temp(int zi, int *out)
+{
+    if (zi < 0) return -1;
+    if (g_z[zi].cls == C_BATTERY) {
+        if (batt_spoof_on()) {
+            int v = batt_temp_ps();
+            if (v > -100) { *out = v; return 0; }
+        }
+        return batt_max(zi, out);
+    }
+    return sentinel_temp(zi, out);
 }
 
 /* 与 sd_limit_for_type_v 一致：-1 表示关闭 */
@@ -2015,7 +2047,7 @@ static int guard_one(int zi, const char *type)
     int lim = limit_for_type(cls_of(type));
     if (lim <= 0) return 0;
     int cur = 0;
-    if (sentinel_temp(zi, &cur) < 0) return 0;
+    if (guard_temp(zi, &cur) < 0) return 0;
     if (cur < lim) return 0;
 
     log_msg("W", "guard", "熔断：哨兵 %s 实测 %d℃ ≥ 上限 %d℃", g_z[zi].path + strlen(g_therm) + 1, cur, lim);
@@ -2037,7 +2069,7 @@ static int guard_cooled(void)
         if (lim <= 0) continue;
         checked++;
         int cur = 0;
-        if (sentinel_temp(i, &cur) < 0) { ok = 0; blind = 1; continue; }
+        if (guard_temp(i, &cur) < 0) { ok = 0; blind = 1; continue; }
         if (cur + 3 > lim) ok = 0;
     }
     if (!checked) {
@@ -2490,8 +2522,9 @@ static void desc_build(char *out, size_t n)
     else snprintf(shape, sizeof shape, " · 高刷 %dHz", hv);
 
     int mt = mounts_count();
-    if (mt > 0) snprintf(out, n, "QC · %s%s · 配置 %d 项", gear, shape, mt);
-    else snprintf(out, n, "QC · %s%s · 配置未挂载", gear, shape);
+    /* 不带 QC 前缀：模块名已经写着 Quick Charge，重复只挤占首屏 */
+    if (mt > 0) snprintf(out, n, "%s%s · 配置 %d 项", gear, shape, mt);
+    else snprintf(out, n, "%s%s · 配置未挂载", gear, shape);
 }
 
 static void sync_desc(void)

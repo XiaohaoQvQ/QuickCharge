@@ -232,6 +232,21 @@ chk "冷却后自动恢复伪装" "$cv" "42000"
 has "恢复日志" "温度已回落" "$BASE/data/log.txt"
 daemon_stop
 
+# 温区与电量计打架时取高值：连接器侧偏高不能当作"温度其实不高"，
+# 只信偏低的一侧，单点传感器挂了就是漏熔断。
+setup
+state static 30 42 off
+screen_on
+daemon_start
+sleep 6
+printf '50000\n' >"$(z thermal_zone0)/temp"
+sleep 7
+cv=$(val "$(z thermal_zone2)/temp")
+# 旧逻辑会采信偏低的电量计 34℃，不熔断，core 伪装保持 42000
+chk "电池温区 50℃ / 电量计 34℃：取高值熔断" "$cv" "45000"
+has "熔断指向电池温区" "thermal_zone0" "$BASE/data/log.txt"
+daemon_stop
+
 # ============================================================ 6. 亮屏快充（内核参数）
 echo "[6] 亮屏快充：内核 ignore_screen_state"
 setup
@@ -310,7 +325,7 @@ state static 30
 screen_on
 run sensor >/dev/null
 d=$(grep '^description=' "$BASE/mod/module.prop" | cut -d= -f2-)
-case "$d" in "QC · 温控档位"*) ok "描述已写回：$d" ;; *) bad "描述未同步：$d" ;; esac
+case "$d" in "温控档位"*) ok "描述已写回：$d" ;; *) bad "描述未同步：$d" ;; esac
 
 # 配置项计数：普通挂载走 mounts.list（去重），元模块走 nm.list（不去重）
 seq 1 49 | sed 's|^|/vendor/etc/f|' >"$BASE/data/mounts.list"
