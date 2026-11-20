@@ -2268,10 +2268,12 @@ H=/opt/qc/webroot/index.html
 for _p in 'acts acts3' 'id="coreT"' 'id="refresh"' 'id="rebuild"' 'id="restart"'; do
     grep -qF "$_p" "$H" && ok "页面含 $_p" || ng "页面缺 $_p"
 done
-# 环境自检、暴力模式、跨列样式都已删除：留着就是死代码
-for _p in 'id="boost"' 'id="diagCard"' 'diagPre' 'acts button.wide'; do
+# 环境自检、暴力模式、跨列样式、状态牌都已删除：留着就是死代码
+for _p in 'id="boost"' 'id="diagCard"' 'diagPre' 'acts button.wide' 'id="mst"' 'setState('; do
     grep -qF "$_p" "$H" && ng "页面仍含已删元素 $_p" || ok "已删元素不残留: $_p"
 done
+# 结论行回到左对齐：居中会把「真实 41℃ < 基准 43℃」推到卡片中间，与上方四列对不上
+grep -qF 'line-height:1.55;text-align:center' "$H" && ng "结论行又被居中" || ok "结论行左对齐"
 
 # ============================================================ T40 残留守护锁
 # 现场（OPPO Find X8 Pro / 天玑）：面板"守护停止"，点启动回
