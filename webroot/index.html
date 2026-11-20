@@ -77,13 +77,13 @@
   /* 纯文字提示走 block：flex 容器里的长中文串不收缩，会顶出卡片右边 */
   #shellHint,#battSpHint,#thermalHint,#coreHint,#hzHint{display:block;line-height:1.55}
   .acts{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:4px}
+  .acts.acts3{grid-template-columns:repeat(3,1fr)}
   .acts button{
     padding:12px 0;border-radius:12px;border:1px solid var(--line);background:transparent;
     color:var(--fg);font-size:13px;font-weight:600
   }
   .acts button:active{background:var(--line)}
   .acts button.on{background:rgba(255,107,53,.14);border-color:var(--accent);color:var(--accent)}
-  .acts button.wide{grid-column:1/-1}
   footer{margin-top:18px;text-align:center;font-size:12px;color:var(--dim);line-height:1.9}
   footer a,footer .lnk{color:var(--accent-2);text-decoration:none}
   footer .lnk{cursor:pointer}
@@ -102,11 +102,6 @@
   .banner.info{background:rgba(127,127,127,.10);border-color:var(--line);color:var(--dim)}
   .safety{display:none;background:rgba(255,176,32,.12);border:1px solid var(--warn);color:var(--warn);
     border-radius:12px;padding:10px 12px;font-size:13px;margin-bottom:12px}
-  #diagPre{
-    margin:0;font:11px/1.6 ui-monospace,Menlo,Consolas,monospace;color:var(--dim);
-    white-space:pre-wrap;word-break:break-all;max-height:260px;overflow:auto;
-    background:rgba(127,127,127,.08);border-radius:8px;padding:8px
-  }
   .mask{position:fixed;top:0;left:0;right:0;bottom:0;background:#000a;display:none;
     align-items:center;justify-content:center;z-index:20;padding:24px}
   .mask.show{display:flex}
@@ -171,18 +166,6 @@
     <div><div class="k">守护</div><div class="v" id="daemon">—</div><div class="s" id="dmSrc"></div></div>
   </div>
   <div class="sum" id="sum"></div>
-</div>
-
-<div class="card" id="diagCard" style="display:none">
-  <h2>环境自检</h2>
-  <p class="hint" style="margin-top:0">按「页面 → 模块 → 守护」三段逐项判定，回答的是“哪一段断了”。
-    数值出不来、按钮没反应时先看这里第一行的结论，不用猜。</p>
-  <pre id="diagPre">—</pre>
-  <div class="acts" style="margin-top:10px">
-    <button id="diagRun">重新检测</button>
-    <button id="diagCopy">复制</button>
-    <button id="diagHide">收起</button>
-  </div>
 </div>
 
 <div class="card">
@@ -320,9 +303,8 @@
 
 <div class="card">
   <h2>操作</h2>
-  <div class="acts">
+  <div class="acts acts3">
     <button id="refresh">刷新</button>
-    <button id="diagBtn">环境自检</button>
     <button id="rebuild">重挂</button>
     <button id="restart">重启守护</button>
   </div>
@@ -358,7 +340,6 @@
   var pwr = [];
   var pwrTimer = null;
   var pwrBusy = false;
-  var lastErr = "";
   var CAND = ["/data/adb/modules/quickcharge", "/data/adb/modules_update/quickcharge"];
   var QUN_URL = "https://qun.qq.com/universal-share/share?ac=1&authKey=sxretTuuUbT6DSq6WUsRcAhqpzEtEmLd" +
     "UgjcJW5EFkih769NPI7mFOtBWBsiLb56&busi_data=eyJncm91cENvZGUiOiIxMDAzNDgxNjYwIiwidG9rZW4" +
@@ -544,12 +525,10 @@
     t._h = setTimeout(function () { t.className = ""; }, 2400);
   }
   function fail(msg) {
-    lastErr = msg;
     var b = $("banner");
     b.className = "banner";
     b.textContent = msg;
     b.style.display = "block";
-    diag(false);
   }
   function info(msg) {
     var b = $("banner");
@@ -650,12 +629,12 @@
     var r = (d.real === null || d.real === undefined) ? null : d.real;
     if (!d.daemon) return "守护未运行";
     if (d.mode === "off") return r === null ? "未改写" : "未改写 · 真实 <b>" + r + "℃</b>";
-    if (d.mode === "charge" && !d.charging) return "待机 · 插电后接管";
+    if (d.mode === "charge" && !d.charging) return "待机中 · 插电后接管";
     if (rewritten(d)) {
       if (d.emul_ok === 0) return "写入失败 · 系统仍读真实温度";
       return r === null
-        ? "改写中 · 报 <b>" + d.target + "℃</b>"
-        : "真实 <b>" + r + "℃</b> → 报 <b>" + d.target + "℃</b>";
+        ? "改写中 · 系统看到 <b>" + d.target + "℃</b>"
+        : "真实 <b>" + r + "℃</b> → 系统看到 <b>" + d.target + "℃</b>";
     }
     if (d.wall && r !== null && Number(r) >= Number(d.wall))
       return "真实 <b>" + r + "℃</b> ≥ 墙 <b>" + d.wall + "℃</b> · 交回系统";
@@ -845,96 +824,6 @@
     var i, n = el.children;
     for (i = 0; i < n.length; i++) fn(n[i], i);
   }
-  function callLabel() {
-    switch (CALL) {
-      case "name": return "原生回调";
-      case "fn":   return "函数回调";
-      case "sync": return "同步返回";
-      case "mmrl": return "MMRL";
-      default:     return "通道未建立";
-    }
-  }
-  var diagSeq = 0;
-  function diag(reset, scroll) {
-    var seq = ++diagSeq;
-    $("diagCard").style.display = "block";
-    if (scroll && $("diagCard").scrollIntoView) $("diagCard").scrollIntoView(true);
-    var body = [], raw = [], good = 0, bad = 0;
-    function flush() {
-      if (seq !== diagSeq) return;
-      var head = bad === 0
-        ? "结论  " + good + " 项全部正常"
-        : "结论  " + bad + " 项异常 / " + good + " 项正常";
-      $("diagPre").textContent = head + "\n\n" + body.join("\n") +
-        (raw.length ? "\n\n【原始输出】\n" + raw.join("\n") : "");
-    }
-    function line(s) { body.push(s); flush(); }
-    function pass(k, v) { good++; line("✓ " + k + (v ? "    " + v : "")); }
-    function fail(k, v) { bad++; line("✗ " + k + (v ? "    " + v : "")); }
-    function note(s) { raw.push(s); flush(); }
-    body.push("时间  " + new Date().toLocaleString());
-    body.push("");
-    body.push("【页面 → 模块】");
-    var b = bridgeName();
-    if (b) pass("执行接口", b + " · " + callLabel());
-    else fail("执行接口", "不在 KernelSU / APatch / MMRL 的 WebUI 里，页面无法执行命令");
-    if (MOD) pass("模块目录", MOD);
-    else fail("模块目录", "没找到，命令无法执行");
-    if (lastErr) fail("最近一次错误", lastErr);
-    flush();
-    if (reset) return;
-    exec("echo QC_OK", function (r) {
-      if (seq !== diagSeq) return;
-      note("echo QC_OK -> code=" + r.code + " out=" + JSON.stringify(r.out) + " err=" + JSON.stringify(r.err));
-      if (r.code !== 0) fail("命令通道", "echo 都执行不了（code " + r.code + "）");
-      else if (r.out.indexOf("QC_OK") < 0) fail("命令通道", "命令返回了空输出");
-      else pass("命令通道", "echo 正常");
-      if (!MOD) {
-        detectMod(function (ok) { if (ok) pass("模块目录", MOD); probeJson(seq, pass, fail, note); });
-      } else {
-        probeJson(seq, pass, fail, note);
-      }
-    });
-  }
-  function probeJson(seq, pass, fail, note) {
-    if (!MOD) { return; }
-    run("json", function (r) {
-      if (seq !== diagSeq) return;
-      var d = parseJSON(r.out);
-      if (!d) {
-        fail("状态读取", "action.sh json 没有返回可解析的内容");
-        note("json code=" + r.code + " len=" + r.out.length);
-        if (r.err) note("stderr: " + pickFirstLine(r.err));
-        note((r.out || "(空)").replace(/\s+/g, " ").slice(0, 300));
-        return;
-      }
-      pass("状态读取", "json " + r.out.length + " 字节");
-      if (d.real === null || d.real === undefined) {
-        fail("温度", "读不到（温区 " + (d.zones || 0) + " 个 · 守护" + (d.daemon ? "在跑" : "没跑") + "）");
-      } else {
-        pass("温度", d.real + "℃ · " + (d.sentinel || "?") + " · " +
-             (d.real_src === "cache" ? "来自守护缓存" : "页面现场读取"));
-      }
-      if (d.mount_mode === "none" && (d.mounted || 0) > 0) {
-        fail("挂载", (d.mounted || 0) + " 条记录，一条也没挂上；日志里搜 mount 看失败原因");
-      } else if (d.mount_mode === "none") {
-        pass("挂载", "无需覆盖系统文件");
-      } else {
-        pass("挂载", d.mount_mode === "nomount"
-          ? "NoMount 注入 " + (d.nm_files || 0) + " 个文件（不产生挂载）"
-          : d.mount_mode === "nomount-idle"
-            ? "NoMount 在位，但没有注入文件"
-            : d.mount_mode === "meta"
-              ? (d.mm_name || "元模块") + " 托管 " + (d.nm_files || 0) + " 个文件（开机挂载）"
-              : d.mount_mode === "meta-idle"
-                ? (d.mm_name || "元模块") + " 在位，但没有交付文件"
-                : "bind mount " + (d.mounted || 0) + " 条");
-      }
-      if (d.daemon) pass("守护", "运行中" + (d.daemon_age >= 0 ? " · " + d.daemon_age + " 秒前心跳" : ""));
-      else fail("守护", "未运行，参数改动不会自动执行；点下方「重启守护」");
-      note("json " + r.out.length + " 字节：" + r.out.replace(/\s+/g, " ").slice(0, 240));
-    });
-  }
   /* 平滑在守护侧做（5 点中值），这里直接画后端给的值。
      再叠一层三点中值会让降档晚 2 个点才显示，看起来像"反应慢"。 */
   function drawSpark() {
@@ -1025,7 +914,7 @@
       connect(function (cok) {
         if (!cok) {
           toast("执行通道未就绪", true);
-          fail("还没连上模块。点“环境自检”看卡在哪一步。");
+          fail("还没连上模块，打开诊断日志查看原因。");
           return;
         }
         detectMod(function (ok) {
@@ -1271,8 +1160,7 @@
       info("正在连接模块…");
       connect(function (cok) {
         if (!cok) {
-          fail("命令通道没能建立（已自动试过三种调用方式）。点下面的“环境自检”可以看到每一步的原始返回，截图反馈即可。");
-          diag(false);
+          fail("命令通道没能建立（三种调用方式都试过）。打开诊断日志看原因，或重启 WebUI 再试。");
           return;
         }
         detectMod(function (ok) {
@@ -1396,20 +1284,8 @@
       toast(nm ? "正在重新生成并注入…" : "正在重挂…");
       apply("rebuild", nm ? "已重新注入（无挂载）" : "已重新挂载");
     });
-    bindTap("diagBtn", function () { diag(false, true); });
     bindTap("restart", function () {
       apply("restart", "守护已重启");
-    });
-    bindTap("diagRun", function () { diag(false); });
-    bindTap("diagHide", function () { $("diagCard").style.display = "none"; });
-    bindTap("diagCopy", function () {
-      var t = $("diagPre").textContent;
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(t).then(function () { toast("已复制"); },
-          function () { toast("复制失败，请截图", true); });
-      } else {
-        toast("请长按文字手动复制", true);
-      }
     });
     document.addEventListener("visibilitychange", function () {
       if (document.hidden) {
