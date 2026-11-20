@@ -1735,21 +1735,43 @@ static int usb_present_of(long online, long vusb, long iusb, const char *st)
 /* 与 shell 的 sd_proto_resolve 保持同一套判定。
  * 欧加的 usb/type 只报 USB_DCP，私有协议在线时也是它；以前拿
  * 「≥8V 且 ≥2A」猜 PPS，30W 的 VOOC 被显示成公有快充。 */
-static const char *chg_proto(const char *type, long vooc, long tech, long vmax, long cmax, int present)
+static const char *chg_proto(const char *type, const char *rtype, long vooc, long tech,
+                            long vmax, long cmax, int present)
 {
     if (!present) return "none";
-    if (type && type[0]) {
-        if (strstr(type, "VOOC") || strstr(type, "SVOOC") || strstr(type, "SUPERVOOC") ||
-            strstr(type, "DART") || strstr(type, "Flash"))
-            return "vooc";
-        if (strstr(type, "PPS")) return "pps";
-        if (strstr(type, "UFCS")) return "ufcs";
-        if (strstr(type, "PD")) return "pd";
-    }
-    if (vooc == 1) return "vooc";
+
+    /* 1) 欧加的 charge_technology 是驱动自己维护的档位：1~13 私有，14 起公有。
+     *    usb/type 在私有协议在线时也可能写 USB_PD（先 PD 握手再切 VOOC），
+     *    把它放在前面会把 30W VOOC 判成 PD。 */
     if (tech >= 1 && tech <= 13) return "vooc";
-    /* 14 起是欧加的公有档：降档掉协议时 tech 会从 7/8 跳到 14 */
+
+    /* 2) 类型串里的私有协议字样能压过 tech=14（降档时 type 还留着旧值） */
+    for (int i = 0; i < 2; i++) {
+        const char *s = i ? type : rtype;
+        if (!s || !s[0]) continue;
+        if (strstr(s, "VOOC") || strstr(s, "DART") || strstr(s, "Flash")) return "vooc";
+    }
+
+    /* 3) 驱动自己置的「正在 VOOC 充电」 */
+    if (vooc == 1) return "vooc";
+
+    /* 4) 公有协议字样 */
+    for (int i = 0; i < 2; i++) {
+        const char *s = i ? type : rtype;
+        if (!s || !s[0]) continue;
+        if (strstr(s, "PPS")) return "pps";
+        if (strstr(s, "UFCS")) return "ufcs";
+    }
+
+    /* 5) 到这一步 tech 只剩 >=14：私有档已退 */
     if (tech >= 14) return "pd";
+
+    /* 6) 最后才信类型串里的 PD */
+    for (int i = 0; i < 2; i++) {
+        const char *s = i ? type : rtype;
+        if (s && s[0] && strstr(s, "PD")) return "pd";
+    }
+
     if (vmax >= 8000000 && cmax >= 5000000) return "vooc";
     /* 没有协议字样就不猜：9V/2A 既可能是 PD 固定档，也可能是 VOOC 掉档 */
     return "unknown";
@@ -1762,7 +1784,7 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
     long vusb = -1, imax = -1, vbat = -1, ibat = -1;
     long cool = -1, vooc = -1, tech = -1, cap = -1;
     long vmax = -1, iusb = -1, online = -1;
-    char type[32] = "", st[32] = "?";
+    char type[32] = "", rtype[32] = "", st[32] = "?";
     char p[MAXPATH + 96];
     char a[24], b2[24], b3[24];
 
@@ -1779,6 +1801,9 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
     snprintf(p, sizeof p, "%s/usb/type", g_ps);
     if (read_line(p, type, sizeof type) < 0) type[0] = 0;
     for (char *q = type; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
+    snprintf(p, sizeof p, "%s/usb/real_type", g_ps);
+    if (read_line(p, rtype, sizeof rtype) < 0) rtype[0] = 0;
+    for (char *q = rtype; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
     snprintf(p, sizeof p, "%s/usb/online", g_ps);
     if (path_num(p, &online) < 0) {
         snprintf(p, sizeof p, "%s/usb/present", g_ps);
@@ -1798,7 +1823,7 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
 
     int bt = batt_temp_ps();
 
-    const char *proto = chg_proto(type, vooc, tech, vmax, imax,
+    const char *proto = chg_proto(type, rtype, vooc, tech, vmax, imax,
                                   usb_present_of(online, vusb, iusb, st));
 
     fmt_uv(vusb, 2, a, sizeof a);
@@ -1817,10 +1842,10 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
         snprintf(pbs, sizeof pbs, "%.1f", (double)iabs * (double)vbat / 1e12);
     }
     snprintf(out, n,
-             "vusb=%sV iusb=%sA imax=%sA vbat=%sV ibat=%s pin=%sW pb=%sW %ld%% %s cool=%ld vooc=%ld tech=%ld type=%s scr=%d proto=%s cells=? status=%s",
+             "vusb=%sV iusb=%sA imax=%sA vbat=%sV ibat=%s pin=%sW pb=%sW %ld%% %s cool=%ld vooc=%ld tech=%ld type=%s rtype=%s scr=%d proto=%s cells=? status=%s",
              a, ibs, b2, b3, ib, pins, pbs,
              cap, tb,
-             cool, vooc, tech, type[0] ? type : "?", g_screen_on, proto, st);
+             cool, vooc, tech, type[0] ? type : "?", rtype[0] ? rtype : "?", g_screen_on, proto, st);
     if (sig && sn) {
         /* 判重不看 vbat/ibat 瞬时值：bcc 电流会在两档间脉动（4.4V 电芯 ~60mΩ 内阻，
          * ±600mA 正好对应 ±40mV），按 100mV/200mA 分档照样每轮跨档，日志被灌成 3 秒一条。
@@ -2848,7 +2873,7 @@ static void log_env(void)
         batt_status(envst, sizeof envst);
         log_msg("I", "env", "usb type=%s real_type=%s vooc=%ld tech=%ld vmax=%ld cmax=%ld proto=%s",
                 type[0] ? type : "?", rt[0] ? rt : "?", vooc, tech, vmax, cmax,
-                chg_proto(type, vooc, tech, vmax, cmax,
+                chg_proto(type, rt, vooc, tech, vmax, cmax,
                           usb_present_of(online, vusb, iusb, envst)));
     }
 

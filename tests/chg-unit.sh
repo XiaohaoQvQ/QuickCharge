@@ -214,6 +214,22 @@ printf '1\n'       >"$ROOT/oplus/battery/voocchg_ing"
 line=$(run_sh 'sd_chg_line')
 echo "$line" | grep -q 'proto=vooc' && ok "voocchg_ing=1 → vooc" || bad "voocchg_ing 判错: $line"
 
+# 私有协议在线时欧加的 usb/type 也可能写 USB_PD（充电器先 PD 握手再切 VOOC）。
+# tech 是驱动自己维护的档位，必须压过类型串，否则 30W VOOC 永远显示 PD。
+setup
+printf '9000000\n' >"$ROOT/ps/usb/voltage_max"
+printf 'USB_PD\n'  >"$ROOT/ps/usb/type"
+printf 'USB_PD\n'  >"$ROOT/ps/usb/real_type"
+printf '8\n'       >"$ROOT/oplus/battery/charge_technology"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'proto=vooc' && ok "type=USB_PD + tech=8 → vooc（tech 优先）" || bad "类型串压过 tech: $line"
+
+setup
+printf '9000000\n' >"$ROOT/ps/usb/voltage_max"
+printf 'USB_PD\n'  >"$ROOT/ps/usb/type"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'proto=pd' && ok "无 tech 时 type=USB_PD → pd" || bad "无 tech 类型串判错: $line"
+
 echo "[8b] 没插充电器不能显示成 PD"
 # voltage_max / current_max 是端口能力上限，拔线后仍常驻 5V/500mA（标准 SDP）。
 # 以前拿「v>0 就是 PD」兜底，面板没插电也一直写着「PD 快充」。

@@ -655,9 +655,7 @@
       $("realSrc").textContent = d.daemon ? (d.real_why || "读不到") : "守护没跑";
     } else {
       $("real").textContent = d.real + "℃";
-      $("realSrc").textContent = d.real_src === "cache"
-        ? "守护读数" + (d.sentinel && d.sentinel !== "none" ? " · " + d.sentinel : "")
-        : "现场直读" + (d.sentinel && d.sentinel !== "none" ? " · " + d.sentinel : "");
+      $("realSrc").textContent = (d.sentinel && d.sentinel !== "none") ? d.sentinel : "—";
     }
     if (rewritten(d)) {
       $("out").textContent = d.target + "℃";

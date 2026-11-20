@@ -463,6 +463,23 @@ printf '1\n' >"$ROOT/sys/class/oplus_chg/battery/voocchg_ing"
 out=$(run chg)
 echo "$out" | grep -q 'proto=vooc' && ok "voocchg_ing=1 → vooc" || bad "voocchg_ing 判错：$out"
 
+# 私有协议在线时 usb/type 也可能写 USB_PD，tech 必须压过它
+setup
+state static 30 42 off
+printf '9000000\n' >"$ROOT/sys/class/power_supply/usb/voltage_max"
+printf 'USB_PD\n'  >"$ROOT/sys/class/power_supply/usb/type"
+printf 'USB_PD\n'  >"$ROOT/sys/class/power_supply/usb/real_type"
+printf '8\n'       >"$ROOT/sys/class/oplus_chg/battery/charge_technology"
+out=$(run chg)
+echo "$out" | grep -q 'proto=vooc' && ok "type=USB_PD + tech=8 → vooc（tech 优先）" || bad "类型串压过 tech：$out"
+
+setup
+state static 30 42 off
+printf '9000000\n' >"$ROOT/sys/class/power_supply/usb/voltage_max"
+printf 'USB_PD\n'  >"$ROOT/sys/class/power_supply/usb/type"
+out=$(run chg)
+echo "$out" | grep -q 'proto=pd' && ok "无 tech 时 type=USB_PD → pd" || bad "无 tech 类型串判错：$out"
+
 echo "[16b] 没插充电器不能显示成 PD"
 # voltage_max / current_max 是端口能力上限，拔线后常驻 5V/500mA（标准 SDP）
 setup

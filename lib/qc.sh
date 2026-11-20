@@ -939,51 +939,65 @@ sd_proto_resolve() {
         _sd_proto=none; _sd_proto_why="未接适配器"; return 0
     fi
 
-    # 1) 适配器类型串最直接。注意欧加的 usb/type 只报 USB_DCP / USB_PD，
-    #    私有协议在线时它照样是 USB_DCP，光靠它永远判不出 VOOC。
+    # 1) 欧加的 charge_technology 是驱动自己维护的档位：1~13 私有，14 起公有。
+    #    usb/type 在私有协议在线时也可能写 USB_PD（充电器先 PD 握手再切 VOOC），
+    #    以前先看 type 串，一个 USB_PD 就把 30W VOOC 判成 PD，永远回不来。
+    sd_read1 "$SD_OPLUS_CHG/charge_technology" && tech=$_sd_rv
+    sd_read1 "$SD_OPLUS_CHG/voocchg_ing" && vooc=$_sd_rv
+    case "$tech" in
+        ''|*[!0-9]*) ;;
+        *)
+            if [ -e "$SD_OPLUS_CHG/charge_technology" ] &&
+               [ "$tech" -ge 1 ] && [ "$tech" -le 13 ]; then
+                _sd_proto=vooc
+                _sd_proto_why="tech=$tech"
+                return 0
+            fi ;;
+    esac
+
+    # 2) 类型串里的私有协议字样同样是硬证据，能压过 tech=14（降档时 type 还留着旧值）。
+    #    三个节点全部读出来一起匹配：real_type 常是 Unknown，只取第一个会把 type 丢掉。
     for p in "$SD_PS/usb/real_type" "$SD_PS/usb/type" "$SD_PS/battery/charge_type"; do
         [ -e "$p" ] || continue
         sd_read1 "$p" || continue
-        t=$_sd_rv
-        [ -n "$t" ] && { why="${p##*/}=$t"; break; }
+        [ -n "$_sd_rv" ] || continue
+        t="$t $_sd_rv"
+        why="$why ${p##*/}=$_sd_rv"
     done
+    why=${why# }
     case "$t" in
         *VOOC*|*vooc*|*SVOOC*|*SuperDart*|*DART*|*Flash*|*SUPERVOOC*)
             _sd_proto=vooc; _sd_proto_why=${why:-type}; return 0 ;;
-        *PPS*|*pps*)
-            _sd_proto=pps; _sd_proto_why=${why:-type}; return 0 ;;
-        *UFCS*|*ufcs*)
-            _sd_proto=ufcs; _sd_proto_why=${why:-type}; return 0 ;;
-        *PD*|*pd*)
-            _sd_proto=pd; _sd_proto_why=${why:-type}; return 0 ;;
     esac
 
-    # 2) 欧加私有协议：voocchg_ing=1 是驱动自己置的「正在 VOOC 充电」
-    sd_read1 "$SD_OPLUS_CHG/voocchg_ing" && vooc=$_sd_rv
-    sd_read1 "$SD_OPLUS_CHG/charge_technology" && tech=$_sd_rv
+    # 3) 驱动自己置的「正在 VOOC 充电」
     case "$vooc" in
         1) _sd_proto=vooc; _sd_proto_why="voocchg_ing=1"; return 0 ;;
     esac
 
-    # 3) 欧加的 charge_technology：私有档位落在 1~13，14 起是 PD/PPS。
-    #    以前只按「≥8V 且 ≥2A」判，30W 的 VOOC 被当成 PPS 显示成公有快充，
-    #    实际 usb/type 只是 USB_DCP，根本没有 PPS 协商。
+    # 4) 公有协议字样
+    case "$t" in
+        *PPS*|*pps*)
+            _sd_proto=pps; _sd_proto_why=${why:-type}; return 0 ;;
+        *UFCS*|*ufcs*)
+            _sd_proto=ufcs; _sd_proto_why=${why:-type}; return 0 ;;
+    esac
+
+    # 5) 到这一步 tech 只剩 ≥14：私有档已退，按公有档记
     case "$tech" in
         ''|*[!0-9]*) ;;
         *)
-            if [ -e "$SD_OPLUS_CHG/charge_technology" ]; then
-                if [ "$tech" -ge 1 ] && [ "$tech" -le 13 ]; then
-                    _sd_proto=vooc
-                    _sd_proto_why="tech=$tech"
-                    return 0
-                fi
-                # 14 起是欧加的公有档：降档掉协议时 tech 会从 7/8 跳到 14
-                if [ "$tech" -ge 14 ]; then
-                    _sd_proto=pd
-                    _sd_proto_why="tech=$tech（私有档已退）"
-                    return 0
-                fi
+            if [ -e "$SD_OPLUS_CHG/charge_technology" ] && [ "$tech" -ge 14 ]; then
+                _sd_proto=pd
+                _sd_proto_why="tech=$tech（私有档已退）"
+                return 0
             fi ;;
+    esac
+
+    # 6) 最后才信类型串里的 PD
+    case "$t" in
+        *PD*|*pd*)
+            _sd_proto=pd; _sd_proto_why=${why:-type}; return 0 ;;
     esac
 
     v=""; sd_read1 "$SD_PS/usb/voltage_max" && v=$_sd_rv
@@ -3152,7 +3166,7 @@ sd_chg_current_v() {
 # 填 _sd_chg_line_v（日志行）与 _sd_chg_sig_v（判重签名）。
 # 用全局变量而不是命令替换，两个结果才都留得住。
 sd_chg_line_fill() {
-    local cap vbat ibat vusb iusb imax type cool vooc tech bt st f capk btk pwk pwc ibm
+    local cap vbat ibat vusb iusb imax type rtype cool vooc tech bt st f capk btk pwk pwc ibm
     local pin pb cells proto ibs
     st=""; sd_batt_status_v && st=$_sd_rv
     cap=""; sd_ps_attr_v capacity && cap=$_sd_rv
@@ -3162,6 +3176,7 @@ sd_chg_line_fill() {
     iusb=""; sd_chg_input_v && iusb=$_sd_rv
     imax=""; sd_read1 "$SD_PS/usb/current_max" && imax=$_sd_rv
     type=""; sd_read1 "$SD_PS/usb/type" && type=$_sd_rv
+    rtype=""; sd_read1 "$SD_PS/usb/real_type" && rtype=$_sd_rv
     cool=""; sd_read1 "$SD_OPLUS_CHG/cool_down" && cool=$_sd_rv
     vooc=""; sd_read1 "$SD_OPLUS_CHG/voocchg_ing" && vooc=$_sd_rv
     tech=""; sd_read1 "$SD_OPLUS_CHG/charge_technology" && tech=$_sd_rv
@@ -3202,9 +3217,9 @@ sd_chg_line_fill() {
         ibs="?"
     fi
     case "$ibs" in ''|*[!0-9.]*) ibs="?" ;; esac
-    _sd_chg_line_v=$(printf 'vusb=%sV iusb=%sA imax=%sA vbat=%sV ibat=%smA pin=%sW pb=%sW %s%% %s℃ cool=%s vooc=%s tech=%s type=%s scr=%s proto=%s cells=%s status=%s' \
+    _sd_chg_line_v=$(printf 'vusb=%sV iusb=%sA imax=%sA vbat=%sV ibat=%smA pin=%sW pb=%sW %s%% %s℃ cool=%s vooc=%s tech=%s type=%s rtype=%s scr=%s proto=%s cells=%s status=%s' \
         "$1" "$ibs" "$2" "$3" "$4" "$pin" "$pb" "${cap:-?}" "${bt:-?}" "${cool:-?}" "${vooc:-?}" \
-        "${tech:-?}" "${type:-?}" "${_sd_screen_on:-?}" "${proto:-?}" "$cells" "${st:-?}")
+        "${tech:-?}" "${type:-?}" "${rtype:-?}" "${_sd_screen_on:-?}" "${proto:-?}" "$cells" "${st:-?}")
 
     capk=${cap:-0}; btk=${bt:-0}
     case "$capk" in ''|*[!0-9]*) capk=0 ;; esac
