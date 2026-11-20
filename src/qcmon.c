@@ -252,12 +252,15 @@ static void log_msg(const char *lvl, const char *tag, const char *fmt, ...)
     char t[32], msg[400], line[512];
     va_list ap;
     const char *l = "I";
-    if (lvl && lvl[0] == 'W') l = "W";
-    else if (lvl && lvl[0] == 'E') l = "E";
-    else if (lvl && lvl[0] == 'D') {
-        if (g_c.log_level < 4) return;
-        l = "D";
-    }
+    int need = 1;
+
+    /* 与 shell 版一致：0 关（只留 E）/ 1 事件 / 2 现场 / 3 逐轮 / 4 调试。
+     * 以前 I 级不看级别，log_level=0 也照样写，用户关了日志还在长。 */
+    if (lvl && lvl[0] == 'W') { l = "W"; need = 1; }
+    else if (lvl && lvl[0] == 'E') { l = "E"; need = 0; }
+    else if (lvl && lvl[0] == 'D') { l = "D"; need = 3; }
+    else { l = "I"; need = 1; }
+    if (g_c.log_level < need) return;
 
     ts_str(t, sizeof t);
     va_start(ap, fmt);
@@ -314,7 +317,7 @@ static void conf_defaults(void)
     g_c.tick = 15;
     g_c.fast_cap = 55;
     g_c.horae = 1;
-    g_c.log_level = 3;
+    g_c.log_level = 0;
     g_c.cool_guard = 1;
 }
 
@@ -371,7 +374,7 @@ static void conf_load(void)
         else if (!strcmp(k, "tick")) g_c.tick = parse_i(v, 15);
         else if (!strcmp(k, "fast_cap")) g_c.fast_cap = parse_i(v, 55);
         else if (!strcmp(k, "horae")) g_c.horae = parse_i(v, 1);
-        else if (!strcmp(k, "log_level")) g_c.log_level = parse_i(v, 3);
+        else if (!strcmp(k, "log_level")) g_c.log_level = parse_i(v, 0);
         else if (!strcmp(k, "hz")) snprintf(g_c.hz, sizeof g_c.hz, "%s", v);
         else if (!strcmp(k, "hz_hard")) g_c.hz_hard = parse_i(v, 0);
         else if (!strcmp(k, "hz_prev_mcfr")) snprintf(g_c.hz_prev_mcfr, sizeof g_c.hz_prev_mcfr, "%s", v);
@@ -389,7 +392,7 @@ static void conf_load(void)
     if (g_c.aggr < 0 || g_c.aggr > 10) g_c.aggr = 10;
     if (g_c.fast_cap < 20 || g_c.fast_cap > 90) g_c.fast_cap = 55;
     if (g_c.shell_temp < 25 || g_c.shell_temp > 60) g_c.shell_temp = 30;
-    if (g_c.log_level < 0 || g_c.log_level > 4) g_c.log_level = 3;
+    if (g_c.log_level < 0 || g_c.log_level > 4) g_c.log_level = 0;
     if (g_c.temp_mode[0] == 0) snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "off");
     /* dyn 是旧键值，等价 static */
     if (!strcmp(g_c.temp_mode, "dyn")) snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "static");
@@ -1556,6 +1559,7 @@ static void cool_tick(void)
 static char g_chg_last[384];
 static char g_chg_key[384];
 static char g_chg_last_st[24];
+static char g_proto_last[16];
 static long g_chg_at;
 static long g_chg_scan;
 
@@ -1697,12 +1701,52 @@ static long pw_median(long ma, int chg)
     return v[k / 2];
 }
 
+/* 输入侧实测电流（µA）。usb/current_max 是充电器能力上限，不是实际输入；
+ * 日志里只写 imax 会让人以为一直卡在 2A 没上去。 */
+static long chg_input(void)
+{
+    static const char *cand[] = { "usb/current_now", "usb/input_current_now",
+                                  "usb/current_avg", "usb_input/current_now", NULL };
+    char p[MAXPATH];
+    long best = 0;
+    for (int i = 0; cand[i]; i++) {
+        long v;
+        snprintf(p, sizeof p, "%s/%s", g_ps, cand[i]);
+        if (path_num(p, &v) < 0 || v == 0) continue;
+        v = uv_norm(v);
+        if (v < 0) v = -v;
+        if (v > best) best = v;
+    }
+    return best > 0 ? best : -1;
+}
+
+/* 与 shell 的 sd_proto_resolve 保持同一套判定。
+ * 欧加的 usb/type 只报 USB_DCP，私有协议在线时也是它；以前拿
+ * 「≥8V 且 ≥2A」猜 PPS，30W 的 VOOC 被显示成公有快充。 */
+static const char *chg_proto(const char *type, long vooc, long tech, long vmax, long cmax)
+{
+    if (type && type[0]) {
+        if (strstr(type, "VOOC") || strstr(type, "SVOOC") || strstr(type, "SUPERVOOC") ||
+            strstr(type, "DART") || strstr(type, "Flash"))
+            return "vooc";
+        if (strstr(type, "PPS")) return "pps";
+        if (strstr(type, "UFCS")) return "ufcs";
+        if (strstr(type, "PD")) return "pd";
+    }
+    if (vooc == 1) return "vooc";
+    if (tech >= 1 && tech <= 13) return "vooc";
+    if (vmax >= 8000000 && cmax >= 5000000) return "vooc";
+    if (vmax > 0 || cmax > 0) return "pd";
+    return "unknown";
+}
+
 /* 组装一行充电现场。sig 非空时同时输出判重签名：
  * 电量按 5%、温度按 2℃ 归并，未充电时只比它，避免电压抖几十 mV 就落一条。 */
 static void chg_line(char *out, size_t n, char *sig, size_t sn)
 {
     long vusb = -1, imax = -1, vbat = -1, ibat = -1;
     long cool = -1, vooc = -1, tech = -1, cap = -1;
+    long vmax = -1, iusb = -1;
     char type[32] = "", st[32] = "?";
     char p[MAXPATH + 96];
     char a[24], b2[24], b3[24];
@@ -1715,6 +1759,8 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
     path_num(p, &vusb);
     snprintf(p, sizeof p, "%s/usb/current_max", g_ps);
     path_num(p, &imax);
+    snprintf(p, sizeof p, "%s/usb/voltage_max", g_ps);
+    path_num(p, &vmax);
     snprintf(p, sizeof p, "%s/usb/type", g_ps);
     if (read_line(p, type, sizeof type) < 0) type[0] = 0;
     for (char *q = type; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
@@ -1727,22 +1773,33 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
     vbat = uv_norm(vbat);
     vusb = uv_norm(vusb);
     imax = uv_norm(imax);
+    vmax = uv_norm(vmax);
+    iusb = chg_input();
 
     int bt = batt_temp_ps();
+
+    const char *proto = chg_proto(type, vooc, tech, vmax, imax);
 
     fmt_uv(vusb, 2, a, sizeof a);
     fmt_uv(imax, 2, b2, sizeof b2);
     fmt_uv(vbat, 3, b3, sizeof b3);
-    char tb[16], ib[24];
+    char tb[16], ib[24], ibs[24], pins[16] = "?", pbs[16] = "?";
     if (bt >= 0) snprintf(tb, sizeof tb, "%d℃", bt);
     else snprintf(tb, sizeof tb, "?");
     if (ibat != -1) snprintf(ib, sizeof ib, "%ldmA", ibat / 1000);
     else snprintf(ib, sizeof ib, "?");
+    if (iusb > 0) snprintf(ibs, sizeof ibs, "%.2f", (double)iusb / 1e6);
+    else snprintf(ibs, sizeof ibs, "?");
+    if (iusb > 0 && vusb > 0) snprintf(pins, sizeof pins, "%.1f", (double)iusb * (double)vusb / 1e12);
+    if (ibat != -1 && vbat > 0) {
+        long iabs = ibat < 0 ? -ibat : ibat;
+        snprintf(pbs, sizeof pbs, "%.1f", (double)iabs * (double)vbat / 1e12);
+    }
     snprintf(out, n,
-             "vusb=%sV imax=%sA vbat=%sV ibat=%s %ld%% %s cool=%ld vooc=%ld tech=%ld type=%s scr=%d status=%s",
-             a, b2, b3, ib,
+             "vusb=%sV iusb=%sA imax=%sA vbat=%sV ibat=%s pin=%sW pb=%sW %ld%% %s cool=%ld vooc=%ld tech=%ld type=%s scr=%d proto=%s cells=? status=%s",
+             a, ibs, b2, b3, ib, pins, pbs,
              cap, tb,
-             cool, vooc, tech, type[0] ? type : "?", g_screen_on, st);
+             cool, vooc, tech, type[0] ? type : "?", g_screen_on, proto, st);
     if (sig && sn) {
         /* 判重不看 vbat/ibat 瞬时值：bcc 电流会在两档间脉动（4.4V 电芯 ~60mΩ 内阻，
          * ±600mA 正好对应 ±40mV），按 100mV/200mA 分档照样每轮跨档，日志被灌成 3 秒一条。
@@ -1755,9 +1812,9 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
             pwk = ibm * vbat / 1000000000L;
         }
         snprintf(sig, sn,
-                 "st=%s pw=%ldW cap=%ld bt=%d usb=%s imax=%s type=%s cool=%ld vooc=%ld tech=%ld scr=%d",
+                 "st=%s pw=%ldW cap=%ld bt=%d usb=%s imax=%s type=%s cool=%ld vooc=%ld tech=%ld scr=%d proto=%s",
                  st, pwk, cap < 0 ? 0 : cap / 5 * 5, bt < 0 ? 0 : bt / 2 * 2,
-                 a, b2, type[0] ? type : "?", cool, vooc, tech, g_screen_on);
+                 a, b2, type[0] ? type : "?", cool, vooc, tech, g_screen_on, proto);
     }
 }
 
@@ -1775,10 +1832,21 @@ static void chg_snapshot(int charging)
     chg_line(line, sizeof line, sig, sizeof sig);
     const char *key = sig;
 
-    const char *why = "变化";
+    const char *why = g_chg_key[0] ? "变化" : "首帧";
     if (strcmp(g_chg_last_st, st)) {
         snprintf(g_chg_last_st, sizeof g_chg_last_st, "%s", st);
-        why = charging ? "插电" : "停充";
+        why = g_chg_key[0] ? (charging ? "插电" : "停充") : "首帧";
+    }
+
+    /* 协议切换单独记一条：曲线正常却显示公有快充时，看这行就能定位 */
+    const char *pr = strstr(line, "proto=");
+    if (pr) {
+        char pv[16] = "";
+        sscanf(pr + 6, "%15s", pv);
+        if (pv[0] && strcmp(pv, g_proto_last)) {
+            log_msg("I", "proto", "→ %s（type/vooc/tech 见下一行）", pv);
+            snprintf(g_proto_last, sizeof g_proto_last, "%s", pv);
+        }
     }
 
     if (!strcmp(key, g_chg_key)) {
@@ -1873,13 +1941,17 @@ static int screen_sample(void)
 /* 与 sd_screen_tick 一致：连续两次读到暗才算息屏，避免息屏瞬间的抖动 */
 static void screen_tick(void)
 {
+    int prev = g_screen_on;
     int on = screen_sample();
-    if (on < 0) { g_screen_on = 1; g_screen_n = 0; return; }
-    if (on) { g_screen_on = 1; g_screen_n = 0; }
+    if (on < 0) { g_screen_on = 1; g_screen_n = 0; }
+    else if (on) { g_screen_on = 1; g_screen_n = 0; }
     else {
         g_screen_n++;
         if (g_screen_n >= 2) g_screen_on = 0;
     }
+    /* 翻转记一条：延迟释放与轮询间隔都挂在屏幕状态上，出问题先看这一行 */
+    if (prev != g_screen_on)
+        log_msg("I", "screen", "%s（节点数=%d）", g_screen_on ? "亮屏" : "熄屏", g_bl_cnt);
 }
 
 /* ------------------------------------------------------------------ 熔断 */
@@ -2688,6 +2760,72 @@ static int loop_once(int *mode_changed)
     return next_tick(charging);
 }
 
+/* ---------------------------------------------------------------- 环境头 */
+
+static void getprop_v(const char *k, char *out, size_t n)
+{
+    char cmd[128], b[192];
+    out[0] = 0;
+    snprintf(cmd, sizeof cmd, "getprop %s 2>/dev/null", k);
+    FILE *p = popen(cmd, "r");
+    if (!p) return;
+    if (fgets(b, sizeof b, p)) {
+        b[strcspn(b, "\r\n")] = 0;
+        snprintf(out, n, "%s", b);
+    }
+    pclose(p);
+}
+
+/* 开启日志时一次性把「判断依据」写清：机型/内核/协议/屏幕/FCC。
+ * 以前这些只在 daemon 启动时零散记一点，用户复现完导日志，
+ * 还得回头问机型、节点、判定值，来回好几轮。 */
+static void log_env(void)
+{
+    char model[64], rom[64], soc[64], kver[64] = "";
+    char type[32] = "", rt[32] = "", p[MAXPATH];
+    long vooc = -1, tech = -1, vmax = -1, cmax = -1;
+    FILE *f;
+
+    getprop_v("ro.product.model", model, sizeof model);
+    getprop_v("ro.build.display.id", rom, sizeof rom);
+    getprop_v("ro.soc.model", soc, sizeof soc);
+    plat_resolve();
+    f = popen("uname -r 2>/dev/null", "r");
+    if (f) { if (fgets(kver, sizeof kver, f)) kver[strcspn(kver, "\r\n")] = 0; pclose(f); }
+
+    log_msg("I", "env", "device=%s rom=%s kernel=%s soc=%s(%s) tick=%ds mode=%s",
+            model[0] ? model : "?", rom[0] ? rom : "?", kver[0] ? kver : "?",
+            soc[0] ? soc : "?", g_plat, g_c.tick, g_c.temp_mode);
+
+    snprintf(p, sizeof p, "%s/usb/type", g_ps);
+    if (read_line(p, type, sizeof type) < 0) type[0] = 0;
+    type[strcspn(type, "\r\n")] = 0;
+    snprintf(p, sizeof p, "%s/usb/real_type", g_ps);
+    if (read_line(p, rt, sizeof rt) < 0) rt[0] = 0;
+    rt[strcspn(rt, "\r\n")] = 0;
+    oplus_num("voocchg_ing", &vooc);
+    oplus_num("charge_technology", &tech);
+    snprintf(p, sizeof p, "%s/usb/voltage_max", g_ps);
+    path_num(p, &vmax);
+    snprintf(p, sizeof p, "%s/usb/current_max", g_ps);
+    path_num(p, &cmax);
+    vmax = uv_norm(vmax);
+    cmax = uv_norm(cmax);
+    log_msg("I", "env", "usb type=%s real_type=%s vooc=%ld tech=%ld vmax=%ld cmax=%ld proto=%s",
+            type[0] ? type : "?", rt[0] ? rt : "?", vooc, tech, vmax, cmax,
+            chg_proto(type, vooc, tech, vmax, cmax));
+
+    screen_scan();
+    log_msg("I", "env", "screen bl=%s nodes=%d fb=%s 判定=%s",
+            g_bl, g_bl_cnt, g_fb, g_screen_on ? "亮" : "灭");
+
+    curr_prepare();
+    if (g_curr_n > 0)
+        log_msg("I", "env", "charge nodes=%d first=%s", g_curr_n, g_curr_nodes[0]);
+    else
+        log_msg("I", "env", "charge nodes=0（找不到电流节点，限流/亮屏快充都用不了）");
+}
+
 int main(int argc, char **argv)
 {
     const char *d = getenv("SD_DATA");
@@ -2796,6 +2934,7 @@ int main(int argc, char **argv)
     zones_scan();
     sync_desc();
     log_msg("I", "daemon", "qcmon %s 启动：tick=%ds mode=%s", VER, g_c.tick, g_c.temp_mode);
+    if (g_c.log_level >= 1) log_env();
 
     while (!g_stop) {
         int changed = 0;

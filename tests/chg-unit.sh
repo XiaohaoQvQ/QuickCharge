@@ -39,7 +39,12 @@ run_sh() {
     sh -c '. "$MODDIR/lib/qc.sh"; sd_state_load; _sd_st_loaded=1; _sd_screen_on=1; '"$1" 2>/dev/null
 }
 
-cnt() { grep -c '\[chg\]' "$BASE/data/log.txt" 2>/dev/null || echo 0; }
+cnt() {
+    local n
+    n=$(grep -c '\[chg\]' "$BASE/data/log.txt" 2>/dev/null)
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    printf '%s' "$n"
+}
 
 echo "[1] 一行快照的字段与单位"
 setup
@@ -181,6 +186,58 @@ printf '%s 1 9999\n%s 1 8888\n%s 1 1111\n%s 1 2222\n%s 1 3333\n' \
     "$((now - 3600))" "$((now + 3600))" "$((now - 3))" "$((now - 2))" "$((now - 1))" \
     >"$BASE/data/run/power.hist"
 chk "过旧/未来样本不参与中值" "$(med 4444)" "2222"
+
+echo "[8] 协议判定：欧加私有协议不能显示成公有快充"
+# 实机 usb/type 只报 USB_DCP，9V/2A 是充电器上限而不是 PPS 协商。
+# 以前按「≥8V 且 ≥2A」判 pps，30W 的 VOOC 被显示成“公有快充”。
+setup
+printf '9000000\n' >"$ROOT/ps/usb/voltage_max"
+printf '7\n'       >"$ROOT/oplus/battery/charge_technology"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'proto=vooc' && ok "tech=7 → vooc" || bad "tech=7 判错: $line"
+
+setup
+printf '9000000\n' >"$ROOT/ps/usb/voltage_max"
+printf '14\n'      >"$ROOT/oplus/battery/charge_technology"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'proto=pd' && ok "tech=14 → pd（不是 pps）" || bad "tech=14 判错: $line"
+
+setup
+printf '9000000\n' >"$ROOT/ps/usb/voltage_max"
+printf 'SVOOC\n'   >"$ROOT/ps/usb/real_type"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'proto=vooc' && ok "real_type=SVOOC → vooc" || bad "real_type 判错: $line"
+
+setup
+printf '9000000\n' >"$ROOT/ps/usb/voltage_max"
+printf '1\n'       >"$ROOT/oplus/battery/voocchg_ing"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'proto=vooc' && ok "voocchg_ing=1 → vooc" || bad "voocchg_ing 判错: $line"
+
+echo "[9] 一行里带输入侧实测与两侧功率"
+setup
+printf '2030000\n' >"$ROOT/ps/usb/current_now"
+printf '9000000\n' >"$ROOT/ps/usb/voltage_max"
+printf -- '-4000000\n' >"$ROOT/ps/battery/current_now"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'iusb=2.03A' && ok "iusb 取实测输入电流" || bad "iusb: $line"
+echo "$line" | grep -q 'pin=18.0W'  && ok "pin = iusb×vusb" || bad "pin: $line"
+echo "$line" | grep -q 'pb=16.9W'   && ok "pb = |ibat|×vbat" || bad "pb: $line"
+echo "$line" | grep -q 'cells=1'    && ok "cells 字段" || bad "cells: $line"
+
+echo "[10] 日志级别语义：0 关 / 1 事件 / 2 现场"
+setup
+sed -i 's/log_level=3/log_level=0/' "$BASE/data/state.conf"
+run_sh 'sd_info log "不应出现"; sd_chg_snapshot 1'
+n=$(grep -c '不应出现' "$BASE/data/log.txt" 2>/dev/null || echo 0)
+chk "级别 0 不写事件" "$n" "0"
+chk "级别 0 不写快照" "$(cnt)" "0"
+
+setup
+sed -i 's/log_level=3/log_level=1/' "$BASE/data/state.conf"
+run_sh 'sd_info log "事件应出现"; sd_chg_snapshot 1'
+grep -q '事件应出现' "$BASE/data/log.txt" && ok "级别 1 写事件" || bad "级别 1 丢了事件"
+chk "级别 1 不写快照" "$(cnt)" "0"
 
 echo
 echo "结果：通过 $PASS，失败 $FAIL"

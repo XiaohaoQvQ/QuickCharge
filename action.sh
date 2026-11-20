@@ -42,7 +42,7 @@ Quick Charge (QC) 控制入口。
   cells <auto|1|2>             电芯数：自动判断 / 强制单芯 / 强制双芯
   horae <0|1>                  OPPO 热管理服务开关（thermal on|off 为同义）
   thermal <on|off>             系统热管理总开关：off 停 horae，不再按温度降频
-  level <0-4>                  日志级别 0关 1E 2W 3I 4D
+  level <0-4>                  日志 0关（默认） 1事件 2详细 3逐轮 4调试；开 1/2 会先写环境头
   logs [e|w|i|d|boot|daemon|N] 查看日志
   mount | umount               手动挂载 / 卸载配置覆盖层
   rebuild                      重新生成并挂载（OTA 后一般不用，开机自会处理）
@@ -171,7 +171,7 @@ sd_do_json() {
     wall=$(sd_state_get wall off)
     aggr=$(sd_state_int aggr 10 0 10)
     curmax=$(sd_state_int curr_max 0 0 8000)
-    _sd_lv=3
+    _sd_lv=0
     sd_read_real
     sname=${_sd_rr_zone:-none}
     [ -n "$sname" ] || sname=none
@@ -516,11 +516,11 @@ sd_menu_sub() {
                 6) sd_set_fast 55 ;; 7) sd_set_fast 70 ;;
             esac ;;
         misc)
-            printf '\n1) 日志级别 常规  2) 日志级别 调试  3) 看错误日志  4) 看开机日志  0) 返回\n选择: '
+            printf '\n1) 日志：事件级（量小，可长期开）  2) 日志：详细（复现一次就能定位）  3) 看错误日志  4) 看开机日志  0) 返回\n选择: '
             read -r t || return 0
             case "$t" in
-                1) sd_state_set log_level 3; echo "日志级别 -> 3" ;;
-                2) sd_state_set log_level 4; echo "日志级别 -> 4" ;;
+                1) sd_set_log 1; echo "日志 -> 事件级" ;;
+                2) sd_set_log 2; echo "日志 -> 详细" ;;
                 3) printf '\033[H\033[J'; sd_do_logs e 40 ;;
                 4) printf '\033[H\033[J'; sd_do_logs boot 80 ;;
             esac ;;
@@ -672,10 +672,11 @@ case "$1" in
                  *)   echo "用法: horae 0|1"; exit 1 ;;
              esac ;;
     level)   shift
-             case "${1:-3}" in
-                 0|1|2|3|4) sd_state_set log_level "$1"; echo "日志级别 -> $1" ;;
-                 *) echo "级别需为 0~4"; exit 1 ;;
-             esac ;;
+             if sd_set_log "${1:-2}"; then
+                 echo "日志级别 -> $(sd_state_int log_level 0 0 4)（0 关 / 1 事件 / 2 详细 / 3 逐轮 / 4 调试）"
+             else
+                 exit 1
+             fi ;;
     logs)    shift; sd_do_logs "${1:-i}" "${2:-60}" ;;
     mount)   sd_mount_overrides ;;
     umount)  sd_umount_overrides purge ;;

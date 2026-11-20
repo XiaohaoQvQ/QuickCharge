@@ -47,17 +47,25 @@ done
 
 [ -n "${SD_ZONE_GLOB:-}" ] || SD_ZONE_GLOB=/sys/class/thermal/thermal_zone*
 
-_sd_lv=3
+_sd_lv=0
 _sd_rot=0
 
+# 日志分级（log_level）：
+#   0 关闭（默认）：只有 E 落盘，其余一律不写
+#   1 事件：启停、插拔、协议/屏幕切换、降流与回写，量小，适合长期开
+#   2 详细：在事件基础上，每个状态变化记一条完整现场（一次定位用的就是这级）
+#   3 逐轮：每轮 tick 的判定细节
+#   4 调试：节点级 trace
 _sd_emit() {
     local lv="$1" tag="$2" need plv
     shift 2
     plv=$lv
     case "$lv" in
-        E) need=1 ;; W) need=2 ;; D) need=4 ;;
-        S) need=2; plv=I ;;   # 快照：log_level≥2 就留，日志里仍显示为 I
-        *) need=3 ;;
+        E) need=0 ;;               # 错误：关闭状态下也留一条
+        W) need=1 ;;               # 告警：事件级起
+        S) need=2; plv=I ;;        # 现场快照：详细级起，日志里仍显示为 I
+        D) need=3 ;;               # 逐轮细节：调试级
+        *) need=1 ;;               # I：事件
     esac
     [ "$_sd_lv" -ge "$need" ] || return 0
     printf '%s %s [%s] %s\n' "$(date '+%m-%d %H:%M:%S')" "$plv" "$tag" "$*" 2>/dev/null >>"$SD_LOG"
@@ -113,7 +121,27 @@ sd_log_reset() {
     return 0
 }
 
+# 切换日志级别。开启时先写会话头 + 环境 + 当前现场，
+# 复现完直接导出就是一份能定位的日志，不用再等下一次变化。
+sd_set_log() {
+    local v="$1"
+    case "$v" in 0|1|2|3|4) ;; *) printf '级别需为 0~4\n'; return 1 ;; esac
+    if [ "$v" = 0 ]; then
+        sd_info log "日志关闭（级别 0）"
+        sd_state_set log_level 0
+        _sd_lv=0
+        return 0
+    fi
+    sd_state_set log_level "$v"
+    _sd_lv=$v
+    sd_session log "日志开启 level=$v"
+    sd_dump_env
+    [ "$v" -ge 2 ] && sd_chg_snapshot 1
+    return 0
+}
+
 sd_session() {
+    [ "${_sd_lv:-0}" -ge 1 ] || return 0
     local tag="$1"
     shift
     printf '\n======== %s | %s | pid=%s ========\n' \
@@ -148,7 +176,13 @@ sd_dump_env() {
     fi
 
     _sd_emit I env "device=${dev:-?} rom=${rom:-?} kernel=${kver:-?}"
+    local mv cv
+    mv=$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
+    cv=""
+    [ -x "$MODDIR/bin/qcmon" ] && cv=$("$MODDIR/bin/qcmon" -v 2>/dev/null | head -1)
+    _sd_emit I env "module=${mv:-?} daemon=${cv:-shell（无 C 守护）}"
     sd_plat_resolve
+    _sd_proto=""; _sd_proto_why=""
     sd_proto_resolve
     _sd_emit I env "soc=${_sd_plat}（${_sd_plat_why}） proto=${_sd_proto}（${_sd_proto_why}）"
     _sd_emit I env "zones=$zones emul=[${emul# }] shell-temp=$_sh charge-nodes=$(sd_curr_nodes 2>/dev/null | wc -l | tr -d ' ')"
@@ -158,6 +192,23 @@ sd_dump_env() {
         _sd_emit I env "sentinel=none（未找到电池/主板温度节点，伪装无法工作）"
     fi
     _sd_emit I env "state=$(sd_state_dump)"
+
+    # 下面三行是「一次定位」的关键：协议、屏幕、FCC 三处判定的原始输入。
+    # 没有它们，日志里只能看到结论（公有快充 / scr=0 / 写不进去），看不出为什么。
+    local et ert ev ec
+    sd_read1 "$SD_PS/usb/type" && et=$_sd_rv
+    sd_read1 "$SD_PS/usb/real_type" && ert=$_sd_rv
+    sd_read1 "$SD_OPLUS_CHG/voocchg_ing" && ev=$_sd_rv
+    sd_read1 "$SD_OPLUS_CHG/charge_technology" && ec=$_sd_rv
+    _sd_emit I env "usb type=${et:-?} real_type=${ert:-?} voocchg_ing=${ev:-?} tech=${ec:-?}"
+
+    sd_screen_nodes
+    _sd_emit I env "screen bl=${SD_BL} 节点=$(printf '%s' "$_sd_bl_nodes" | wc -w | tr -d ' ') fb=${SD_FB}"
+    if sd_scr_fcc_node; then
+        _sd_emit I env "fcc 节点=${_sd_sf} 目标=$(cat "$SD_FCC_NORM" 2>/dev/null || printf '未学')"
+    else
+        _sd_emit I env "fcc 节点=none（本机没有可回写的电流节点，亮屏快充只能走内核参数）"
+    fi
     return 0
 }
 
@@ -858,22 +909,45 @@ _sd_proto_why=""
 
 sd_proto_resolve() {
     [ -n "$_sd_proto" ] && return 0
-    local t="" v="" c="" p
+    local t="" v="" c="" p tech="" vooc="" why=""
+
+    # 1) 适配器类型串最直接。注意欧加的 usb/type 只报 USB_DCP / USB_PD，
+    #    私有协议在线时它照样是 USB_DCP，光靠它永远判不出 VOOC。
     for p in "$SD_PS/usb/real_type" "$SD_PS/usb/type" "$SD_PS/battery/charge_type"; do
         [ -e "$p" ] || continue
         sd_read1 "$p" || continue
         t=$_sd_rv
-        [ -n "$t" ] && { _sd_proto_why="${p##*/}=$t"; break; }
+        [ -n "$t" ] && { why="${p##*/}=$t"; break; }
     done
     case "$t" in
         *VOOC*|*vooc*|*SVOOC*|*SuperDart*|*DART*|*Flash*|*SUPERVOOC*)
-            _sd_proto=vooc; return 0 ;;
+            _sd_proto=vooc; _sd_proto_why=${why:-type}; return 0 ;;
         *PPS*|*pps*)
-            _sd_proto=pps; return 0 ;;
+            _sd_proto=pps; _sd_proto_why=${why:-type}; return 0 ;;
         *UFCS*|*ufcs*)
-            _sd_proto=ufcs; return 0 ;;
+            _sd_proto=ufcs; _sd_proto_why=${why:-type}; return 0 ;;
         *PD*|*pd*)
-            _sd_proto=pd; return 0 ;;
+            _sd_proto=pd; _sd_proto_why=${why:-type}; return 0 ;;
+    esac
+
+    # 2) 欧加私有协议：voocchg_ing=1 是驱动自己置的「正在 VOOC 充电」
+    sd_read1 "$SD_OPLUS_CHG/voocchg_ing" && vooc=$_sd_rv
+    sd_read1 "$SD_OPLUS_CHG/charge_technology" && tech=$_sd_rv
+    case "$vooc" in
+        1) _sd_proto=vooc; _sd_proto_why="voocchg_ing=1"; return 0 ;;
+    esac
+
+    # 3) 欧加的 charge_technology：私有档位落在 1~13，14 起是 PD/PPS。
+    #    以前只按「≥8V 且 ≥2A」判，30W 的 VOOC 被当成 PPS 显示成公有快充，
+    #    实际 usb/type 只是 USB_DCP，根本没有 PPS 协商。
+    case "$tech" in
+        ''|*[!0-9]*) ;;
+        *)
+            if [ -e "$SD_OPLUS_CHG/charge_technology" ] && [ "$tech" -ge 1 ] && [ "$tech" -le 13 ]; then
+                _sd_proto=vooc
+                _sd_proto_why="tech=$tech"
+                return 0
+            fi ;;
     esac
 
     v=""; sd_read1 "$SD_PS/usb/voltage_max" && v=$_sd_rv
@@ -883,10 +957,8 @@ sd_proto_resolve() {
     if [ "$v" -ge 8000 ] && [ "$c" -ge 5000000 ]; then
         _sd_proto=vooc
         _sd_proto_why="协商 $((v / 1000000))V/$((c / 1000))mA"
-    elif [ "$v" -ge 8000 ] && [ "$c" -ge 2000000 ]; then
-        _sd_proto=pps
-        _sd_proto_why="协商 $((v / 1000000))V/$((c / 1000))mA"
     elif [ "$v" -gt 0 ] || [ "$c" -gt 0 ]; then
+        # 没有 PPS 字样就不再猜 PPS：8V/2A 是 PD 固定档，也是 VOOC 掉档后的样子
         _sd_proto=pd
         _sd_proto_why="协商 $((v / 1000000))V/$((c / 1000))mA"
     else
@@ -2283,6 +2355,8 @@ _sd_screen_on=1
 _sd_screen_n=0
 _sd_screen_ticks=0
 _sd_scr_log=0
+_sd_screen_node=""
+_sd_screen_val=""
 
 # 把候选亮度节点收成一份列表，只扫一次目录。
 # 不能"取第一个存在的节点就完事"：PJD110 的 panel0-backlight/actual_brightness
@@ -2298,17 +2372,19 @@ sd_screen_nodes() {
 }
 
 sd_screen_sample_v() {
-    local p v max=0 any=0
+    local p v max=0 any=0 hit=""
     if sd_screen_nodes; then
         for p in $_sd_bl_nodes; do
             sd_read1 "$p" || continue
             v=$_sd_rv
             case "$v" in ''|*[!0-9]*) continue ;; esac
             any=1
-            [ "$v" -gt "$max" ] && max=$v
+            [ "$v" -gt "$max" ] && { max=$v; hit=$p; }
         done
         [ "$any" = 1 ] || return 1
         [ "$max" -gt 0 ] && _sd_screen_raw=1 || _sd_screen_raw=0
+        _sd_screen_node=${hit:-${_sd_bl_nodes%% *}}
+        _sd_screen_val=$max
         return 0
     fi
     if [ -e "$SD_FB" ]; then
@@ -2316,24 +2392,29 @@ sd_screen_sample_v() {
         v=$_sd_rv
         case "$v" in ''|*[!0-9]*) return 1 ;; esac
         [ "$v" -eq 0 ] && _sd_screen_raw=1 || _sd_screen_raw=0
+        _sd_screen_node=$SD_FB
+        _sd_screen_val=$v
         return 0
     fi
     return 1
 }
 
 sd_screen_tick() {
+    local prev="$_sd_screen_on"
     _sd_screen_ticks=1
     if ! sd_screen_sample_v; then
         _sd_screen_on=1
         _sd_screen_n=0
-        return 0
-    fi
-    if [ "$_sd_screen_raw" = 1 ]; then
+    elif [ "$_sd_screen_raw" = 1 ]; then
         _sd_screen_on=1
         _sd_screen_n=0
     else
         _sd_screen_n=$((_sd_screen_n + 1))
         [ "$_sd_screen_n" -ge 2 ] && _sd_screen_on=0
+    fi
+    # 状态翻转记一条：熄屏/亮屏相关的判断（延迟释放、轮询间隔）都挂在这上面
+    if [ "$prev" != "$_sd_screen_on" ]; then
+        sd_info screen "$( [ "$_sd_screen_on" = 1 ] && printf '亮屏' || printf '熄屏' )（节点 ${_sd_screen_node:-?}=${_sd_screen_val:-?}）"
     fi
     return 0
 }
@@ -2974,6 +3055,25 @@ _sd_chg_fmt() {
     }'
 }
 
+# 输入侧实测电流（µA）。usb/current_max 是充电器能力上限，不是实际输入，
+# 日志里只写 imax 会让人以为一直卡在 2A。这里优先读实测值。
+sd_chg_input_v() {
+    local p v abs best=0 babs=0
+    for p in "$SD_PS/usb/current_now" "$SD_PS/usb/input_current_now" \
+             "$SD_PS/usb/current_avg" "$SD_PS/usb_input/current_now"; do
+        [ -e "$p" ] || continue
+        sd_read1 "$p" || continue
+        v=$_sd_rv
+        case "$v" in ''|*[!0-9-]*) continue ;; esac
+        sd_uv_norm "$v" && v=$_sd_rv
+        abs=$v; [ "$abs" -lt 0 ] && abs=$((-abs))
+        [ "$abs" -eq 0 ] && continue
+        if [ "$abs" -gt "$babs" ]; then best=$abs; babs=$abs; fi
+    done
+    [ "$babs" -gt 0 ] && { _sd_rv=$best; return 0; }
+    return 1
+}
+
 # 电池电流，统一换算成 µA。灭屏后 power_supply 的 current_now 常停在 0 不刷新，
 # 而 bcc_parms 仍在更新，所以先问 bcc，再回退 current_now / bms / current_avg。
 sd_chg_current_v() {
@@ -3014,12 +3114,14 @@ sd_chg_current_v() {
 # 填 _sd_chg_line_v（日志行）与 _sd_chg_sig_v（判重签名）。
 # 用全局变量而不是命令替换，两个结果才都留得住。
 sd_chg_line_fill() {
-    local cap vbat ibat vusb imax type cool vooc tech bt st f capk btk pwk pwc ibm
+    local cap vbat ibat vusb iusb imax type cool vooc tech bt st f capk btk pwk pwc ibm
+    local pin pb cells proto ibs
     st=""; sd_batt_status_v && st=$_sd_rv
     cap=""; sd_ps_attr_v capacity && cap=$_sd_rv
     vbat=""; sd_ps_attr_v voltage_now && vbat=$_sd_rv
     ibat=""; sd_chg_current_v && ibat=$_sd_rv
     vusb=""; sd_read1 "$SD_PS/usb/voltage_now" && vusb=$_sd_rv
+    iusb=""; sd_chg_input_v && iusb=$_sd_rv
     imax=""; sd_read1 "$SD_PS/usb/current_max" && imax=$_sd_rv
     type=""; sd_read1 "$SD_PS/usb/type" && type=$_sd_rv
     cool=""; sd_read1 "$SD_OPLUS_CHG/cool_down" && cool=$_sd_rv
@@ -3031,12 +3133,40 @@ sd_chg_line_fill() {
     [ -n "$vusb" ] && sd_uv_norm "$vusb" && vusb=$_sd_rv
     [ -n "$imax" ] && sd_uv_norm "$imax" && imax=$_sd_rv
 
+    cells=1
+    sd_cells_resolve && cells=$_sd_rv
+
+    # 输入侧与电池侧功率都算出来：输入掉、电池不掉是充电器/线的问题；
+    # 两边一起掉才是负载或降档。日志里没有这两个数就只能猜。
+    pin=-1; pb=-1
+    if [ -n "$iusb" ] && [ -n "$vusb" ]; then
+        pin=$(awk -v i="$iusb" -v v="$vusb" 'BEGIN{ printf "%.1f", (i<0?-i:i)*v/1e12 }' 2>/dev/null)
+    fi
+    if [ -n "$ibat" ] && [ -n "$vbat" ]; then
+        pb=$(awk -v i="$ibat" -v v="$vbat" \
+            'BEGIN{ printf "%.1f", (i<0?-i:i)*v/1e12 }' 2>/dev/null)
+    fi
+    case "$pin" in ''|*[!0-9.]*|-1) pin="?" ;; esac
+    case "$pb"  in ''|*[!0-9.]*|-1) pb="?"  ;; esac
+
+    # 协议会随插拔变化，缓存必须每行重算；否则同一个守护进程里
+    # 换了充电器，日志里还写着上一台的协议。
+    _sd_proto=""; _sd_proto_why=""
+    sd_proto_resolve
+    proto=$_sd_proto
+
     f=$(_sd_chg_fmt "$vusb" "$imax" "$vbat" "$ibat")
     # shellcheck disable=SC2086
     set -- $f
-    _sd_chg_line_v=$(printf 'vusb=%sV imax=%sA vbat=%sV ibat=%smA %s%% %s℃ cool=%s vooc=%s tech=%s type=%s scr=%s status=%s' \
-        "$1" "$2" "$3" "$4" "${cap:-?}" "${bt:-?}" "${cool:-?}" "${vooc:-?}" \
-        "${tech:-?}" "${type:-?}" "${_sd_screen_on:-?}" "${st:-?}")
+    if [ -n "$iusb" ]; then
+        ibs=$(awk -v x="$iusb" 'BEGIN{ printf "%.2f", (x<0?-x:x)/1e6 }' 2>/dev/null)
+    else
+        ibs="?"
+    fi
+    case "$ibs" in ''|*[!0-9.]*) ibs="?" ;; esac
+    _sd_chg_line_v=$(printf 'vusb=%sV iusb=%sA imax=%sA vbat=%sV ibat=%smA pin=%sW pb=%sW %s%% %s℃ cool=%s vooc=%s tech=%s type=%s scr=%s proto=%s cells=%s status=%s' \
+        "$1" "$ibs" "$2" "$3" "$4" "$pin" "$pb" "${cap:-?}" "${bt:-?}" "${cool:-?}" "${vooc:-?}" \
+        "${tech:-?}" "${type:-?}" "${_sd_screen_on:-?}" "${proto:-?}" "$cells" "${st:-?}")
 
     capk=${cap:-0}; btk=${bt:-0}
     case "$capk" in ''|*[!0-9]*) capk=0 ;; esac
@@ -3056,7 +3186,7 @@ sd_chg_line_fill() {
         pwk=$(( ibm * vbat / 1000000000 ))
     fi
 
-    _sd_chg_sig_v="st=${st:-?} pw=${pwk}W cap=$((capk / 5 * 5)) bt=$((btk / 2 * 2)) usb=${vusb:-?} imax=${imax:-?} type=${type:-?} cool=${cool:-?} vooc=${vooc:-?} tech=${tech:-?} scr=${_sd_screen_on:-?}"
+    _sd_chg_sig_v="st=${st:-?} pw=${pwk}W cap=$((capk / 5 * 5)) bt=$((btk / 2 * 2)) usb=${vusb:-?} imax=${imax:-?} type=${type:-?} cool=${cool:-?} vooc=${vooc:-?} tech=${tech:-?} scr=${_sd_screen_on:-?} proto=${proto:-?}"
 }
 
 sd_chg_line() {
@@ -3066,7 +3196,7 @@ sd_chg_line() {
 
 sd_chg_snapshot() {
     local charging="${1:-0}" line st now why key
-    [ "${_sd_lv:-3}" -ge 2 ] || return 0
+    [ "${_sd_lv:-0}" -ge 2 ] || return 0
     now=$(date +%s)
     # 插拔的瞬间必须记下来，只有"状态没变"时才按 30s 节流
     if [ "$charging" = "${_sd_chg_last_chg:-x}" ] && [ "$charging" != 1 ] && \
@@ -3082,9 +3212,18 @@ sd_chg_snapshot() {
     key=$_sd_chg_sig_v
 
     why=变化
-    if [ "$st" != "$_sd_chg_last_st" ]; then
+    if [ -z "$_sd_chg_key" ]; then
+        why=首帧                      # 开启日志后第一帧必须是完整现场，否则要看历史得等下一次变化
+    elif [ "$st" != "$_sd_chg_last_st" ]; then
         _sd_chg_last_st=$st
         if [ "$charging" = 1 ]; then why=插电; else why=停充; fi
+    fi
+    _sd_chg_last_st=$st
+
+    # 协议切换单独记一条事件：曲线正常但显示成公有快充时，看这一行就能定位
+    if [ -n "$_sd_proto" ] && [ "$_sd_proto" != "${_sd_proto_last:-}" ]; then
+        sd_info proto "→ ${_sd_proto}（${_sd_proto_why}）"
+        _sd_proto_last=$_sd_proto
     fi
 
     if [ "$key" = "$_sd_chg_key" ]; then

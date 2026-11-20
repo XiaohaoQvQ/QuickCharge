@@ -184,7 +184,7 @@
 </div>
 
 <div class="card">
-  <h2>实时功耗 <span class="tag" id="psrc">3 秒采样 · 5 点中值</span></h2>
+  <h2>实时功耗 <span class="tag" id="psrc"></span></h2>
   <div class="pwr">
     <div><div class="k">电流</div><div class="v" id="pma">—</div></div>
     <div><div class="k">功率</div><div class="v" id="pw">—</div></div>
@@ -232,9 +232,8 @@
   <div class="rw"><input type="range" id="shell" min="25" max="60" step="1"></div>
   <div class="switch" id="shellHint">系统看到的温度上限；真实温度低于它时不会改写</div>
 
-  <div class="row" style="margin-top:18px"><label for="curr">充电限流</label><span class="val" id="currV">—</span></div>
-  <div class="rw"><input type="range" id="curr" min="0" max="8000" step="500"></div>
-  <div class="switch" id="currHint" style="margin-top:2px">限流是上限，未插电时不生效</div>
+  <div class="row" style="margin-top:18px"><label>充电限流</label><span class="val" id="currV">不限</span></div>
+  <div class="switch" id="currHint" style="margin-top:2px">默认不限；需要限流时把配置列表里的 curr_max 改成 3000 这类值（0 = 不限）</div>
   </div></div>
 </div>
 
@@ -272,11 +271,6 @@
     <input type="checkbox" id="thermalOff"><label for="thermalOff">停用系统热管理（horae）</label>
   </div>
   <div class="switch" id="thermalHint" style="margin-top:2px">停掉欧加的温度策略服务，不再按温度降频；散热后果自己承担</div>
-
-  <div class="acts" style="margin-top:16px">
-    <button id="boost" class="wide">暴力模式</button>
-  </div>
-  <div class="hint" style="margin-top:8px">顶墙才降流 · 档位 10 · 快充阈值 85%，只改这三个参数，不动上面两项</div>
   </div></div>
 </div>
 
@@ -754,9 +748,9 @@
     $("wall").disabled = d.wall === "off";
     if (d.level !== undefined && d.level !== null) {
       var lv = Number(d.level) || 0;
-      $("lvNow").textContent = lv > 0 ? "详细" : "关闭";
+      $("lvNow").textContent = lv >= 2 ? "详细" : (lv === 1 ? "事件" : "关闭");
       $("logClose").className = lv === 0 ? "on" : "";
-      $("logDetail").className = lv > 0 ? "on" : "";
+      $("logDetail").className = lv >= 2 ? "on" : "";
     }
     if (!rngBusy("shell")) {
       $("shell").max = d.wall === "off" ? 60 : Math.max(25, Number(d.wall) - 2);
@@ -778,7 +772,7 @@
       ? (d.charging
           ? "已生效 · 当前温度下允许 " + (d.curr_target || d.curr_max) + "mA"
           : "未插电 · 接上充电器后生效")
-      : "不限制充电电流";
+      : "默认不限；需要限流时把配置列表里的 curr_max 改成 3000 这类值（0 = 不限）";
     if (rngPush("batt", d.battery_limit === "off" ? 48 : d.battery_limit)) {
       $("battV").textContent = d.battery_limit === "off" ? "关" : d.battery_limit + "℃";
     }
@@ -817,9 +811,6 @@
       ? "系统读到的核心温度固定为 " + ct + "℃，调度按这个数决定降不降频。"
         + "设得越低，系统越不当回事，但真实发热不会跟着降。"
       : "未伪装：系统读到的是真实温度。";
-    var bOn = Number(d.curr_edge) === 0 && Number(d.fast_cap) >= 85;
-    $("boost").className = "wide" + (bOn ? " on" : "");
-    $("boost").textContent = bOn ? "暴力模式 · 已开" : "暴力模式";
     hzSup = hzParse(d.hz_list);
     var hi = (!d.hz || d.hz === "off") ? 0 : HZ_STEPS.indexOf(Number(d.hz));
     if (hi < 0) hi = 0;
@@ -969,17 +960,8 @@
       note("json " + r.out.length + " 字节：" + r.out.replace(/\s+/g, " ").slice(0, 240));
     });
   }
-  /* 三点中值：单点毛刺（采样瞬间的 -300mA 之类）直接抹掉，
-     三个点以上的真实变化（降档、插拔）原样保留。 */
-  function sparSmooth(a) {
-    var r = [], i, n = a.length, s;
-    for (i = 0; i < n; i++) {
-      if (i === 0 || i === n - 1) { r.push(a[i]); continue; }
-      s = [a[i - 1], a[i], a[i + 1]].sort(function (x, y) { return x - y; });
-      r.push(s[1]);
-    }
-    return r;
-  }
+  /* 平滑在守护侧做（5 点中值），这里直接画后端给的值。
+     再叠一层三点中值会让降档晚 2 个点才显示，看起来像"反应慢"。 */
   function drawSpark() {
     var c = $("spark");
     if (!c || !c.getContext) return;
@@ -993,7 +975,7 @@
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, w, h);
     if (pwr.length < 2) return;
-    var pts = sparSmooth(pwr);
+    var pts = pwr;
     var max = Math.max.apply(null, pts), min = Math.min.apply(null, pts);
     /* 纵轴至少留 10W 跨度：原来贴着 min~max 画，±0.3W 的读数抖动
        会被放大成整屏锯齿，看着像功率在乱跳。 */
@@ -1038,8 +1020,9 @@
       else if (d.plat === "qcom") tag.push("高通");
       if (d.proto === "vooc") tag.push("私有快充");
       else if (d.proto === "pps" || d.proto === "ufcs") tag.push("公有快充");
-      tag.push("3 秒采样 · 5 点中值");
+      else if (d.proto === "pd") tag.push("PD 快充");
       $("psrc").textContent = tag.join(" · ");
+      $("psrc").style.display = tag.length ? "" : "none";
       $("pma").textContent = d.ma === null ? "—" : d.ma + " mA";
       $("pw").textContent = d.w === null ? "—" : d.w + " W";
       $("ptemp").textContent = d.temp === null ? "—" : d.temp + "℃";
@@ -1344,8 +1327,6 @@
       function (v) { return "curredge " + v; });
     bindRange("shell", "shellV", function (v) { return v + "℃"; },
       function (v) { return "base " + v; });
-    bindRange("curr", "currV", function (v) { return Number(v) > 0 ? v + "mA" : "不限"; },
-      function (v) { return "curr " + (Number(v) > 0 ? v : "off"); });
     bindRange("batt", "battV", function (v) { return v + "℃"; },
       function (v) { return "battery " + v; });
     bindRange("soc", "socV", function (v) { return v + "℃"; },
@@ -1423,16 +1404,6 @@
         if (e.cancelable) e.preventDefault();
       }, false);
     }
-    bindTap("boost", function () {
-      var on = !!(S && Number(S.curr_edge) === 0 && Number(S.fast_cap) >= 85);
-      if (!on) {
-        ask("确定开启暴力模式？", function () {
-          apply("boost on", "已开启暴力模式");
-        });
-        return;
-      }
-      apply("boost off", "已关闭暴力模式");
-    });
     bindTap("refresh", function () {
       load(function (ok) { toast(ok ? "已刷新" : "刷新失败", !ok); });
     });
@@ -1441,8 +1412,8 @@
       apply("level 0", "日志已关闭");
     });
     bindTap("logDetail", function () {
-      if (S && Number(S.level) >= 4) { toast("已经是详细日志"); return; }
-      apply("level 4", "日志 → 详细");
+      if (S && Number(S.level) >= 2) { toast("已经是详细日志"); return; }
+      apply("level 2", "日志 → 详细（已写入环境头）");
     });
     bindTap("rebuild", function () {
       var nm = S && S.mount_mode && S.mount_mode.indexOf("nomount") === 0;

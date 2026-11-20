@@ -1,85 +1,103 @@
-# Quick Charge v2.9.59（shell 版）
+# Quick Charge v2.9.60（shell 版）
 
-> 对应包：`QuickCharge-v2.9.59.zip` · `versioncode 29591`
+> 对应包：`QuickCharge-v2.9.60.zip` · `versioncode 29601`
 
-这一版没有功能改动，只修一份真机日志暴露出来的三处读数问题。
-它们不影响充电本身，但会让日志和面板说假话。
+这一版按反馈改了五处：界面上砍掉三样东西（中值标签、暴力模式、限流滑块），
+修了一处一直判错的协议显示，并把日志改成「平时不写、开一次就够定位」。
 
-## 一、`vbat=0.004V`：单位没归一
+## 一、私有协议不再显示成公有快充
 
-日志里电池电压整段是 `0.004`，电量却在 71% 正常爬升。
+面板右下角一直写「公有快充」，插的明明是原装充电器。
 
-`power_supply/battery/voltage_now` 这个节点各机型不统一：多数报 µV
-（`4219000` = 4.219V），也有报 mV 的（`4000` = 4.0V）。代码一律按 µV 换算，
-于是 4.0V 被算成 0.004V。
+原因是判定顺序：`usb/type` 在欧加机器上恒为 `USB_DCP`，拿不到 VOOC 字样，
+代码就退到「电压 ≥8V 且电流 ≥2A 就是 PPS」。可 9V/2A 既是 PD 固定档，
+也是 VOOC 掉档后的样子，于是 30W 的私有快充被标成了公有。
 
-连带的后果比显示错更麻烦——判重签名里的功率是这么算的：
+**改法**：判定顺序按证据强弱排
 
-```sh
-pwk=$(( ibm * vbat / 1000000000 ))
+1. `usb/real_type` / `usb/type` 里有 `VOOC` / `SVOOC` / `DART` / `Flash` → 私有
+2. `oplus_chg/battery/voocchg_ing = 1` → 私有
+3. `oplus_chg/battery/charge_technology` 在 1~13 → 私有（14 起是 PD/PPS）
+4. 只有明确出现 `PPS` / `UFCS` 字样才判公有
+5. 都没有时按协商电压电流判 PD，不再凭 8V/2A 猜 PPS
+
+任何一步命中都会把依据写进日志，比如 `proto=vooc（tech=7）`。
+
+## 二、去掉「3 秒采样 · 5 点中值」
+
+后端已经在做 5 点中值，面板再标一行采样说明属于多余。
+同时把前端那层三点中值也删了——两层平滑叠在一起，真降档要晚两个点才显示，
+看起来像「反应慢」。
+
+曲线现在直接画后端给的值，纵轴的 10W 最小跨度和末点圆点保留。
+
+## 三、日志：默认关，开一次就能定位
+
+以前的级别是 `0关 / 1E / 2W / 3I / 4D`，实际效果是「开到 4 才有点用」，
+而 4 级会逐轮刷屏。这次重排：
+
+| 级别 | 内容 | 量 |
+|---|---|---|
+| 0（默认） | 只留 `E` 错误 | 几乎没有 |
+| 1 | 启停、插拔、协议切换、屏幕切换、降流与回写 | 很小，可长期开 |
+| 2 | 事件 + 每次状态变化的完整现场 | 复现一次够用 |
+| 3 | 逐轮判定细节 | 调试 |
+| 4 | 节点级 trace | 只在追单点问题时 |
+
+面板上仍是两态：**关闭 / 详细**。点「详细」走 `level 2`，并且会先写三类东西：
+
+```
+======== 11-20 19:09:15 | log | pid=35202 ========
+11-20 ... I [env] device=... rom=... kernel=... soc=qcom
+11-20 ... I [env] usb type=USB_DCP real_type=? voocchg_ing=0 tech=7
+11-20 ... I [env] screen bl=/sys/class/backlight 节点=2 fb=...
+11-20 ... I [env] fcc 节点=... 目标=...
+11-20 ... I [proto] → vooc（tech=7）
+11-20 ... I [chg] 首帧 vusb=9.00V iusb=2.03A ... pin=18.3W pb=17.2W ...
 ```
 
-`vbat` 小 1000 倍，`pw` 恒等于 0，2.9.57 的「按 1W 分档判重」在这类机器上
-直接失效，日志又退回靠 `usb=8.55→8.96` 这种 0.01V 抖动触发，3 秒一条。
+快照行也补了原来缺的三个数：
 
-**改法**：读出来先归一，再格式化。
+- `iusb`：输入侧**实测**电流。以前只有 `imax`（充电器上限），看着像一直卡在 2A
+- `pin` / `pb`：输入功率与电池侧功率。输入掉、电池不掉是充电器或线的问题；两边一起掉才是降档
+- `proto` / `cells`：协议与电芯数，省得再问机型
 
-```sh
-sd_uv_norm() {
-    if [ "$v" -gt 0 ] && [ "$v" -lt 20000 ]; then
-        t=$((v * 1000))
-        [ "$t" -ge 100000 ] && [ "$t" -le 30000000 ] && _sd_rv=$t
-    fi
-}
-```
+另外，屏幕和协议每次翻转都会单独记一条，不用再靠拼时间线猜。
 
-`vusb`、`imax` 一起走这个函数。阈值取 20000 是为了不误伤空载的 `30000`
-（0.03V），再用结果区间做二次校验，`0.03V` 不会被乘成 30V。
+## 四、取消暴力模式开关
 
-## 二、日志时间比本地早 8 小时
+「顶墙才降流 + 档位 10 + 快充阈值 85%」这个组合按钮从面板移除。
+`action.sh boost on|off` 仍然可用，需要时在命令行调。
 
-同一份日志里两种时间：
+## 五、取消充电限流滑块
+
+滑块去掉，功能保留：`curr_max` 默认 `0`（不限），需要的场合在配置列表里改
 
 ```
-11-19 09:52:27 | boot        ← 脚本，本地时间
-11-19 01:53:18 qcmon 启动     ← qcmon，UTC
+/data/adb/quickcharge/state.conf
+curr_max=3000
 ```
 
-qcmon 是静态二进制，拿不到 Android 的时区库（设备上没有
-`/usr/share/zoneinfo`），`localtime_r()` 直接落到 UTC。
+或用命令 `sh action.sh curr 3000`。面板上仍会显示当前值（`不限` / `3000mA`），
+设了限流也能一眼看到。
 
-**改法**：启动时问一次 `date +%z`，把 `+0800` 拼成 POSIX 的 `XXX-8`，
-`setenv("TZ")` 之后 `tzset()`。这种写法不需要 tzdata 文件。
-
-## 三、屏幕判不出来
-
-`屏幕 无亮度节点，按亮屏处理` —— `g_bl` 固定 `/sys/class/backlight`、
-`g_fb` 固定 `/sys/graphics/fb0/blank`，这台两处都为空，屏幕状态于是恒为亮屏。
-
-后果是「亮屏快充」永远停在「还没有基准值」，熄屏 30 秒延迟释放也不会触发。
-
-**改法**：`backlight` 目录扫不到时再试几个常见落点 ——
-`/sys/class/leds/lcd-backlight/actual_brightness`、
-`/sys/class/leds/lcd-backlight/brightness`、`/sys/class/leds/lcd/brightness`、
-`/sys/class/backlight/panel0-backlight/brightness`；`fb0/blank` 也补上
-`/sys/class/graphics`、`/sys/devices/virtual/graphics` 两条路径。
-
-## 四、测试
+## 验证
 
 | 套件 | 结果 |
 |---|---|
-| `c-test` | 69 通过（新增「vbat 报 mV 时归一」） |
-| `chg-unit` | 33 通过 |
+| `c-test` | 77 通过（新增协议 3 条、功率字段 3 条、级别 2 条） |
+| `chg-unit` | 45 通过（新增协议 4 条、功率 4 条、级别 4 条） |
 | `cool-unit` | 16 通过 |
-| `mount-unit` | 4 通过 |
-| `zone-rank` | 6 通过 |
+| `mount-unit` / `zone-rank` | 4 / 6 通过 |
 | `sim` | 621 通过 |
 
-## 五、文件
+手工验证（假 sysroot，`tech=7` + `USB_DCP` + 9V/2A）：
 
-| 项 | 值 |
-|---|---|
-| 最低要求 | Magisk / KernelSU / APatch 任一 |
-| 架构 | 全架构（纯 shell，无二进制） |
+```
+proto=vooc（tech=7）  iusb=2.03A  pin=18.3W  pb=17.2W  cells=1
+```
 
-同版本 C 守护版见 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)。
+## 用法提醒
+
+装上后先在面板点「详细」，复现一次问题，再点「关闭」。
+日志在 `/data/adb/quickcharge/log.txt`，超过 512KB 自动轮转一份 `.old`。

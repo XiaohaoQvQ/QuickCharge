@@ -24,7 +24,7 @@ mkz() { # name type temp
 }
 
 setup() {
-    rm -rf "$BASE"
+    rm -rf "$BASE" 2>/dev/null
     mkdir -p "$BASE/spoof"
     mkdir -p "$ROOT/sys/class/thermal"
     mkdir -p "$ROOT/sys/class/power_supply/battery"
@@ -440,6 +440,55 @@ printf '1,2,3,4,5,6,4200,8,-350,10,11,0,12,13,14,15,16,17,18\n' \
     >"$ROOT/sys/class/oplus_chg/battery/bcc_parms"
 out=$(run chg)
 echo "$out" | grep -q 'ibat=-350mA' && ok "灭屏 current_now=0 时用 bcc" || bad "ibat 错：$out"
+
+echo "[16] 协议判定"
+# 欧加 usb/type 恒为 USB_DCP，9V/2A 是充电器上限而非 PPS 协商。
+setup
+state static 30 42 off
+printf '9000000\n' >"$ROOT/sys/class/power_supply/usb/voltage_max"
+printf '7\n'       >"$ROOT/sys/class/oplus_chg/battery/charge_technology"
+out=$(run chg)
+echo "$out" | grep -q 'proto=vooc' && ok "tech=7 → vooc" || bad "tech=7 判错：$out"
+
+setup
+state static 30 42 off
+printf '9000000\n' >"$ROOT/sys/class/power_supply/usb/voltage_max"
+printf '14\n'      >"$ROOT/sys/class/oplus_chg/battery/charge_technology"
+out=$(run chg)
+echo "$out" | grep -q 'proto=pd' && ok "tech=14 → pd（不是 pps）" || bad "tech=14 判错：$out"
+
+setup
+state static 30 42 off
+printf '1\n' >"$ROOT/sys/class/oplus_chg/battery/voocchg_ing"
+out=$(run chg)
+echo "$out" | grep -q 'proto=vooc' && ok "voocchg_ing=1 → vooc" || bad "voocchg_ing 判错：$out"
+
+echo "[17] 输入侧实测与两侧功率"
+setup
+state static 30 42 off
+printf '2030000\n' >"$ROOT/sys/class/power_supply/usb/current_now"
+printf '9000000\n' >"$ROOT/sys/class/power_supply/usb/voltage_max"
+printf -- '-4000000\n' >"$ROOT/sys/class/power_supply/battery/current_now"
+out=$(run chg)
+echo "$out" | grep -q 'iusb=2.03A' && ok "iusb 取实测输入电流" || bad "iusb 错：$out"
+echo "$out" | grep -q 'pin=18.0W'  && ok "pin = iusb×vusb"     || bad "pin 错：$out"
+echo "$out" | grep -q 'pb=16.9W'   && ok "pb = |ibat|×vbat"    || bad "pb 错：$out"
+
+echo "[18] log_level=0 时守护不写日志"
+setup
+state static 30 42 off
+sed -i 's/^log_level=.*/log_level=0/' "$BASE/data/state.conf"
+run bench 1 >/dev/null 2>&1
+n=$(grep -c '\[chg\]' "$BASE/data/log.txt" 2>/dev/null)
+case "$n" in ''|*[!0-9]*) n=0 ;; esac
+chk "级别 0 不落快照" "$n" "0"
+
+setup
+state static 30 42 off
+run bench 1 >/dev/null 2>&1
+n=$(grep -c '\[chg\]' "$BASE/data/log.txt" 2>/dev/null)
+case "$n" in ''|*[!0-9]*) n=0 ;; esac
+chk "级别 4 落首帧" "$n" "1"
 
 echo
 echo "结果：通过 $PASS，失败 $FAIL"
