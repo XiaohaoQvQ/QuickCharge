@@ -74,6 +74,8 @@
   .switch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim)}
   .hint{font-size:12px;color:var(--dim);margin-top:10px;line-height:1.6}
   .switch input{width:18px;height:18px;accent-color:var(--accent)}
+  /* 纯文字提示走 block：flex 容器里的长中文串不收缩，会顶出卡片右边 */
+  #currHint,#shellHint,#battSpHint,#thermalHint,#coreHint,#hzHint{display:block;line-height:1.55}
   .acts{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:4px}
   .acts button{
     padding:12px 0;border-radius:12px;border:1px solid var(--line);background:transparent;
