@@ -75,7 +75,7 @@
   .hint{font-size:12px;color:var(--dim);margin-top:10px;line-height:1.6}
   .switch input{width:18px;height:18px;accent-color:var(--accent)}
   /* 纯文字提示走 block：flex 容器里的长中文串不收缩，会顶出卡片右边 */
-  #currHint,#shellHint,#battSpHint,#thermalHint,#coreHint,#hzHint{display:block;line-height:1.55}
+  #shellHint,#battSpHint,#thermalHint,#coreHint,#hzHint{display:block;line-height:1.55}
   .acts{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:4px}
   .acts button{
     padding:12px 0;border-radius:12px;border:1px solid var(--line);background:transparent;
@@ -234,8 +234,6 @@
   <div class="rw"><input type="range" id="shell" min="25" max="60" step="1"></div>
   <div class="switch" id="shellHint">系统看到的温度上限；真实温度低于它时不会改写</div>
 
-  <div class="row" style="margin-top:18px"><label>充电限流</label><span class="val" id="currV">不限</span></div>
-  <div class="switch" id="currHint" style="margin-top:2px">默认不限；需要限流时把配置列表里的 curr_max 改成 3000 这类值（0 = 不限）</div>
   </div></div>
 </div>
 
@@ -767,14 +765,6 @@
       : (d.wall === "off"
           ? "系统看到的温度上限；真实温度低于它时不会改写"
           : "必须低于温度墙 " + d.wall + "℃；真实温度低于它时不会改写");
-    if (rngPush("curr", d.curr_max)) {
-      $("currV").textContent = d.curr_max > 0 ? d.curr_max + "mA" : "不限";
-    }
-    $("currHint").textContent = d.curr_max > 0
-      ? (d.charging
-          ? "已生效 · 当前温度下允许 " + (d.curr_target || d.curr_max) + "mA"
-          : "未插电 · 接上充电器后生效")
-      : "默认不限；需要限流时把配置列表里的 curr_max 改成 3000 这类值（0 = 不限）";
     if (rngPush("batt", d.battery_limit === "off" ? 48 : d.battery_limit)) {
       $("battV").textContent = d.battery_limit === "off" ? "关" : d.battery_limit + "℃";
     }
@@ -831,8 +821,7 @@
     $("hzHint").textContent = ht;
     $("hzHint").style.display = ht ? "" : "none";
     $("sumMain").textContent = "档位 " + d.aggr + " · 墙 " +
-      (d.wall === "off" ? "关" : d.wall + "℃") +
-      (Number(d.curr_max) > 0 ? " · 限流 " + d.curr_max + "mA" : "");
+      (d.wall === "off" ? "关" : d.wall + "℃");
     $("sumCur").textContent = "电池 " +
       (d.battery_limit === "off" ? "关" : d.battery_limit + "℃") +
       " · 主板 " + (d.sentinel_limit === "off" ? "关" : d.sentinel_limit + "℃");
