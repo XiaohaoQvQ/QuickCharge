@@ -34,7 +34,7 @@
   .grid .v{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
   .grid .s{font-size:10px;color:var(--dim);margin-top:2px;line-height:1.3}
   .sum{margin-top:11px;padding-top:10px;border-top:1px solid var(--line);
-       font-size:12px;color:var(--dim);line-height:1.55}
+       font-size:12px;color:var(--dim);line-height:1.55;text-align:center}
   .sum b{color:var(--fg);font-weight:600;font-variant-numeric:tabular-nums}
   h2{font-size:13px;color:var(--dim);font-weight:600;margin:0 0 10px;letter-spacing:.3px}
   .row{display:flex;align-items:center;justify-content:space-between;margin:14px 0 6px}
@@ -194,9 +194,7 @@
     <span class="chev"></span>
   </div>
   <div class="bd" id="foldMainBd"><div class="bd-in">
-  <div class="hint" style="margin:-2px 0 10px">拖动调整，松手生效；滑页面扫到不会误改。</div>
-
-  <div class="row"><label for="aggr">温控档位</label><span class="val" id="aggrV">—</span></div>
+  <div class="row" style="margin-top:0"><label for="aggr">温控档位</label><span class="val" id="aggrV">—</span></div>
   <div class="rw"><input type="range" id="aggr" min="0" max="10" step="1"></div>
   <div class="switch" style="margin-top:2px">温差 = 2 + 档位，越高压得越狠</div>
 
@@ -880,10 +878,7 @@
       if (d.cells === 2) tag.push("双电芯");
       if (d.plat === "mtk") tag.push("MTK");
       else if (d.plat === "qcom") tag.push("高通");
-      if (d.proto === "vooc") tag.push("私有快充");
-      else if (d.proto === "pps" || d.proto === "ufcs") tag.push("公有快充");
-      else if (d.proto === "pd") tag.push("PD 快充");
-      else if (d.proto === "none") tag.push("未接充电器");
+      if (d.proto === "none") tag.push("未接充电器");
       $("psrc").textContent = tag.join(" · ");
       $("psrc").style.display = tag.length ? "" : "none";
       $("pma").textContent = d.ma === null ? "—" : d.ma + " mA";
