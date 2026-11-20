@@ -163,7 +163,7 @@ sd_do_status() {
 
 sd_do_json() {
     local mode c nc wall aggr curmax curtar sz sname real slim bc mt dm bl sl rj blj slj tgt hz hzn zc _e src rage dage shv shset _cacheout mmn
-    local chg=false _bst=
+    local chg=false _bst= ms mw
     mode=$(sd_state_get temp_mode off)
     [ "$mode" = "dyn" ] && mode=static
     c=$(sd_state_get core_temp off)
@@ -247,9 +247,13 @@ sd_do_json() {
         "$hz" "$hzn" "$hzh" "$hzs" "$(_sd_hz_list)" "$chg" "$zc"
     mmn=""
     sd_mm_active && mmn=$(sd_mm_name)
-    printf '"mount_mode":"%s","mm_name":"%s","nm_files":%s,"barrier":%s,"base_clamped":%s}\n' \
+    sd_module_state
+    ms=$_sd_ms
+    mw=$(printf '%s' "$_sd_ms_why" | tr -d '"\\')
+    printf '"mount_mode":"%s","mm_name":"%s","nm_files":%s,"barrier":%s,"base_clamped":%s,' \
         "$(sd_mount_mode)" "$mmn" "$nmn" "${_sd_last_barrier:-0}" \
         "$([ "$_sd_base_clamped" = 1 ] && echo true || echo false)"
+    printf '"module_state":"%s","module_why":"%s"}\n' "$ms" "$mw"
 }
 
 sd_set_temp() {

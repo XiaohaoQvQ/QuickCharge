@@ -746,6 +746,77 @@ sd_daemon_kick() {
     return 0
 }
 
+# ---------------------------------------------------------------
+# 模块状态：WebUI 顶部那块牌子。三态
+#   ok      守护在跑，心跳新鲜
+#   reboot  模块刚装上 / 刚更新，这次开机还没加载过
+#   dead    该跑没跑起来（或守护卡死）—— 让用户把日志发过来
+# ---------------------------------------------------------------
+sd_boot_mark() {
+    mkdir -p "$SD_DATA" 2>/dev/null
+    sd_boot_ts 2>/dev/null >"$SD_DATA/.boot_id"
+    return 0
+}
+
+# 本次开机的 post-fs-data 跑过没有。开机时刻由 uptime 反推，同一轮里稳定，
+# 两次算出来只会差 1s 以内；连续两次开机不可能只隔 15s，所以直接比时间戳。
+sd_boot_seen() {
+    local cur old d
+    cur=$(sd_boot_ts)
+    case "$cur" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$cur" -gt 0 ] || return 0
+    old=$(tr -d '\r\n' <"$SD_DATA/.boot_id" 2>/dev/null)
+    case "$old" in ''|*[!0-9]*) return 1 ;; esac
+    d=$((cur - old))
+    [ "$d" -lt 0 ] && d=$((-d))
+    [ "$d" -le 15 ]
+}
+
+sd_module_state() {
+    local pid age mu
+    _sd_ms=dead
+    _sd_ms_why="守护没有启动"
+    if pid=$(sd_daemon_pid 2>/dev/null); then
+        if sd_hb_age; then
+            age=$_sd_rv
+            if [ "$age" -gt 180 ]; then
+                _sd_ms=dead
+                _sd_ms_why="守护 pid=$pid 已 ${age} 秒没有心跳"
+            elif [ "$age" -le 5 ]; then
+                _sd_ms=ok
+                _sd_ms_why="守护 pid=$pid 心跳正常"
+            else
+                _sd_ms=ok
+                _sd_ms_why="守护 pid=$pid，${age} 秒前心跳"
+            fi
+        else
+            _sd_ms=ok
+            _sd_ms_why="守护 pid=$pid 刚启动"
+        fi
+        return 0
+    fi
+    # 更新包已解包但还没重启：管理器把它放在 modules_update，重启才搬进 modules
+    mu="/data/adb/modules_update/quickcharge"
+    if [ -f "$mu/module.prop" ]; then
+        _sd_ms=reboot
+        _sd_ms_why="新版本已解包，重启后生效"
+        return 0
+    fi
+    if [ -f "$SD_DATA/need_reboot" ]; then
+        _sd_ms=reboot
+        _sd_ms_why="刚安装，重启后生效"
+        return 0
+    fi
+    if ! sd_boot_seen; then
+        _sd_ms=reboot
+        _sd_ms_why="这次开机还没加载过模块"
+        return 0
+    fi
+    _sd_ms=dead
+    _sd_ms_why="启动脚本跑过了，守护没起来"
+    return 0
+}
+
 sd_valid_temp() {
     case "$1" in ''|*[!0-9]*) return 1 ;; esac
     [ "$1" -ge 20 ] && [ "$1" -le 100 ]

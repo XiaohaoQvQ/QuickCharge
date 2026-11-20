@@ -30,6 +30,8 @@ if [ -d "$SD_RUN/daemon.lock" ] || [ -f "$SD_RUN/daemon.pid" ]; then
 fi
 
 sd_state_load
+sd_boot_mark
+rm -f "$SD_DATA/need_reboot" 2>/dev/null
 sd_zone_scan
 
 cnt=0

@@ -27,6 +27,21 @@
   header .ver{font-size:12px;color:var(--dim)}
   .dot{width:7px;height:7px;border-radius:50%;background:var(--dim);margin-left:auto;align-self:center}
   .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .dot.bad{background:var(--err);box-shadow:0 0 8px rgba(255,92,92,.6)}
+  .mst{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);
+    border-radius:14px;padding:10px 13px;margin-bottom:12px}
+  .mst .ico{flex:0 0 auto;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;
+    justify-content:center;font-size:12px;font-weight:700;line-height:1;
+    background:rgba(127,127,127,.16);color:var(--dim)}
+  .mst .tx{min-width:0}
+  .mst .t{font-size:14px;font-weight:600}
+  .mst .d{font-size:11px;color:var(--dim);line-height:1.45;margin-top:1px;word-break:break-all}
+  .mst.ok{border-color:rgba(61,220,132,.4)}
+  .mst.ok .ico{background:rgba(61,220,132,.16);color:var(--ok)}
+  .mst.ok .t{color:var(--ok)}
+  .mst.bad{border-color:rgba(255,92,92,.4)}
+  .mst.bad .ico{background:rgba(255,92,92,.16);color:var(--err)}
+  .mst.bad .t{color:var(--err)}
   .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:12px}
   .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;text-align:center}
   .grid>div{min-width:0}
@@ -135,7 +150,7 @@
   
   @keyframes rise{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
   @keyframes pop{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}
-  body>header,body>.card,body>.banner,body>.safety{animation:rise .32s cubic-bezier(.4,0,.2,1) both}
+  body>header,body>.card,body>.banner,body>.safety,body>.mst{animation:rise .32s cubic-bezier(.4,0,.2,1) both}
   .mask.show .box{animation:pop .2s cubic-bezier(.34,1.4,.64,1) both}
   .acts button,.seg button,.seg4 button,.mask .b button{
     transition:background .16s ease,border-color .16s ease,transform .12s ease}
@@ -154,6 +169,14 @@
   <span class="ver" id="ver">—</span>
   <span class="dot" id="dot"></span>
 </header>
+
+<div class="mst" id="mst">
+  <span class="ico" id="mstIc">·</span>
+  <div class="tx">
+    <div class="t" id="mstT">正在检查</div>
+    <div class="d" id="mstD">读取模块状态…</div>
+  </div>
+</div>
 
 <div class="banner" id="banner"></div>
 <div class="safety" id="safety">⚠ 安全模式：连续多次开机未完成，本次未挂载配置。可在下方“重挂”退出。</div>
@@ -585,6 +608,8 @@
         fail("读取状态失败：退出码 " + r.code +
              (r.err ? "，" + pickFirstLine(r.err) : "") +
              (r.out ? "，输出 " + r.out.replace(/\s+/g, " ").slice(0, 120) : "，没有输出"));
+        $("dot").className = "dot bad";
+        setState("bad", "状态读取失败", "请把 /data/adb/quickcharge/ 的日志发给作者");
         if (cb) cb(false);
         return;
       }
@@ -645,9 +670,34 @@
       return "真实 <b>" + r + "℃</b> &lt; 基准 <b>" + d.shell_temp + "℃</b>";
     return "未改写 · 真实 <b>" + r + "℃</b>";
   }
+  /* 模块状态牌：ok 运行中 / reboot 刚装完等重启 / 其余一律按故障处理，
+     直接告诉用户去哪儿取日志，别让人猜。 */
+  function setState(kind, title, sub) {
+    var box = $("mst");
+    if (!box) return;
+    box.className = "mst" + (kind === "ok" ? " ok" : (kind === "bad" ? " bad" : ""));
+    $("mstIc").textContent = kind === "ok" ? "✓" : (kind === "bad" ? "✕" : "·");
+    $("mstT").textContent = title;
+    $("mstD").textContent = sub || "";
+  }
+  function renderState(d) {
+    var why = str(d.module_why);
+    if (d.module_state === "ok") {
+      $("dot").className = "dot on";
+      setState("ok", "运行中", why || "守护正常");
+      return;
+    }
+    $("dot").className = "dot bad";
+    if (d.module_state === "reboot") {
+      setState("bad", "请重启", why || "模块已装好，重启后生效");
+      return;
+    }
+    setState("bad", "模块没运行",
+      (why ? why + " · " : "") + "请把 /data/adb/quickcharge/ 的日志发给作者");
+  }
   function render(d) {
     $("ver").textContent = "v" + (d.version || "—");
-    $("dot").className = "dot" + (d.daemon ? " on" : "");
+    renderState(d);
     if (d.real === null || d.real === undefined) {
       $("real").textContent = "—";
       $("realSrc").textContent = d.daemon ? (d.real_why || "读不到") : "守护没跑";
@@ -1149,16 +1199,21 @@
     if (!bridgeName()) {
       fail("当前环境没有网页控制接口。请在 KernelSU / APatch / MMRL 里打开本模块的 WebUI；" +
            "如果是 Magisk，请用终端执行：su -c sh /data/adb/modules/quickcharge/action.sh");
+      setState("bad", "无法连接", "请在 KernelSU / APatch / MMRL 里打开本模块的 WebUI");
     } else {
       info("正在连接模块…");
       connect(function (cok) {
         if (!cok) {
           fail("命令通道没能建立（三种调用方式都试过）。打开诊断日志看原因，或重启 WebUI 再试。");
+          $("dot").className = "dot bad";
+          setState("bad", "连接失败", "请把 /data/adb/quickcharge/ 的日志发给作者");
           return;
         }
         detectMod(function (ok) {
           if (!ok) {
             fail("命令通道正常，但没找到模块目录。请确认 Quick Charge 已安装并启用后点“重挂”。");
+            $("dot").className = "dot bad";
+            setState("bad", "没找到模块", "确认已安装并启用；仍不行请把 /data/adb/quickcharge/ 的日志发给作者");
             return;
           }
           load();

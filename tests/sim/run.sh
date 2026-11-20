@@ -427,6 +427,8 @@ echo "$J" | grep -q '"mode":"charge"' && ok "json mode=charge" || ng "json mode 
 echo "$J" | grep -q '"charging":false' && ok "json charging=false" || ng "json charging 错误"
 echo "$J" | grep -q '"mounted":0' && ok "json mounted=0(未挂载)" || ng "json mounted 错误"
 echo "$J" | grep -q '"daemon":false' && ok "json daemon=false" || ng "json daemon 错误"
+echo "$J" | grep -q '"module_state":"\(ok\|reboot\|dead\)"' && ok "json 带模块状态三态" || ng "json 缺模块状态: $J"
+echo "$J" | grep -q '"module_why":"[^"]' && ok "json 带状态原因" || ng "json 缺状态原因: $J"
 V=$(grep '^version=' /opt/qc/module.prop | cut -d= -f2)
 echo "$J" | grep -q "\"version\":\"$V\"" && ok "json 带版本号" || ng "json 缺版本号"
 # 仅充电档未插电：不算目标温度，target 保持 0
