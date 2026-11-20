@@ -311,8 +311,8 @@ sd_check() {
         printf '[ok] 平台     %s · %s\n' "$pt" "$_sd_plat_why"
     fi
     case "$_sd_proto" in
-        unknown) printf '[--] 协议     %s（%s）\n' "$pr" "$_sd_proto_why" ;;
-        *)       printf '[ok] 协议     %s（%s）\n' "$pr" "$_sd_proto_why" ;;
+        unknown|none) printf '[--] 协议     %s（%s）\n' "$pr" "$_sd_proto_why" ;;
+        *)            printf '[ok] 协议     %s（%s）\n' "$pr" "$_sd_proto_why" ;;
     esac
     if [ -d "$SD_VOTABLE" ]; then
         printf '[ok] 投票     %s 存在 · 仅 UFCS/PPS 有效，本模块不写入\n' "$SD_VOTABLE"
@@ -907,9 +907,37 @@ sd_plat_text() {
 _sd_proto=""
 _sd_proto_why=""
 
+# 适配器在不在位。usb/voltage_max、current_max 报的是「端口能力上限」，
+# 拔线后仍常驻 5V/500mA（标准 SDP 的值），拿它判协议会把没插电显示成 PD。
+# 有 online/present 就照它；没有就看实测输入，再退到电池状态。
+sd_usb_present() {
+    local o="" v="" i="" st=""
+    sd_read1 "$SD_PS/usb/online" && o=$_sd_rv
+    [ -n "$o" ] || { sd_read1 "$SD_PS/usb/present" && o=$_sd_rv; }
+    case "$o" in
+        1|Y|y|yes|true)  return 0 ;;
+        0|N|n|no|false) return 1 ;;
+    esac
+    v=""; sd_read1 "$SD_PS/usb/voltage_now" && v=$_sd_rv
+    [ -n "$v" ] && sd_uv_norm "$v" && v=$_sd_rv
+    i=""; sd_chg_input_v && i=$_sd_rv
+    case "$i" in -*) i=${i#-} ;; esac
+    case "$v" in ''|*[!0-9]*) v=0 ;; esac
+    case "$i" in ''|*[!0-9]*) i=0 ;; esac
+    [ "$v" -ge 4000000 ] && [ "$i" -ge 100000 ] && return 0
+    st=""; sd_batt_status_v && st=$_sd_rv
+    case "$st" in *Charging*|*Full*) return 0 ;; esac
+    return 1
+}
+
 sd_proto_resolve() {
     [ -n "$_sd_proto" ] && return 0
     local t="" v="" c="" p tech="" vooc="" why=""
+
+    # 0) 没插适配器就没有协议可言
+    if ! sd_usb_present; then
+        _sd_proto=none; _sd_proto_why="未接适配器"; return 0
+    fi
 
     # 1) 适配器类型串最直接。注意欧加的 usb/type 只报 USB_DCP / USB_PD，
     #    私有协议在线时它照样是 USB_DCP，光靠它永远判不出 VOOC。
@@ -943,10 +971,18 @@ sd_proto_resolve() {
     case "$tech" in
         ''|*[!0-9]*) ;;
         *)
-            if [ -e "$SD_OPLUS_CHG/charge_technology" ] && [ "$tech" -ge 1 ] && [ "$tech" -le 13 ]; then
-                _sd_proto=vooc
-                _sd_proto_why="tech=$tech"
-                return 0
+            if [ -e "$SD_OPLUS_CHG/charge_technology" ]; then
+                if [ "$tech" -ge 1 ] && [ "$tech" -le 13 ]; then
+                    _sd_proto=vooc
+                    _sd_proto_why="tech=$tech"
+                    return 0
+                fi
+                # 14 起是欧加的公有档：降档掉协议时 tech 会从 7/8 跳到 14
+                if [ "$tech" -ge 14 ]; then
+                    _sd_proto=pd
+                    _sd_proto_why="tech=$tech（私有档已退）"
+                    return 0
+                fi
             fi ;;
     esac
 
@@ -954,16 +990,17 @@ sd_proto_resolve() {
     c=""; sd_read1 "$SD_PS/usb/current_max" && c=$_sd_rv
     case "$v" in ''|*[!0-9]*) v=0 ;; esac
     case "$c" in ''|*[!0-9]*) c=0 ;; esac
-    if [ "$v" -ge 8000 ] && [ "$c" -ge 5000000 ]; then
+    if [ "$v" -ge 8000000 ] && [ "$c" -ge 5000000 ]; then
         _sd_proto=vooc
         _sd_proto_why="协商 $((v / 1000000))V/$((c / 1000))mA"
-    elif [ "$v" -gt 0 ] || [ "$c" -gt 0 ]; then
-        # 没有 PPS 字样就不再猜 PPS：8V/2A 是 PD 固定档，也是 VOOC 掉档后的样子
-        _sd_proto=pd
-        _sd_proto_why="协商 $((v / 1000000))V/$((c / 1000))mA"
+    elif [ "$v" -gt 5000000 ]; then
+        # 升压了说明确实在协商，但没有 VOOC/PPS/UFCS/PD 字样、也没有 tech 证据。
+        # 9V/2A 既可能是 PD 固定档，也可能是 VOOC 掉档——不能断言是 PD。
+        _sd_proto=unknown
+        _sd_proto_why="协商 $((v / 1000000))V/$((c / 1000))mA，无协议字样"
     else
         _sd_proto=unknown
-        _sd_proto_why="无适配器类型与协商值"
+        _sd_proto_why="普通 USB 口（$((v / 1000000))V/$((c / 1000))mA）"
     fi
     return 0
 }
@@ -971,6 +1008,7 @@ sd_proto_resolve() {
 sd_proto_text() {
     sd_proto_resolve
     case "$_sd_proto" in
+        none)    printf '未接适配器' ;;
         vooc)    printf 'VOOC / SuperVOOC 私有快充' ;;
         ufcs)    printf 'UFCS 公有快充' ;;
         pps)     printf 'PPS 公有快充' ;;

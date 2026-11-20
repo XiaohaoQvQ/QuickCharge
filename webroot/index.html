@@ -1012,6 +1012,7 @@
       if (d.proto === "vooc") tag.push("私有快充");
       else if (d.proto === "pps" || d.proto === "ufcs") tag.push("公有快充");
       else if (d.proto === "pd") tag.push("PD 快充");
+      else if (d.proto === "none") tag.push("未接充电器");
       $("psrc").textContent = tag.join(" · ");
       $("psrc").style.display = tag.length ? "" : "none";
       $("pma").textContent = d.ma === null ? "—" : d.ma + " mA";

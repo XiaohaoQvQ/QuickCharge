@@ -1720,11 +1720,24 @@ static long chg_input(void)
     return best > 0 ? best : -1;
 }
 
+/* 适配器在位判定。usb/voltage_max、current_max 是「端口能力上限」，拔线后
+ * 仍常驻 5V/500mA（标准 SDP），拿它判协议会把没插电显示成 PD。
+ * online: 1/0 来自 usb/online 或 usb/present，-1 表示读不到。 */
+static int usb_present_of(long online, long vusb, long iusb, const char *st)
+{
+    if (online == 1) return 1;
+    if (online == 0) return 0;
+    if (vusb >= 4000000 && iusb >= 100000) return 1;
+    if (st && (strstr(st, "Charging") || strstr(st, "Full"))) return 1;
+    return 0;
+}
+
 /* 与 shell 的 sd_proto_resolve 保持同一套判定。
  * 欧加的 usb/type 只报 USB_DCP，私有协议在线时也是它；以前拿
  * 「≥8V 且 ≥2A」猜 PPS，30W 的 VOOC 被显示成公有快充。 */
-static const char *chg_proto(const char *type, long vooc, long tech, long vmax, long cmax)
+static const char *chg_proto(const char *type, long vooc, long tech, long vmax, long cmax, int present)
 {
+    if (!present) return "none";
     if (type && type[0]) {
         if (strstr(type, "VOOC") || strstr(type, "SVOOC") || strstr(type, "SUPERVOOC") ||
             strstr(type, "DART") || strstr(type, "Flash"))
@@ -1735,8 +1748,10 @@ static const char *chg_proto(const char *type, long vooc, long tech, long vmax, 
     }
     if (vooc == 1) return "vooc";
     if (tech >= 1 && tech <= 13) return "vooc";
+    /* 14 起是欧加的公有档：降档掉协议时 tech 会从 7/8 跳到 14 */
+    if (tech >= 14) return "pd";
     if (vmax >= 8000000 && cmax >= 5000000) return "vooc";
-    if (vmax > 0 || cmax > 0) return "pd";
+    /* 没有协议字样就不猜：9V/2A 既可能是 PD 固定档，也可能是 VOOC 掉档 */
     return "unknown";
 }
 
@@ -1746,7 +1761,7 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
 {
     long vusb = -1, imax = -1, vbat = -1, ibat = -1;
     long cool = -1, vooc = -1, tech = -1, cap = -1;
-    long vmax = -1, iusb = -1;
+    long vmax = -1, iusb = -1, online = -1;
     char type[32] = "", st[32] = "?";
     char p[MAXPATH + 96];
     char a[24], b2[24], b3[24];
@@ -1764,6 +1779,11 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
     snprintf(p, sizeof p, "%s/usb/type", g_ps);
     if (read_line(p, type, sizeof type) < 0) type[0] = 0;
     for (char *q = type; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
+    snprintf(p, sizeof p, "%s/usb/online", g_ps);
+    if (path_num(p, &online) < 0) {
+        snprintf(p, sizeof p, "%s/usb/present", g_ps);
+        path_num(p, &online);
+    }
     oplus_num("cool_down", &cool);
     oplus_num("voocchg_ing", &vooc);
     oplus_num("charge_technology", &tech);
@@ -1778,7 +1798,8 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
 
     int bt = batt_temp_ps();
 
-    const char *proto = chg_proto(type, vooc, tech, vmax, imax);
+    const char *proto = chg_proto(type, vooc, tech, vmax, imax,
+                                  usb_present_of(online, vusb, iusb, st));
 
     fmt_uv(vusb, 2, a, sizeof a);
     fmt_uv(imax, 2, b2, sizeof b2);
@@ -2811,9 +2832,24 @@ static void log_env(void)
     path_num(p, &cmax);
     vmax = uv_norm(vmax);
     cmax = uv_norm(cmax);
-    log_msg("I", "env", "usb type=%s real_type=%s vooc=%ld tech=%ld vmax=%ld cmax=%ld proto=%s",
-            type[0] ? type : "?", rt[0] ? rt : "?", vooc, tech, vmax, cmax,
-            chg_proto(type, vooc, tech, vmax, cmax));
+    {
+        long online = -1, vusb = -1, iusb = -1;
+        char envst[32] = "";
+        snprintf(p, sizeof p, "%s/usb/online", g_ps);
+        if (path_num(p, &online) < 0) {
+            snprintf(p, sizeof p, "%s/usb/present", g_ps);
+            path_num(p, &online);
+        }
+        snprintf(p, sizeof p, "%s/usb/voltage_now", g_ps);
+        path_num(p, &vusb);
+        vusb = uv_norm(vusb);
+        iusb = chg_input();
+        batt_status(envst, sizeof envst);
+        log_msg("I", "env", "usb type=%s real_type=%s vooc=%ld tech=%ld vmax=%ld cmax=%ld proto=%s",
+                type[0] ? type : "?", rt[0] ? rt : "?", vooc, tech, vmax, cmax,
+                chg_proto(type, vooc, tech, vmax, cmax,
+                          usb_present_of(online, vusb, iusb, envst)));
+    }
 
     screen_scan();
     log_msg("I", "env", "screen bl=%s nodes=%d fb=%s 判定=%s",

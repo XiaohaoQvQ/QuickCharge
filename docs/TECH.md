@@ -184,7 +184,7 @@ type=USB_DCP scr=1 proto=vooc cells=2 status=Charging
 
 - `iusb` 是输入侧**实测**电流，`imax` 只是充电器上限，别用后者判断实际输入
 - `pin` / `pb` 是输入功率与电池侧功率（单芯口径，双芯机型乘 2）：输入掉而电池不掉是充电器或线的问题，两边一起掉才是降档
-- `proto` 的判定顺序：`real_type`/`type` 字样 → `voocchg_ing=1` → `charge_technology` 1~13 → 明确的 `PPS`/`UFCS` 字样 → 协商电压电流判 PD。不再凭 8V/2A 猜 PPS
+- `proto` 的判定顺序：先确认适配器在位（`usb/online`/`present` → 实测输入 → 电池状态），不在位直接 `none` → `real_type`/`type` 字样 → `voocchg_ing=1` → `charge_technology` 1~13 私有 / ≥14 公有 → 协商 `≥8V 且 ≥5A` 判私有 → 其余 `unknown`。不再凭 8V/2A 猜 PPS 或 PD：`voltage_max`/`current_max` 是端口能力上限，拔线后常驻 5V/500mA，拿它兜底会把没插电显示成 PD
 
 **日志每次开机清空**：`post-fs-data` 一进来就把上一轮的 `log.txt` 与 `log.old.txt` 删掉，所以 `logs boot` 拿到的就是这一次开机的完整链路，不会和几天前的记录混在一起。`post-fs-data` 万一被跳过（安全模式、元模块没接线），`service.sh` 会用「日志的最后写入时间早于本次开机时刻」兜底再清一次；判断不出来时不动它，宁可留着也不误删本轮记录。
 

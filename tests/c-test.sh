@@ -463,6 +463,35 @@ printf '1\n' >"$ROOT/sys/class/oplus_chg/battery/voocchg_ing"
 out=$(run chg)
 echo "$out" | grep -q 'proto=vooc' && ok "voocchg_ing=1 → vooc" || bad "voocchg_ing 判错：$out"
 
+echo "[16b] 没插充电器不能显示成 PD"
+# voltage_max / current_max 是端口能力上限，拔线后常驻 5V/500mA（标准 SDP）
+setup
+state static 30 42 off
+printf '0\n'           >"$ROOT/sys/class/power_supply/usb/online"
+printf '5000000\n'     >"$ROOT/sys/class/power_supply/usb/voltage_max"
+printf '500000\n'      >"$ROOT/sys/class/power_supply/usb/current_max"
+printf 'Discharging\n' >"$ROOT/sys/class/power_supply/battery/status"
+rm -f "$ROOT/sys/class/power_supply/usb/voltage_now"
+out=$(run chg)
+echo "$out" | grep -q 'proto=none' && ok "online=0 → none" || bad "拔线仍判协议：$out"
+echo "$out" | grep -q 'proto=pd'   && bad "拔线仍显示 PD" || ok "拔线不显示 PD"
+
+setup
+state static 30 42 off
+printf 'Discharging\n' >"$ROOT/sys/class/power_supply/battery/status"
+rm -f "$ROOT/sys/class/power_supply/usb/voltage_now"
+out=$(run chg)
+echo "$out" | grep -q 'proto=none' && ok "无 online 节点也无输入 → none" || bad "无输入仍判：$out"
+
+setup
+state static 30 42 off
+printf '1\n'       >"$ROOT/sys/class/power_supply/usb/online"
+printf '9000000\n' >"$ROOT/sys/class/power_supply/usb/voltage_max"
+printf '2000000\n' >"$ROOT/sys/class/power_supply/usb/current_max"
+printf '0\n'       >"$ROOT/sys/class/oplus_chg/battery/charge_technology"
+out=$(run chg)
+echo "$out" | grep -q 'proto=unknown' && ok "9V/2A 无字样 → unknown" || bad "无证据仍猜：$out"
+
 echo "[17] 输入侧实测与两侧功率"
 setup
 state static 30 42 off

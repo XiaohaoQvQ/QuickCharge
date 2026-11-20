@@ -214,6 +214,42 @@ printf '1\n'       >"$ROOT/oplus/battery/voocchg_ing"
 line=$(run_sh 'sd_chg_line')
 echo "$line" | grep -q 'proto=vooc' && ok "voocchg_ing=1 → vooc" || bad "voocchg_ing 判错: $line"
 
+echo "[8b] 没插充电器不能显示成 PD"
+# voltage_max / current_max 是端口能力上限，拔线后仍常驻 5V/500mA（标准 SDP）。
+# 以前拿「v>0 就是 PD」兜底，面板没插电也一直写着「PD 快充」。
+setup
+printf '0\n'           >"$ROOT/ps/usb/online"
+printf '5000000\n'     >"$ROOT/ps/usb/voltage_max"
+printf '500000\n'      >"$ROOT/ps/usb/current_max"
+printf 'Discharging\n' >"$ROOT/ps/battery/status"
+rm -f "$ROOT/ps/usb/voltage_now"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'proto=none' && ok "online=0 → none" || bad "拔线仍判协议: $line"
+echo "$line" | grep -q 'proto=pd'   && bad "拔线仍显示 PD" || ok "拔线不显示 PD"
+
+setup
+printf 'Discharging\n' >"$ROOT/ps/battery/status"
+rm -f "$ROOT/ps/usb/voltage_now"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'proto=none' && ok "无 online 节点也无输入 → none" || bad "无输入仍判协议: $line"
+
+echo "[8c] 有适配器但无协议字样时不再猜 PD"
+setup
+printf '1\n'       >"$ROOT/ps/usb/online"
+printf '9000000\n' >"$ROOT/ps/usb/voltage_max"
+printf '2000000\n' >"$ROOT/ps/usb/current_max"
+printf '0\n'       >"$ROOT/oplus/battery/charge_technology"
+printf '0\n'       >"$ROOT/oplus/battery/voocchg_ing"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'proto=unknown' && ok "9V/2A 无字样 → unknown" || bad "仍瞎猜协议: $line"
+echo "$line" | grep -q 'proto=pd'      && bad "无证据仍判 PD" || ok "无证据不判 PD"
+
+setup
+printf '1\n'  >"$ROOT/ps/usb/online"
+printf '14\n' >"$ROOT/oplus/battery/charge_technology"
+line=$(run_sh 'sd_chg_line')
+echo "$line" | grep -q 'proto=pd' && ok "tech=14 → pd（有依据）" || bad "tech=14 判错: $line"
+
 echo "[9] 一行里带输入侧实测与两侧功率"
 setup
 printf '2030000\n' >"$ROOT/ps/usb/current_now"
