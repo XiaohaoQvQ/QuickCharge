@@ -211,11 +211,11 @@
     <span class="chev"></span>
   </div>
   <div class="bd" id="foldMainBd"><div class="bd-in">
-  <div class="hint" style="margin:-2px 0 10px">滑块左右拖动调整，松手生效；点按不会跳值，上下滑页面时扫到也不会误改。</div>
+  <div class="hint" style="margin:-2px 0 10px">拖动调整，松手生效；滑页面扫到不会误改。</div>
 
   <div class="row"><label for="aggr">温控档位</label><span class="val" id="aggrV">—</span></div>
   <div class="rw"><input type="range" id="aggr" min="0" max="10" step="1"></div>
-  <div class="switch" style="margin-top:2px">档位越高压得越狠，可拉开温差 = 2 + 档位</div>
+  <div class="switch" style="margin-top:2px">温差 = 2 + 档位，越高压得越狠</div>
 
   <div class="row" style="margin-top:18px">
     <label for="wall">温度墙</label>
@@ -228,11 +228,11 @@
 
   <div class="row" style="margin-top:18px"><label for="curredge">限流提前量</label><span class="val" id="curredgeV">—</span></div>
   <div class="rw"><input type="range" id="curredge" min="0" max="6" step="1" value="4"></div>
-  <div class="switch" style="margin-top:2px">0 = 一直顶到墙才降流；数值越大越保守，离墙还远就提前降</div>
+  <div class="switch" style="margin-top:2px">0 = 到墙才降；越大越早降</div>
 
   <div class="row" style="margin-top:18px"><label for="shell">基准温度</label><span class="val" id="shellV">—</span></div>
   <div class="rw"><input type="range" id="shell" min="25" max="60" step="1"></div>
-  <div class="switch" id="shellHint">系统看到的温度上限；真实温度低于它时不会改写</div>
+  <div class="switch" id="shellHint">改写上限；真实低于它时不改写</div>
 
   </div></div>
 </div>
@@ -265,12 +265,12 @@
   <div class="switch" style="margin-top:2px">
     <input type="checkbox" id="battSpOff"><label for="battSpOff">关闭电池 NTC 伪装（电池温度保持真实）</label>
   </div>
-  <div class="switch" id="battSpHint" style="margin-top:2px">按此值上报；真实 ≥46℃ 自动撤销并冷却</div>
+  <div class="switch" id="battSpHint" style="margin-top:2px">按此值上报；≥46℃ 撤销</div>
 
   <div class="switch" style="margin-top:18px">
     <input type="checkbox" id="thermalOff"><label for="thermalOff">停用系统热管理（horae）</label>
   </div>
-  <div class="switch" id="thermalHint" style="margin-top:2px">停掉欧加的温度策略服务，不再按温度降频；散热后果自己承担</div>
+  <div class="switch" id="thermalHint" style="margin-top:2px">停掉欧加温控服务，不再按温度降频</div>
   </div></div>
 </div>
 
@@ -620,22 +620,20 @@
   function hzText(d) {
     if (!d.hz || d.hz === "off") return "";
     switch (d.hz_state) {
-      case "drift":     return "键已被系统改回，锁定未生效";
-      case "low_power": return "省电模式开启，系统会强制 60Hz，锁定无效";
+      case "drift":     return "已被系统改回";
+      case "low_power": return "省电模式 · 锁定无效";
       case "ok":        return hzHard
-        ? "强制锁定 " + d.hz + "Hz · 每 15 秒回读补写"
-        : d.hz + "Hz 已写入 · 系统仍可按内容降频";
-      default:          return "写入 " + d.hz + "Hz";
+        ? "锁定 " + d.hz + "Hz · 定时补写"
+        : d.hz + "Hz · 系统可降频";
+      default:          return d.hz + "Hz";
     }
   }
   function modeText(d) {
     switch (d.mode) {
-      case "static": return "任何场景都改写：插电、拔电、游戏、待机都生效";
-      case "charge": return d.charging
-        ? "插电中 · 自定义温控生效，拔电后 10 秒内还原真实温度"
-        : "未插电 · 当前用系统原温控，插电后自动接管";
-      case "off":    return "不改写任何温控节点，读数全部是真实值";
-      default:       return "选择改写范围，点一下立即生效";
+      case "static": return "任何场景都改写";
+      case "charge": return d.charging ? "插电中 · 已接管" : "未插电 · 插电后接管";
+      case "off":    return "不改写 · 读数为真实值";
+      default:       return "选择改写范围";
     }
   }
   function rewritten(d) {
@@ -649,40 +647,26 @@
     return n;
   }
   function summary(d) {
-    if (!d.daemon) return "守护没在跑，改参数不会生效。点下面「重启守护」。";
-    if (d.mode === "off") return "未改写：系统读到的是真实温度，只有配置文件改写生效。";
-    if (d.mode === "charge" && !d.charging) return "待机：拔电时用系统原温控，插上充电器后自动接管。";
+    var r = (d.real === null || d.real === undefined) ? null : d.real;
+    if (!d.daemon) return "守护未运行";
+    if (d.mode === "off") return r === null ? "未改写" : "未改写 · 真实 <b>" + r + "℃</b>";
+    if (d.mode === "charge" && !d.charging) return "待机 · 插电后接管";
     if (rewritten(d)) {
-      if (d.emul_ok === 0) {
-        return "目标 <b>" + d.target + "℃</b> 算出来了，但一个节点都写不进去（没有 emul_temp 或被拒写），" +
-               "系统实际仍在读真实温度。跑一次 <code>action.sh probe</code> 看节点情况。";
-      }
-      return d.real === null || d.real === undefined
-        ? "改写中：系统看到的温度固定为 <b>" + d.target + "℃</b>，真实温度读不到。"
-        : "改写中：真实 <b>" + d.real + "℃</b> → 系统看到 <b>" + d.target + "℃</b>";
+      if (d.emul_ok === 0) return "写入失败 · 系统仍读真实温度";
+      return r === null
+        ? "改写中 · 报 <b>" + d.target + "℃</b>"
+        : "真实 <b>" + r + "℃</b> → 报 <b>" + d.target + "℃</b>";
     }
-    if (d.wall && d.real !== null && d.real !== undefined &&
-        Number(d.real) >= Number(d.wall)) {
-      return "已停止改写：真实 <b>" + d.real + "℃</b>" +
-             (d.sentinel && d.sentinel !== "none" ? "（" + d.sentinel + "）" : "") +
-             " 已达到温度墙 <b>" + d.wall + "℃</b>，模块把控制权交回系统。" +
-             "想让它在这么高的温度下继续压制，把墙调高即可。";
-    }
-    if (d.real === null || d.real === undefined) {
-      return "读不到真实温度，模块不知道该报多少，所以没有改写。" +
-             (d.real_why ? "原因：<b>" + d.real_why + "</b>。" : "") +
-             "点下面「环境自检」看是温区、权限还是守护的问题。";
-    }
-    if (d.base_clamped) {
-      return "参数打架：基准 <b>" + (d.shell_set || d.shell_temp) + "℃</b> 不低于停止线 <b>" +
-             (d.barrier || "—") + "℃</b>，可改写的区间是空的，所以系统一直看到真实温度。" +
-             "把基准降到 30~33℃ 才会真正压低读数。";
-    }
-    if (d.real !== null && d.real !== undefined && d.shell_temp && d.real < d.shell_temp) {
-      return "未改写：真实 <b>" + d.real + "℃</b> 已低于基准 <b>" + d.shell_temp + "℃</b>，" +
-             "没有继续压低的必要。模块只把高温往低压，不会凭空报出更低的温度。";
-    }
-    return "未改写：系统读到的是真实温度。";
+    if (d.wall && r !== null && Number(r) >= Number(d.wall))
+      return "真实 <b>" + r + "℃</b> ≥ 墙 <b>" + d.wall + "℃</b> · 交回系统";
+    if (r === null)
+      return "读不到真实温度" + (d.real_why ? " · <b>" + d.real_why + "</b>" : "");
+    if (d.base_clamped)
+      return "基准 <b>" + (d.shell_set || d.shell_temp) + "℃</b> ≥ 停止线 <b>" +
+             (d.barrier || "—") + "℃</b> · 区间为空";
+    if (d.shell_temp && r < d.shell_temp)
+      return "真实 <b>" + r + "℃</b> &lt; 基准 <b>" + d.shell_temp + "℃</b>";
+    return "未改写 · 真实 <b>" + r + "℃</b>";
   }
   function render(d) {
     $("ver").textContent = "v" + (d.version || "—");
@@ -761,10 +745,10 @@
         : d.shell_temp + "℃";
     }
     $("shellHint").textContent = d.base_clamped
-      ? "基准不低于停止线，伪装区间为空；建议改成 30~33℃"
+      ? "基准 ≥ 停止线，区间为空；建议 30~33℃"
       : (d.wall === "off"
-          ? "系统看到的温度上限；真实温度低于它时不会改写"
-          : "必须低于温度墙 " + d.wall + "℃；真实温度低于它时不会改写");
+          ? "改写上限；真实低于它时不改写"
+          : "须低于墙 " + d.wall + "℃；真实低于它时不改写");
     if (rngPush("batt", d.battery_limit === "off" ? 48 : d.battery_limit)) {
       $("battV").textContent = d.battery_limit === "off" ? "关" : d.battery_limit + "℃";
     }
@@ -786,7 +770,7 @@
     $("thermalOff").checked = d.thermal === "off";
     $("thermalHint").textContent = d.thermal === "off"
       ? "horae 已停：系统不再按温度降频"
-      : "停掉欧加的温度策略服务，不再按温度降频；散热后果自己承担";
+      : "停掉欧加温控服务，不再按温度降频";
     $("sumExtreme").textContent = (bsp > 0 || d.thermal === "off")
       ? (bsp > 0 ? "电池 " + bsp + "℃" : "") +
         (bsp > 0 && d.thermal === "off" ? " · " : "") +
