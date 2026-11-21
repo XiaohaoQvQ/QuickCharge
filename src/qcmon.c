@@ -174,11 +174,23 @@ static void shell_emul_reset(void);
  * 这种写法不依赖 tzdata。 */
 static void tz_init(void)
 {
-    FILE *f = popen("date +%z 2>/dev/null", "r");
-    if (!f) return;
+    /* service.sh 一定跑在正常环境里，date 拿得到偏移；先认它导出的 SD_TZ，
+     * 免得静态二进制里 popen 找不到 sh / date 时整份日志退回 UTC。 */
+    const char *env = getenv("SD_TZ");
     char b[16] = {0};
-    if (fgets(b, sizeof b, f) && (b[0] == '+' || b[0] == '-') &&
-        isdigit((unsigned char)b[1]) && isdigit((unsigned char)b[2]) &&
+    FILE *f = NULL;
+    if (env && (env[0] == '+' || env[0] == '-')) {
+        snprintf(b, sizeof b, "%s", env);
+    } else {
+        f = popen("/system/bin/date +%z 2>/dev/null", "r");
+        if (!f) f = popen("date +%z 2>/dev/null", "r");
+        if (!f) return;
+        if (!fgets(b, sizeof b, f) || !(b[0] == '+' || b[0] == '-')) {
+            pclose(f);
+            return;
+        }
+    }
+    if (isdigit((unsigned char)b[1]) && isdigit((unsigned char)b[2]) &&
         isdigit((unsigned char)b[3]) && isdigit((unsigned char)b[4])) {
         int hh = (b[1] - '0') * 10 + (b[2] - '0');
         int mm = (b[3] - '0') * 10 + (b[4] - '0');
@@ -190,7 +202,7 @@ static void tz_init(void)
             tzset();
         }
     }
-    pclose(f);
+    if (f) pclose(f);
 }
 
 static void ts_str(char *out, size_t n)
@@ -1591,7 +1603,6 @@ static void cool_tick(void)
 static char g_chg_last[384];
 static char g_chg_key[384];
 static char g_chg_last_st[24];
-static char g_proto_last[16];
 static long g_chg_at;
 static long g_chg_scan;
 
@@ -1752,63 +1763,6 @@ static long chg_input(void)
     return best > 0 ? best : -1;
 }
 
-/* 适配器在位判定。usb/voltage_max、current_max 是「端口能力上限」，拔线后
- * 仍常驻 5V/500mA（标准 SDP），拿它判协议会把没插电显示成 PD。
- * online: 1/0 来自 usb/online 或 usb/present，-1 表示读不到。 */
-static int usb_present_of(long online, long vusb, long iusb, const char *st)
-{
-    if (online == 1) return 1;
-    if (online == 0) return 0;
-    if (vusb >= 4000000 && iusb >= 100000) return 1;
-    if (st && (strstr(st, "Charging") || strstr(st, "Full"))) return 1;
-    return 0;
-}
-
-/* 与 shell 的 sd_proto_resolve 保持同一套判定。
- * 欧加的 usb/type 只报 USB_DCP，私有协议在线时也是它；以前拿
- * 「≥8V 且 ≥2A」猜 PPS，30W 的 VOOC 被显示成公有快充。 */
-static const char *chg_proto(const char *type, const char *rtype, long vooc, long tech,
-                            long vmax, long cmax, int present)
-{
-    if (!present) return "none";
-
-    /* 1) 欧加的 charge_technology 是驱动自己维护的档位：1~13 私有，14 起公有。
-     *    usb/type 在私有协议在线时也可能写 USB_PD（先 PD 握手再切 VOOC），
-     *    把它放在前面会把 30W VOOC 判成 PD。 */
-    if (tech >= 1 && tech <= 13) return "vooc";
-
-    /* 2) 类型串里的私有协议字样能压过 tech=14（降档时 type 还留着旧值） */
-    for (int i = 0; i < 2; i++) {
-        const char *s = i ? type : rtype;
-        if (!s || !s[0]) continue;
-        if (strstr(s, "VOOC") || strstr(s, "DART") || strstr(s, "Flash")) return "vooc";
-    }
-
-    /* 3) 驱动自己置的「正在 VOOC 充电」 */
-    if (vooc == 1) return "vooc";
-
-    /* 4) 公有协议字样 */
-    for (int i = 0; i < 2; i++) {
-        const char *s = i ? type : rtype;
-        if (!s || !s[0]) continue;
-        if (strstr(s, "PPS")) return "pps";
-        if (strstr(s, "UFCS")) return "ufcs";
-    }
-
-    /* 5) 到这一步 tech 只剩 >=14：私有档已退 */
-    if (tech >= 14) return "pd";
-
-    /* 6) 最后才信类型串里的 PD */
-    for (int i = 0; i < 2; i++) {
-        const char *s = i ? type : rtype;
-        if (s && s[0] && strstr(s, "PD")) return "pd";
-    }
-
-    if (vmax >= 8000000 && cmax >= 5000000) return "vooc";
-    /* 没有协议字样就不猜：9V/2A 既可能是 PD 固定档，也可能是 VOOC 掉档 */
-    return "unknown";
-}
-
 /* 组装一行充电现场。sig 非空时同时输出判重签名：
  * 电量按 5%、温度按 2℃ 归并，未充电时只比它，避免电压抖几十 mV 就落一条。 */
 static void chg_line(char *out, size_t n, char *sig, size_t sn)
@@ -1855,9 +1809,6 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
 
     int bt = batt_temp_ps();
 
-    const char *proto = chg_proto(type, rtype, vooc, tech, vmax, imax,
-                                  usb_present_of(online, vusb, iusb, st));
-
     fmt_uv(vusb, 2, a, sizeof a);
     fmt_uv(imax, 2, b2, sizeof b2);
     fmt_uv(vbat, 3, b3, sizeof b3);
@@ -1874,10 +1825,10 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
         snprintf(pbs, sizeof pbs, "%.1f", (double)iabs * (double)vbat / 1e12);
     }
     snprintf(out, n,
-             "vusb=%sV iusb=%sA imax=%sA vbat=%sV ibat=%s pin=%sW pb=%sW %ld%% %s cool=%ld vooc=%ld tech=%ld type=%s rtype=%s scr=%d proto=%s cells=? status=%s",
+             "vusb=%sV iusb=%sA imax=%sA vbat=%sV ibat=%s pin=%sW pb=%sW %ld%% %s cool=%ld vooc=%ld tech=%ld type=%s rtype=%s scr=%d cells=? status=%s",
              a, ibs, b2, b3, ib, pins, pbs,
              cap, tb,
-             cool, vooc, tech, type[0] ? type : "?", rtype[0] ? rtype : "?", g_screen_on, proto, st);
+             cool, vooc, tech, type[0] ? type : "?", rtype[0] ? rtype : "?", g_screen_on, st);
     if (sig && sn) {
         /* 判重不看 vbat/ibat 瞬时值：bcc 电流会在两档间脉动（4.4V 电芯 ~60mΩ 内阻，
          * ±600mA 正好对应 ±40mV），按 100mV/200mA 分档照样每轮跨档，日志被灌成 3 秒一条。
@@ -1890,9 +1841,10 @@ static void chg_line(char *out, size_t n, char *sig, size_t sn)
             pwk = ibm * vbat / 1000000000L;
         }
         snprintf(sig, sn,
-                 "st=%s pw=%ldW cap=%ld bt=%d usb=%s imax=%s type=%s cool=%ld vooc=%ld tech=%ld scr=%d proto=%s",
+                 "st=%s pw=%ldW cap=%ld bt=%d usb=%ld imax=%s type=%s cool=%ld vooc=%ld tech=%ld scr=%d",
                  st, pwk, cap < 0 ? 0 : cap / 5 * 5, bt < 0 ? 0 : bt / 2 * 2,
-                 a, b2, type[0] ? type : "?", cool, vooc, tech, g_screen_on, proto);
+                 vusb > 0 ? (vusb + 500000) / 1000000 : -1, b2, type[0] ? type : "?", cool, vooc, tech,
+                 g_screen_on);
     }
 }
 
@@ -1914,17 +1866,6 @@ static void chg_snapshot(int charging)
     if (strcmp(g_chg_last_st, st)) {
         snprintf(g_chg_last_st, sizeof g_chg_last_st, "%s", st);
         why = g_chg_key[0] ? (charging ? "插电" : "停充") : "首帧";
-    }
-
-    /* 协议切换单独记一条：曲线正常却显示公有快充时，看这行就能定位 */
-    const char *pr = strstr(line, "proto=");
-    if (pr) {
-        char pv[16] = "";
-        sscanf(pr + 6, "%15s", pv);
-        if (pv[0] && strcmp(pv, g_proto_last)) {
-            log_msg("I", "proto", "→ %s（type/vooc/tech 见下一行）", pv);
-            snprintf(g_proto_last, sizeof g_proto_last, "%s", pv);
-        }
     }
 
     if (!strcmp(key, g_chg_key)) {
@@ -2892,24 +2833,8 @@ static void log_env(void)
     path_num(p, &cmax);
     vmax = uv_norm(vmax);
     cmax = uv_norm(cmax);
-    {
-        long online = -1, vusb = -1, iusb = -1;
-        char envst[32] = "";
-        snprintf(p, sizeof p, "%s/usb/online", g_ps);
-        if (path_num(p, &online) < 0) {
-            snprintf(p, sizeof p, "%s/usb/present", g_ps);
-            path_num(p, &online);
-        }
-        snprintf(p, sizeof p, "%s/usb/voltage_now", g_ps);
-        path_num(p, &vusb);
-        vusb = uv_norm(vusb);
-        iusb = chg_input();
-        batt_status(envst, sizeof envst);
-        log_msg("I", "env", "usb type=%s real_type=%s vooc=%ld tech=%ld vmax=%ld cmax=%ld proto=%s",
-                type[0] ? type : "?", rt[0] ? rt : "?", vooc, tech, vmax, cmax,
-                chg_proto(type, rt, vooc, tech, vmax, cmax,
-                          usb_present_of(online, vusb, iusb, envst)));
-    }
+    log_msg("I", "env", "usb type=%s real_type=%s vooc=%ld tech=%ld vmax=%ld cmax=%ld",
+            type[0] ? type : "?", rt[0] ? rt : "?", vooc, tech, vmax, cmax);
 
     screen_scan();
     log_msg("I", "env", "screen bl=%s nodes=%d fb=%s 判定=%s",

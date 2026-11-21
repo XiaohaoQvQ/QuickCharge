@@ -91,6 +91,10 @@ sd_daemon() {
             export SD_DATA
             export SD_MODDIR="$MODDIR"
             export MODDIR
+            # 静态守护没有 tzdata，localtime_r 会落 UTC；这里把当前偏移交过去，
+            # 日志时间才和脚本行一致（+0800）。
+            SD_TZ=$(date +%z 2>/dev/null)
+            [ -n "$SD_TZ" ] && export SD_TZ
             sd_info daemon "切换到 C 守护 qcmon（shell 版本仍可用 SD_SHELL_DAEMON=1 强制）"
             rm -rf "$lock" 2>/dev/null
             exec "$MODDIR/bin/qcmon"

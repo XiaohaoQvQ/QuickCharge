@@ -878,7 +878,8 @@
       if (d.cells === 2) tag.push("双电芯");
       if (d.plat === "mtk") tag.push("MTK");
       else if (d.plat === "qcom") tag.push("高通");
-      if (d.proto === "none") tag.push("未接充电器");
+      var stt = d.status || "Unknown";
+      if (stt !== "Charging" && stt !== "Full") tag.push("未接充电器");
       $("psrc").textContent = tag.join(" · ");
       $("psrc").style.display = tag.length ? "" : "none";
       $("pma").textContent = d.ma === null ? "—" : d.ma + " mA";

@@ -2778,6 +2778,22 @@ eq "$(md5sum "$D49/plain.prop" | cut -d' ' -f1)" "$_b49" "UTF-8 文件只读不�
 [ -f "$D49/plain.prop.utf16.bak" ] && ng "UTF-8 文件被误备份" || ok "UTF-8 文件没被误处理"
 rm -rf "$D49"
 
+# ---------------------------------------------------------------- T50 日志不带协议结论
+# 面板 2.9.67 起取消协议显示；日志只留 type/vooc/tech 现场，不写判定结果。
+for _f in /mod/lib/qc.sh /mod/src/qcmon.c; do
+    grep -q 'proto=%s' "$_f" && ng "仍输出 proto 字段: $_f" || ok "不再输出 proto 字段: $(basename "$_f")"
+done
+grep -q 'log_msg("I", "proto"' /mod/src/qcmon.c \
+    && ng "C 守护仍写 [proto] 事件" || ok "C 守护不再写 [proto] 事件"
+D50=/data/adb/qc-t50
+rm -rf "$D50"; mkdir -p "$D50/run"
+line=$(env SD_DATA=$D50 SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_chg_line' 2>/dev/null)
+case "$line" in
+    *proto=*) ng "充电行仍带 proto: $line" ;;
+    *)        ok "充电行不带 proto" ;;
+esac
+rm -rf "$D50"
+
 # 失败清单放在最后统一列一遍：滚动日志里翻不到的那几条，这里能一次看全
 if [ "$FAIL" -gt 0 ]; then
     printf '\n===== 失败清单 =====\n%s' "$FAILED"

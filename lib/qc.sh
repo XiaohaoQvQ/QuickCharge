@@ -136,7 +136,10 @@ sd_set_log() {
     _sd_lv=$v
     sd_session log "日志开启 level=$v"
     sd_dump_env
-    [ "$v" -ge 2 ] && sd_chg_snapshot 1
+    # C 守护下一拍就会打首帧，shell 再打一条只会在同一秒里重复一遍
+    if [ "$v" -ge 2 ] && ! sd_daemon_is_c; then
+        sd_chg_snapshot 1
+    fi
     return 0
 }
 
@@ -151,7 +154,7 @@ sd_session() {
 }
 
 sd_dump_env() {
-    local dev rom kver zones emul sentinel stype stemp slim _e _sh
+    local dev rom kver zones emul sentinel stype stemp slim _e _sh _emul_n _emul_head
     dev="$(getprop ro.product.odm.manufacturer 2>/dev/null) $(getprop ro.product.model 2>/dev/null)"
     dev=$(printf '%s' "$dev" | sed 's/^ *//; s/ *$//')
     rom=$(getprop ro.build.display.id 2>/dev/null)
@@ -161,10 +164,16 @@ sd_dump_env() {
 
     zones=0
     emul=""
+    _emul_n=0
     for _e in $_sd_zones; do
         zones=$((zones + 1))
-        [ -e "${_e%%:*}/emul_temp" ] && emul="$emul $(basename "${_e%%:*}")"
+        [ -e "${_e%%:*}/emul_temp" ] || continue
+        _emul_n=$((_emul_n + 1))
+        [ "$_emul_n" -le 3 ] && emul="$emul $(basename "${_e%%:*}")"
     done
+    # 80 个温区名铺一行会把日志冲成几百字符，只留数量和前三个
+    _emul_head=""
+    [ "$_emul_n" -gt 3 ] && _emul_head="（${emul# } …）"
     [ -e /proc/shell-temp ] && _sh=yes || _sh=no
 
     sentinel=""
@@ -182,10 +191,7 @@ sd_dump_env() {
     [ -x "$MODDIR/bin/qcmon" ] && cv=$("$MODDIR/bin/qcmon" -v 2>/dev/null | head -1)
     _sd_emit I env "module=${mv:-?} daemon=${cv:-shell（无 C 守护）}"
     sd_plat_resolve
-    _sd_proto=""; _sd_proto_why=""
-    sd_proto_resolve
-    _sd_emit I env "soc=${_sd_plat}（${_sd_plat_why}） proto=${_sd_proto}（${_sd_proto_why}）"
-    _sd_emit I env "zones=$zones emul=[${emul# }] shell-temp=$_sh charge-nodes=$(sd_curr_nodes 2>/dev/null | wc -l | tr -d ' ')"
+    _sd_emit I env "soc=${_sd_plat}（${_sd_plat_why}） emul=$_emul_n${_emul_head} shell-temp=$_sh charge-nodes=$(sd_curr_nodes 2>/dev/null | wc -l | tr -d ' ')"
     if [ -n "$sentinel" ]; then
         _sd_emit I env "sentinel=$(basename "$sentinel") type=${stype:-?} temp=${stemp:-?}℃ limit=${slim:-?}℃"
     else
@@ -645,6 +651,14 @@ sd_pid_is_daemon() {
         return 1
     fi
     sd_hb_age && [ "$_sd_rv" -le 90 ] && [ "${_sd_hb_pid:-}" = "$pid" ]
+}
+
+# 守护是不是 C 版。用来避免 shell 与 qcmon 同时写同一现场。
+sd_daemon_is_c() {
+    local pid
+    pid=$(sd_daemon_pid 2>/dev/null) || return 1
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    tr '\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q qcmon
 }
 
 sd_daemon_pid() {
@@ -3280,8 +3294,8 @@ sd_chg_current_v() {
 # 填 _sd_chg_line_v（日志行）与 _sd_chg_sig_v（判重签名）。
 # 用全局变量而不是命令替换，两个结果才都留得住。
 sd_chg_line_fill() {
-    local cap vbat ibat vusb iusb imax type rtype cool vooc tech bt st f capk btk pwk pwc ibm
-    local pin pb cells proto ibs
+    local cap vbat ibat vusb iusb imax type rtype cool vooc tech bt st f capk btk pwk pwc ibm usbk
+    local pin pb cells ibs
     st=""; sd_batt_status_v && st=$_sd_rv
     cap=""; sd_ps_attr_v capacity && cap=$_sd_rv
     vbat=""; sd_ps_attr_v voltage_now && vbat=$_sd_rv
@@ -3316,12 +3330,6 @@ sd_chg_line_fill() {
     case "$pin" in ''|*[!0-9.]*|-1) pin="?" ;; esac
     case "$pb"  in ''|*[!0-9.]*|-1) pb="?"  ;; esac
 
-    # 协议会随插拔变化，缓存必须每行重算；否则同一个守护进程里
-    # 换了充电器，日志里还写着上一台的协议。
-    _sd_proto=""; _sd_proto_why=""
-    sd_proto_resolve
-    proto=$_sd_proto
-
     f=$(_sd_chg_fmt "$vusb" "$imax" "$vbat" "$ibat")
     # shellcheck disable=SC2086
     set -- $f
@@ -3331,9 +3339,9 @@ sd_chg_line_fill() {
         ibs="?"
     fi
     case "$ibs" in ''|*[!0-9.]*) ibs="?" ;; esac
-    _sd_chg_line_v=$(printf 'vusb=%sV iusb=%sA imax=%sA vbat=%sV ibat=%smA pin=%sW pb=%sW %s%% %s℃ cool=%s vooc=%s tech=%s type=%s rtype=%s scr=%s proto=%s cells=%s status=%s' \
+    _sd_chg_line_v=$(printf 'vusb=%sV iusb=%sA imax=%sA vbat=%sV ibat=%smA pin=%sW pb=%sW %s%% %s℃ cool=%s vooc=%s tech=%s type=%s rtype=%s scr=%s cells=%s status=%s' \
         "$1" "$ibs" "$2" "$3" "$4" "$pin" "$pb" "${cap:-?}" "${bt:-?}" "${cool:-?}" "${vooc:-?}" \
-        "${tech:-?}" "${type:-?}" "${rtype:-?}" "${_sd_screen_on:-?}" "${proto:-?}" "$cells" "${st:-?}")
+        "${tech:-?}" "${type:-?}" "${rtype:-?}" "${_sd_screen_on:-?}" "$cells" "${st:-?}")
 
     capk=${cap:-0}; btk=${bt:-0}
     case "$capk" in ''|*[!0-9]*) capk=0 ;; esac
@@ -3353,7 +3361,9 @@ sd_chg_line_fill() {
         pwk=$(( ibm * vbat / 1000000000 ))
     fi
 
-    _sd_chg_sig_v="st=${st:-?} pw=${pwk}W cap=$((capk / 5 * 5)) bt=$((btk / 2 * 2)) usb=${vusb:-?} imax=${imax:-?} type=${type:-?} cool=${cool:-?} vooc=${vooc:-?} tech=${tech:-?} scr=${_sd_screen_on:-?} proto=${proto:-?}"
+    usbk=-1
+    case "${vusb:-}" in ''|*[!0-9]*) ;; *) usbk=$(( (${vusb} + 500000) / 1000000 )) ;; esac
+    _sd_chg_sig_v="st=${st:-?} pw=${pwk}W cap=$((capk / 5 * 5)) bt=$((btk / 2 * 2)) usb=$usbk imax=${imax:-?} type=${type:-?} cool=${cool:-?} vooc=${vooc:-?} tech=${tech:-?} scr=${_sd_screen_on:-?}"
 }
 
 sd_chg_line() {
@@ -3386,12 +3396,6 @@ sd_chg_snapshot() {
         if [ "$charging" = 1 ]; then why=插电; else why=停充; fi
     fi
     _sd_chg_last_st=$st
-
-    # 协议切换单独记一条事件：曲线正常但显示成公有快充时，看这一行就能定位
-    if [ -n "$_sd_proto" ] && [ "$_sd_proto" != "${_sd_proto_last:-}" ]; then
-        sd_info proto "→ ${_sd_proto}（${_sd_proto_why}）"
-        _sd_proto_last=$_sd_proto
-    fi
 
     if [ "$key" = "$_sd_chg_key" ]; then
         if [ "$charging" = 1 ] && [ $((now - _sd_chg_at)) -ge 600 ]; then
@@ -3903,11 +3907,11 @@ sd_power_json() {
     case "$st" in *\"*|*\\*) st="" ;; esac
 
     sd_plat_resolve
-    sd_proto_resolve
 
-    printf '{"ma":%s,"mv":%s,"w":%s,"wr":%s,"status":"%s","cap":%s,"temp":%s,"cells":%s,"cells_src":"%s","src":"%s","plat":"%s","proto":"%s"}\n' \
+    # 不再输出 protocol：面板 2.9.67 起就不显示，"未接充电器"由 status 判断。
+    printf '{"ma":%s,"mv":%s,"w":%s,"wr":%s,"status":"%s","cap":%s,"temp":%s,"cells":%s,"cells_src":"%s","src":"%s","plat":"%s"}\n' \
         "${ma:-null}" "${mv:-null}" "${w:-null}" "${w_raw:-null}" "${st:-Unknown}" "${cap:-null}" "${t:-null}" \
-        "$cells" "${_sd_cell_src:-default}" "$src" "$_sd_plat" "$_sd_proto"
+        "$cells" "${_sd_cell_src:-default}" "$src" "$_sd_plat"
 }
 
 SD_DESC_LAST="$SD_RUN/desc.last"
