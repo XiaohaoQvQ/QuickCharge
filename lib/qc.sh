@@ -177,7 +177,7 @@ sd_dump_env() {
 
     _sd_emit I env "device=${dev:-?} rom=${rom:-?} kernel=${kver:-?}"
     local mv cv
-    mv=$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
+    mv=$(sd_prop_get version)
     cv=""
     [ -x "$MODDIR/bin/qcmon" ] && cv=$("$MODDIR/bin/qcmon" -v 2>/dev/null | head -1)
     _sd_emit I env "module=${mv:-?} daemon=${cv:-shell（无 C 守护）}"
@@ -218,7 +218,7 @@ sd_check() {
 
     printf '== Quick Charge 适配检查 ==\n'
     printf '模块: v%s · %s / Android %s\n' \
-        "$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)" \
+        "$(sd_prop_get version)" \
         "$(getprop ro.soc.model 2>/dev/null || echo '?')" \
         "$(getprop ro.build.version.release 2>/dev/null || echo '?')"
 
@@ -344,7 +344,7 @@ sd_check() {
 sd_probe() {
     local z t v n=0 ok=0 p line pid s up r lim zn out md em a why zv pd
     printf '== Quick Charge probe ==\n'
-    printf '模块: %s  %s\n' "$MODDIR" "$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null)"
+    printf '模块: %s  %s\n' "$MODDIR" "v$(sd_prop_get version)"
     v=""; read -r v 2>/dev/null < /proc/self/attr/current
     printf 'SELinux: %s · %s\n' "${v:-未知}" "$(getenforce 2>/dev/null || echo '?')"
     if pid=$(sd_daemon_pid 2>/dev/null); then
@@ -2175,7 +2175,7 @@ sd_transform() {
 
 sd_fingerprint() {
     local vc off
-    vc=$(grep '^versioncode=' "${MODDIR:-.}/module.prop" 2>/dev/null | cut -d= -f2)
+    vc=$(sd_prop_get versioncode)
     off=$(sd_state_int curve_offset 120 0 300)
     printf '%s-%s-%s-%s' \
         "$(getprop ro.build.display.id)" \
@@ -3964,8 +3964,57 @@ sd_desc_text() {
     printf '%s' "$t"
 }
 
+# module.prop 被编辑器按 UTF-16 存过时，每个字符后面跟一个 NUL，整份文件在
+# grep 眼里就是二进制，输出 "Binary file ... matches" 而不是内容——面板版本号
+# 于是显示成 "vBinary file /data/adb/modules/quickcharge/module.prop matches"。
+sd_prop_has_nul() {
+    local f="$1"
+    [ -f "$f" ] || return 1
+    [ "$(tr -d '\000' <"$f" 2>/dev/null | wc -c)" -ne "$(wc -c <"$f" 2>/dev/null)" ]
+}
+
+# 有 NUL 就转回 UTF-8。BOM 有无、大小端都可能，逐个试；iconv 缺失或全失败时
+# 退化成删 NUL（只对纯 ASCII 内容正确）。原文件留一份 .utf16.bak。
+sd_prop_fix() {
+    local f="${1:-$MODDIR/module.prop}" t enc="" ok=0
+    sd_prop_has_nul "$f" || return 0
+    mkdir -p "$SD_DATA" 2>/dev/null
+    t="$SD_DATA/.prop.$$.tmp"
+    if command -v iconv >/dev/null 2>&1; then
+        for enc in UTF-16 UTF-16LE UTF-16BE; do
+            iconv -f "$enc" -t UTF-8 "$f" >"$t" 2>/dev/null || continue
+            [ -s "$t" ] || continue
+            sd_prop_has_nul "$t" && continue
+            # U+FFFD 说明编码猜错了，中文会变问号，宁可换下一种
+            grep -q "$(printf '\357\277\275')" "$t" 2>/dev/null && continue
+            ok=1; break
+        done
+    fi
+    if [ "$ok" != 1 ]; then
+        enc=""
+        tr -d '\000' <"$f" >"$t" 2>/dev/null
+        if [ -s "$t" ] && ! sd_prop_has_nul "$t"; then ok=1; fi
+    fi
+    if [ "$ok" = 1 ]; then
+        cp -f "$f" "$f.utf16.bak" 2>/dev/null
+        mv -f "$t" "$f" 2>/dev/null
+        _sd_emit W prop "module.prop 不是 UTF-8（${enc:-删 NUL}），已转回，原件存为 module.prop.utf16.bak"
+    fi
+    rm -f "$t" 2>/dev/null
+    return 0
+}
+
+# 统一走 -a：即使修复失败也不让 "Binary file ... matches" 混进版本号
+sd_prop_get() {
+    local k="$1" f="${2:-$MODDIR/module.prop}"
+    [ -f "$f" ] || return 1
+    sd_prop_fix "$f"
+    grep -a "^$k=" "$f" 2>/dev/null | head -1 | cut -d= -f2-
+}
+
 sd_sync_desc() {
     [ -n "${MODDIR:-}" ] && [ -f "$MODDIR/module.prop" ] || return 0
+    sd_prop_fix
     local d cur="" line tmp
     d=$(sd_desc_text)
 

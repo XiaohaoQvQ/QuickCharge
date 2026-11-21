@@ -216,7 +216,7 @@ sd_do_json() {
     case "$real" in ''|*[!0-9]*) rj=null ;; *) rj=$real ;; esac
 
     printf '{"version":"%s","mode":"%s","shell_temp":%s,"shell_set":%s,"target":%s,"aggr":%s,"gap":%s,' \
-        "$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)" \
+        "$(sd_prop_get version)" \
         "$mode" "$shv" "$shset" "$tgt" "$aggr" "$((2 + aggr))"
     printf '"wall":"%s","core":"%s","noncore":"%s","level":"%s",' \
         "$wall" "$c" "$nc" "$(sd_state_get log_level 0)"

@@ -23,7 +23,7 @@ SD_VERBOSE=
 SD_QQ_URL="https://qun.qq.com/universal-share/share?ac=1&authKey=sxretTuuUbT6DSq6WUsRcAhqpzEtEmLdUgjcJW5EFkih769NPI7mFOtBWBsiLb56&busi_data=eyJncm91cENvZGUiOiIxMDAzNDgxNjYwIiwidG9rZW4iOiJnaGZRMVVNSCtOZFNyWUV4cEk2bU9Jd05neVpwUmVkOTIxV3VpcVRwS2Iram1rNC81TmtnNUJ3MjRxYm9JcGJEIiwidWluIjoiMjExMTgzNTIyMCJ9&data=Gr9CwynFwy41T0Lgv3epv7_E3bgXVe1lKsqwWOnF338a3I7veanebrcFNu2aJI8_5AZAHr7NXTdhgkf2iFtq-g&svctype=4&tempid=h5_group_info"
 
 ui_print "*******************************"
-ui_print "  Quick Charge  v$(grep '^version=' "$MODDIR/module.prop" | cut -d= -f2)"
+ui_print "  Quick Charge  v$(sd_prop_get version)"
 ui_print "  by Xiaohao"
 ui_print "*******************************"
 
@@ -163,7 +163,7 @@ for m in /data/adb/modules/*; do
     [ -f "$m/module.prop" ] || continue
     [ "$(basename "$m")" = "$(basename "$MODDIR")" ] && continue
     if grep -qE '墓碑|温控|采样率|快充|充电守护|满血' "$m/module.prop" 2>/dev/null; then
-        ui_print "! 检测到可能冲突的模块: $(grep '^name=' "$m/module.prop" | cut -d= -f2-)"
+        ui_print "! 检测到可能冲突的模块: $(sd_prop_get name "$m/module.prop")"
     fi
 done
 

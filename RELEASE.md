@@ -1,30 +1,34 @@
-# Quick Charge v2.9.70（shell 版）
+# Quick Charge v2.9.71（shell 版）
 
-> 对应包：`QuickCharge-v2.9.70.zip` · `versioncode 29621`
+> 对应包：`QuickCharge-v2.9.71.zip` · `versioncode 29623`
 
-面板回到简洁形态：顶部状态牌撤掉，结论行恢复左对齐。模块状态只在管理器描述页显示。
+修面板版本号显示成 `vBinary file /data/adb/modules/quickcharge/module.prop matches` 的问题，并让 module.prop 以后不再被写坏。
 
-## 一、撤掉面板状态牌
+## 一、那句话是怎么来的
 
-2.9.69 在标题下方加了一整块状态牌（✓ 运行中 / ✕ 请重启 / ✕ 没运行），占掉首屏一行多的高度，信息和描述页重复。现在整块删除：HTML、`.mst` 样式、`setState` / `renderState`、连接失败时的三处文案，以及右上角小圆点的红色故障态，一并回滚到 2.9.68 的形态——圆点只表示守护在不在，点开面板第一屏就是温度与功率。
+`module.prop` 被编辑器按 UTF-16 存过一次后，每个字符后面都跟一个 NUL 字节。整份文件在 `grep` 眼里就是二进制，于是它不再输出内容，而是输出一句：
 
-`action.sh json` 里的 `module_state` / `module_why` 字段保留：描述同步靠它判定，删掉反而要拆两套逻辑。
+```
+Binary file /data/adb/modules/quickcharge/module.prop matches
+```
 
-## 二、结论行恢复左对齐
+面板取版本用的是 `grep '^version=' … | cut -d= -f2`，拿到的就是这句话；前端再拼一个 `v`，就成了 `vBinary file /data/adb/modules/quickcharge/module.prop matches`。文件本身没坏，管理器里模块名、作者都还在，只是所有 `grep` 读出来的字段都变成了这句提示。
 
-2.9.67 把「真实 41℃ < 基准 43℃」这一行居中，长句在窄屏上会跟上方四列错位；现在回到左对齐，与「真实 / 系统看到 / 配置 / 守护」四列左侧对齐。
+常见触发：用 MT 管理器 / VS Code 编辑 `module.prop` 后另存为「UTF-16」或「UTF-16 LE」；也有编辑器会在文件头写 BOM 后整份转码。
 
-## 三、描述页状态不变
+## 二、读取统一走 sd_prop_get
 
-`module.prop` 的三态描述照旧，管理器里仍然一眼看到跑没跑：
+新增两个函数：
 
-| 状态 | 描述 |
-|---|---|
-| 正常 | `✅ 运行中 · 温控档位 4/10（仅充电） · 配置 9 项` |
-| 刚装完 / 刚更新 | `❌ 请重启 · 重启后开始工作` |
-| 没运行 / 卡死 | `❌ 未运行 · 把 /data/adb/quickcharge/ 的日志发给作者` |
+- `sd_prop_has_nul`：比较 `tr -d '\000'` 前后的字节数，判断文件里有没有 NUL。
+- `sd_prop_fix`：有 NUL 就按 `UTF-16` / `UTF-16LE` / `UTF-16BE` 依次试 `iconv`，转出来的结果必须无 NUL、无 U+FFFD（否则说明端序猜错，中文会变问号）；`iconv` 缺失或全失败时退化成删 NUL。原文件先备份成 `module.prop.utf16.bak` 再原子替换。
+- `sd_prop_get <key> [file]`：先修再 `grep -a`，即使修复失败也不会把「Binary file」混进值里。
 
-判定顺序未改：先看守护；没守护再依次看 `modules_update`、`need_reboot`、本次开机的 `.boot_id`，命中任一即「待重启」，都不命中才是真故障。
+所有读点都换成了它：面板 `json` 的 `version`、启动日志的 `module=`、`action.sh check` 的版本行、`sd_fingerprint` 的 `versioncode`、安装脚本的标题与冲突提示。
+
+## 三、自愈时机
+
+`sd_sync_desc` 开头先 `sd_prop_fix`。守护启动、`action.sh json`、描述同步都会经过这里，所以升级后第一次开机就会把坏文件转回 UTF-8，不用手动改。修复只发生在检测到 NUL 时，正常 UTF-8 文件只读不写（`sim` 里对 md5 做了断言）。
 
 ## 验证
 
@@ -35,6 +39,6 @@
 | `cool-unit` | 20 |
 | `mount` / `zone` | 4 / 6 |
 | `state-unit` | 12 |
-| `sim` | 631（+3：状态牌与 `setState` 不残留、结论行未再居中）|
+| `sim` | 639（+8：UTF-16 读版本、不吐 Binary file、转回 UTF-8、中文一致、留备份、正常文件不动）|
 
-`sim` 里补了三条防回潮断言：`id="mst"`、`setState(` 不得出现在页面里，`.sum` 不得再带 `text-align:center`。
+`sim` 的 T49 用 `iconv -f UTF-8 -t UTF-16LE` 现场造一个坏文件，再跑 `sd_prop_get` 验证：版本号能读出来、没有 `Binary file` 字样、文件转回 UTF-8、描述与原文逐字相同、备份存在。

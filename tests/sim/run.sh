@@ -2748,6 +2748,36 @@ eq "$(rd48 "$D48/n_word")" "quiet-therm-adc" "读取：含连字符的名字完�
 printf '12345\n67890\n' >"$D48/n_two"
 eq "$(rd48 "$D48/n_two")" "12345" "读取：多行只取第一行"
 
+# ---------------------------------------------------------------- T49 module.prop 被存成 UTF-16
+# 编辑器（MT / VS Code）另存为 UTF-16 后，每个字符后面跟一个 NUL，整份文件在
+# grep 眼里是二进制，输出去的是 "Binary file ... matches"，面板版本号就成了那句。
+D49=/data/adb/qc-t49
+rm -rf "$D49"; mkdir -p "$D49/sd"
+cp /opt/qc/module.prop "$D49/u8.prop"
+iconv -f UTF-8 -t UTF-16LE "$D49/u8.prop" >"$D49/module.prop" 2>/dev/null ||
+    cp "$D49/u8.prop" "$D49/module.prop"
+t49() { env SD_DATA=$D49/sd MODDIR=$D49 "$@"; }
+
+eq "$(t49 sh -c '. /opt/qc/lib/qc.sh; sd_prop_get version')" \
+   "$(sed -n 's/^version=//p' /mod/module.prop)" "UTF-16：版本号读得出来"
+eq "$(t49 sh -c '. /opt/qc/lib/qc.sh; sd_prop_get version' | grep -c 'Binary file')" \
+   "0" "UTF-16：不再吐 Binary file 提示"
+eq "$(tr -d '\000' <"$D49/module.prop" | wc -c | tr -d ' ')" \
+   "$(wc -c <"$D49/module.prop" | tr -d ' ')" "UTF-16：文件已转回 UTF-8"
+eq "$(sed -n 's/^description=//p' "$D49/module.prop")" \
+   "$(sed -n 's/^description=//p' "$D49/u8.prop")" "UTF-16：转回后描述与原文一致"
+[ -f "$D49/module.prop.utf16.bak" ] && ok "UTF-16：原件留了备份" || ng "UTF-16：没留备份"
+eq "$(sed -n 's/^version=//p' "$D49/module.prop")" \
+   "$(sed -n 's/^version=//p' /mod/module.prop)" "UTF-16：修复后版本行未变"
+
+# 正常文件不该被动：只读一次，内容和 mtime 都不变
+cp "$D49/u8.prop" "$D49/plain.prop"
+_b49=$(md5sum "$D49/plain.prop" | cut -d' ' -f1)
+t49 sh -c '. /opt/qc/lib/qc.sh; sd_prop_get version' >/dev/null 2>&1
+eq "$(md5sum "$D49/plain.prop" | cut -d' ' -f1)" "$_b49" "UTF-8 文件只读不写"
+[ -f "$D49/plain.prop.utf16.bak" ] && ng "UTF-8 文件被误备份" || ok "UTF-8 文件没被误处理"
+rm -rf "$D49"
+
 # 失败清单放在最后统一列一遍：滚动日志里翻不到的那几条，这里能一次看全
 if [ "$FAIL" -gt 0 ]; then
     printf '\n===== 失败清单 =====\n%s' "$FAILED"
