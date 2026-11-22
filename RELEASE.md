@@ -33,7 +33,7 @@
 | 原来 | 现在 |
 |---|---|
 | `zones=80 emul=[thermal_zone0 thermal_zone1 … 80 个名字]` | `emul=80（thermal_zone0 thermal_zone1 thermal_zone2 …）` |
-| 每次读充电现场都因 9.0V↔9.2V 抖一条「变化」 | `usb` 按整伏四舍五入分档，9.0~9.4 同档；9V→5V 掉档仍立刻记 |
+| 每次读充电现场都因 9.0V↔9.2V 抖一条「变化」 | `usb` 按整伏四舍五入分档，9.0-9.4 同档；9V→5V 掉档仍立刻记 |
 | 开日志时 shell 与 C 各打一条「首帧」 | 有 C 守护时 shell 不再打，交给守护下一拍 |
 
 ## 验证
