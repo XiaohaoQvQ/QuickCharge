@@ -120,11 +120,15 @@ sd_do_status() {
     [ "$_sd_screen_ticks" -gt 0 ] || sd_screen_tick
     case "$(sd_scr_state)" in
         kernel) printf '亮屏快充  已接管（内核 ignore_screen_state）\n' ;;
-        fcc)    printf '亮屏快充  已接管（回写 FCC）\n' ;;
+        fcc)    if [ "$_sd_screen_on" = 0 ]; then
+                    printf '亮屏快充  已接管（回写 FCC，息屏保持）\n'
+                else
+                    printf '亮屏快充  已接管（回写 FCC）\n'
+                fi ;;
         none)   printf '亮屏快充  本机不支持（无屏幕状态参数）\n' ;;
         disabled) printf '亮屏快充  当前「关闭」模式，不接管\n' ;;
         *)      if [ "$_sd_screen_on" = 0 ]; then
-                    printf '亮屏快充  已记基准，亮屏后接管\n'
+                    printf '亮屏快充  已记基准，等待接管\n'
                 else
                     printf '亮屏快充  等待充电\n'
                 fi ;;

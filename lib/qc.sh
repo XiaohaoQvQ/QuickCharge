@@ -213,7 +213,7 @@ sd_dump_env() {
     if sd_scr_fcc_node; then
         _sd_emit I env "fcc 节点=${_sd_sf} 目标=$(cat "$SD_FCC_NORM" 2>/dev/null || printf '未学')"
     else
-        _sd_emit I env "fcc 节点=none（本机没有可回写的电流节点，亮屏快充只能走内核参数）"
+        _sd_emit I env "fcc 节点=none（本机没有可回写的电流节点，屏幕快充只能走内核参数）"
     fi
     return 0
 }
@@ -2695,7 +2695,6 @@ _sd_scr_way=""
 _sd_scr_log=""
 _sd_scr_cur=0
 _sd_scr_node=""
-_sd_scr_off_at=0
 
 sd_scr_node() {
     if [ -n "$SD_SCR_NODE" ]; then
@@ -2796,7 +2795,8 @@ sd_scr_apply() {
     fi
 
     sd_scr_fcc_node || return 1
-    [ "$_sd_screen_on" = 1 ] || return 1
+    # 息屏也走同一条写回逻辑：驱动在息屏边界会重算 FCC，热管理/守护也可能
+    # 顺手把它压下来。以前这里只在亮屏时写，息屏一到就放手，功率掉了没人管。
     sd_scr_target
     case $? in
         0) ;;
@@ -2846,6 +2846,8 @@ sd_scr_apply() {
 # 只靠 _sd_scr_on 会让"关开关"这一下落在新进程里判成没接管过。
 sd_scr_active() { [ "$_sd_scr_on" = 1 ] || [ -f "$SD_SCR_ORIG" ]; }
 
+# 退出（拔线/关模式/熔断/高温）时按原值还原。息屏不再走这里——息屏保持接管，
+# 正是为了避免"一还原就把电流压回亮屏档"。
 sd_scr_release() {
     local p v
     if [ -f "$SD_SCR_ORIG" ]; then
@@ -2872,7 +2874,7 @@ sd_scr_state() {
 }
 
 sd_scr_tick() {
-    local mode bt
+    local mode bt rc key
     [ "$_sd_st_loaded" = 1 ] || sd_state_load
     mode=$(sd_state_get temp_mode off)
 
@@ -2899,21 +2901,16 @@ sd_scr_tick() {
 
     if [ "$_sd_screen_on" = 0 ]; then
         sd_scr_learn
-        # 内核参数那条一写就是「永久忽略屏幕」，熄屏立即还原；
-        # FCC 路径延迟 30s，避开亮灭屏边界反复写导致的电流阶跃。
-        if sd_scr_active; then
-            if sd_scr_node; then
-                sd_scr_release; _sd_scr_log=""; _sd_scr_off_at=0
-            else
-                [ "${_sd_scr_off_at:-0}" = 0 ] && _sd_scr_off_at=$(date +%s)
-                if [ $(( $(date +%s) - _sd_scr_off_at )) -ge 30 ]; then
-                    sd_scr_release; _sd_scr_log=""; _sd_scr_off_at=0
-                fi
+        # 内核参数那条一写就是「永久忽略屏幕」，息屏还原给驱动按正常 FCC 走；
+        # FCC 路径不再放手：一放手，驱动/热管理压下来的档位就没人顶回去，
+        # 用户看到的就是"息屏反而更慢"。
+        if sd_scr_node; then
+            if sd_scr_active; then
+                sd_scr_release; _sd_scr_log=""
             fi
+            return 0
         fi
-        return 0
     fi
-    _sd_scr_off_at=0
 
     # 默认开启后所有人都会走到这里，两条路径共用一道温度闸：
     # 内核参数那条一写就是「永远不看屏幕」，高温时更不能开。
@@ -2933,33 +2930,45 @@ sd_scr_tick() {
     [ "$_sd_scr_log" = hot ] && _sd_scr_log=""
 
     sd_scr_apply
-    case "$?" in
+    rc=$?
+    key=$_sd_scr_way
+    [ "$_sd_screen_on" = 0 ] && key="${_sd_scr_way}:off"
+    case "$rc" in
         0)
-            if [ "$_sd_scr_way" != "$_sd_scr_log" ]; then
+            if [ "$key" != "$_sd_scr_log" ]; then
                 case "$_sd_scr_way" in
                     kernel) sd_info charge "亮屏快充：已接管（内核 ignore_screen_state）" ;;
-                    fcc)    sd_info charge "亮屏快充：已接管（回写 FCC，目标 $(cat "$SD_FCC_NORM" 2>/dev/null)mA，节点 ${_sd_scr_node:-?} 实读 ${_sd_scr_cur:-?}mA）" ;;
+                    fcc)
+                        if [ "$_sd_screen_on" = 0 ]; then
+                            sd_info charge "亮屏快充：息屏保持（回写 FCC，目标 $(cat "$SD_FCC_NORM" 2>/dev/null)mA，节点 ${_sd_scr_node:-?} 实读 ${_sd_scr_cur:-?}mA）"
+                        else
+                            sd_info charge "亮屏快充：已接管（回写 FCC，目标 $(cat "$SD_FCC_NORM" 2>/dev/null)mA，节点 ${_sd_scr_node:-?} 实读 ${_sd_scr_cur:-?}mA）"
+                        fi ;;
                 esac
-                _sd_scr_log=$_sd_scr_way
+                _sd_scr_log=$key
             fi ;;
         2)
-            if [ "$_sd_scr_log" != "wait" ]; then
+            if [ "$_sd_screen_on" = 1 ] && [ "$_sd_scr_log" != "wait" ]; then
                 sd_info charge "亮屏快充：还没有基准值，先息屏充一次再亮屏"
                 _sd_scr_log=wait
             fi ;;
         3)
             sd_scr_active && sd_scr_release
-            if [ "$_sd_scr_log" != "hot" ]; then
+            if [ "$_sd_screen_on" = 1 ] && [ "$_sd_scr_log" != "hot" ]; then
                 sd_info charge "亮屏快充：电池偏热，本轮不接管"
                 _sd_scr_log=hot
             fi ;;
         *)
+            # 息屏时 apply 失败不落「本机不支持」：息屏边缘节点偶尔读不到，
+            # 落盘后要等重启才恢复，亮屏那次才是可信的判定。
             sd_scr_active && sd_scr_release
-            if [ "$_sd_scr_log" != "fail" ]; then
-                sd_warn charge "亮屏快充：本机不支持（无屏幕状态参数，FCC 也写不进去）"
-                _sd_scr_log=fail
-            fi
-            printf '1\n' >"$SD_SCR_FAIL" 2>/dev/null ;;
+            if [ "$_sd_screen_on" = 1 ]; then
+                if [ "$_sd_scr_log" != "fail" ]; then
+                    sd_warn charge "亮屏快充：本机不支持（无屏幕状态参数，FCC 也写不进去）"
+                    _sd_scr_log=fail
+                fi
+                printf '1\n' >"$SD_SCR_FAIL" 2>/dev/null
+            fi ;;
     esac
     return 0
 }

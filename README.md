@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`2.9.72`（`versioncode 29625`），C 版为 `2.9.72-c`
+- 当前版本：`2.9.73`（`versioncode 29627`），C 版为 `2.9.73-c`
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -312,8 +312,10 @@ sh /data/adb/modules/quickcharge/action.sh check
 3. **配置改写依赖具体路径**。ColorOS 大版本升级可能换目录结构。OTA 后 `post-fs-data.sh`
    会自动重建覆盖层，但路径全变了就得改代码。
 4. **`charge` 模式轮询固定 10 秒**（不受 `tick` 影响），所以拔电后最长要等一轮才还原真实读数。
-5. **不支持内核级接管**。如果厂商驱动在 `fb_notifier` 里硬压 FCC（亮屏压到 1500 到 2000mA，
-   约 7 到 9W），shell 层只能尽量改写节点，改不动的地方只能认。
+5. **屏幕快充只能改写节点**。厂商驱动在 `fb_notifier` 里压 FCC（亮屏压到 1500 到 2000mA，
+   约 7 到 9W）时，模块靠 `ignore_screen_state` 或回写 FCC 顶回去，亮屏息屏都保持；
+   节点全部只读、或系统在息屏后另有服务压流，就只能认。电量 80% 以上进入恒压，
+   电流本来就会往下掉，这部分不是模块能拉回来的。
 6. **不保证所有机型**。`check` 给出的是"这台机器能用什么"，不是"一定能降温"。
 
 ---
@@ -370,19 +372,19 @@ su -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 | 仓库 | 当前版本 | 包名 | versioncode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `2.9.72` | `QuickCharge-v2.9.72.zip` + `QuickCharge-v2.9.72-full.zip` | 29625 |
-| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `2.9.72-c` | `QuickCharge-v2.9.72-c.zip` | 29626 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `2.9.73` | `QuickCharge-v2.9.73.zip` + `QuickCharge-v2.9.73-full.zip` | 29627 |
+| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `2.9.73-c` | `QuickCharge-v2.9.73-c.zip` | 29628 |
 
 `-full.zip` 是带完整说明文档的完整包，日常刷入用不带后缀的那个即可。
 
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v2.9.72
-Quick Charge v2.9.72-c
+Quick Charge v2.9.73
+Quick Charge v2.9.73-c
 ```
 
-tag 与标题一致：shell 仓 `v2.9.72`，C 仓 `2.9.72-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v2.9.73`，C 仓 `2.9.73-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
 
 `versioncode` 是管理器判新旧的唯一依据，shell 版为奇数序列、C 版为偶数序列，两者互不覆盖。

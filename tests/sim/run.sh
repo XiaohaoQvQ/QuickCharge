@@ -2610,6 +2610,9 @@ mkdir -p /sys/module/oplus_chg/parameters
 printf '0\n' >/sys/module/oplus_chg/parameters/ignore_screen_state
 t47 sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode charge; sd_scr_tick' >/dev/null 2>&1
 eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "1" "有内核参数：置 1 接管"
+t47 sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode charge; _sd_screen_on=0; sd_scr_tick' >/dev/null 2>&1
+eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "0" "有内核参数：息屏还原给驱动"
+t47 sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode charge; sd_scr_tick' >/dev/null 2>&1
 t47 sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode off; sd_scr_tick' >/dev/null 2>&1
 eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "0" "切关闭模式：参数还原 0"
 hasnt "$(cat "$D47/run/scr.orig" 2>/dev/null)" "ignore" "退出后临时备份已清"
@@ -2693,6 +2696,14 @@ printf '2000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
 t47c sh -c '. /opt/qc/lib/qc.sh; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
 eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "6000000" \
    "默认开启：亮屏自动写回 6A"
+
+# I. 息屏不放手：驱动/热管理把 FCC 压回 2A，息屏这一轮也要顶回基准。
+# 旧实现息屏 30s 后 release，把亮屏时抓到的 2A 写回去，功率就再也上不来。
+printf '2000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
+t47c sh -c '. /opt/qc/lib/qc.sh; _sd_screen_on=0; sd_scr_tick' >/dev/null 2>&1
+eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "6000000" \
+   "息屏：被压到 2A 也顶回 6A"
+eq "$(cat "$D47c/run/fcc.norm" 2>/dev/null)" "6000" "息屏保持后基准没被拉低"
 
 # 43℃：两条路径都不接管，且不能写成「本机不支持」
 printf '430\n' >/sys/class/power_supply/battery/temp
