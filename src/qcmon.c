@@ -150,7 +150,6 @@ static int g_scr_on = 0;
 static char g_scr_way_s[16] = "";
 static int g_scr_cur = 0;          /* 接管时 FCC 节点实读值，只用于日志 */
 static char g_scr_node[64] = "";
-static long g_scr_off_at = 0;      /* 熄屏起始时间，延迟释放用 */
 
 /* 高刷 */
 static int g_hz_bad = 0;
@@ -1297,6 +1296,8 @@ static int scr_target(int *tgt)
 
 static void scr_release(void)
 {
+    /* 退出（拔线/关模式/熔断/高温）时按原值还原。息屏不走这里——息屏保持接管，
+     * 正是为了避免"一还原就把电流压回亮屏档"。 */
     FILE *f = fopen(g_scr_orig, "r");
     if (f) {
         char line[400];
@@ -1352,7 +1353,7 @@ static int scr_apply(void)
 
     char fcc[MAXPATH];
     if (scr_fcc_node(fcc, sizeof fcc) < 0) return 1;
-    if (!g_screen_on) return 1;
+    /* 息屏也走同一条写回逻辑：驱动在息屏边界会重算 FCC，热管理也可能顺手压下来 */
 
     int tgt = 0;
     int rc = scr_target(&tgt);
@@ -1361,6 +1362,11 @@ static int scr_apply(void)
 
     int cur = 0;
     if (scr_read_ma(fcc, &cur) < 0) return 1;
+    /* 单位看节点原始量级，别看归一后的 cur：cur 已经是 mA，拿它判永远不成立，
+     * 对 µA 节点就会写进 3000（=3mA），接管等于没接管。 */
+    char raw[32] = "";
+    read_line(fcc, raw, sizeof raw);
+    int ua = atoi(raw) > 100000;
     g_scr_cur = cur;
     {
         const char *base = strrchr(fcc, '/');
@@ -1390,7 +1396,7 @@ static int scr_apply(void)
         scr_save_orig(fcc, raw);
     }
     char b[32];
-    snprintf(b, sizeof b, "%d\n", cur > 100000 ? tgt * 1000 : tgt);
+    snprintf(b, sizeof b, "%d\n", ua ? tgt * 1000 : tgt);
     if (write_str(fcc, b) < 0) return 1;
 
     int back = 0;
@@ -1431,22 +1437,14 @@ static void scr_tick(void)
 
     if (!g_screen_on) {
         scr_learn();
-        if (scr_active()) {
-            /* 内核参数那条一写就是「永久忽略屏幕」，熄屏立即还原；
-             * FCC 路径延迟 30s，避开亮灭屏边界反复写导致的电流阶跃。 */
-            char node[MAXPATH];
-            long delay = scr_node(node, sizeof node) == 0 ? 0 : 30;
-            long now = (long)time(NULL);
-            if (!g_scr_off_at) g_scr_off_at = now;
-            if (now - g_scr_off_at >= delay) {
-                scr_release();
-                logged[0] = 0;
-                g_scr_off_at = 0;
-            }
+        /* 内核参数那条一写就是「永久忽略屏幕」，息屏还原给驱动按正常 FCC 走；
+         * FCC 路径不再放手：一放手，驱动/热管理压下来的档位就没人顶回去。 */
+        char node[MAXPATH];
+        if (scr_node(node, sizeof node) == 0) {
+            if (scr_active()) { scr_release(); logged[0] = 0; }
+            return;
         }
-        return;
     }
-    g_scr_off_at = 0;
 
     int bt = batt_temp_ps();
     if (bt > -100 && bt >= 42) {
@@ -1460,40 +1458,48 @@ static void scr_tick(void)
     if (!strcmp(logged, "hot")) logged[0] = 0;
 
     switch (scr_apply()) {
-        case 0:
-            if (strcmp(g_scr_way_s, logged)) {
+        case 0: {
+            char key[24];
+            snprintf(key, sizeof key, "%s%s", g_scr_way_s, g_screen_on ? "" : ":off");
+            if (strcmp(key, logged)) {
                 if (!strcmp(g_scr_way_s, "kernel"))
                     log_msg("I", "charge", "亮屏快充：已接管（内核 ignore_screen_state）");
                 else {
                     char b[32] = "";
                     read_line(g_fcc_norm, b, sizeof b);
                     log_msg("I", "charge",
-                            "亮屏快充：已接管（回写 FCC，目标 %smA，节点 %s 实读 %dmA）",
+                            g_screen_on
+                                ? "亮屏快充：已接管（回写 FCC，目标 %smA，节点 %s 实读 %dmA）"
+                                : "亮屏快充：息屏保持（回写 FCC，目标 %smA，节点 %s 实读 %dmA）",
                             b[0] ? b : "?", g_scr_node[0] ? g_scr_node : "?", g_scr_cur);
                 }
-                snprintf(logged, sizeof logged, "%s", g_scr_way_s);
+                snprintf(logged, sizeof logged, "%s", key);
             }
             break;
+        }
         case 2:
-            if (strcmp(logged, "wait")) {
+            if (g_screen_on && strcmp(logged, "wait")) {
                 log_msg("I", "charge", "亮屏快充：还没有基准值，先息屏充一次再亮屏");
                 snprintf(logged, sizeof logged, "wait");
             }
             break;
         case 3:
             if (scr_active()) scr_release();
-            if (strcmp(logged, "hot")) {
+            if (g_screen_on && strcmp(logged, "hot")) {
                 log_msg("I", "charge", "亮屏快充：电池偏热，本轮不接管");
                 snprintf(logged, sizeof logged, "hot");
             }
             break;
         default:
+            /* 息屏时失败不落「本机不支持」：节点偶尔读不到，落盘后要等重启才恢复 */
             if (scr_active()) scr_release();
-            if (strcmp(logged, "fail")) {
-                log_msg("W", "charge", "亮屏快充：本机不支持（无屏幕状态参数，FCC 也写不进去）");
-                snprintf(logged, sizeof logged, "fail");
+            if (g_screen_on) {
+                if (strcmp(logged, "fail")) {
+                    log_msg("W", "charge", "亮屏快充：本机不支持（无屏幕状态参数，FCC 也写不进去）");
+                    snprintf(logged, sizeof logged, "fail");
+                }
+                write_str(g_scr_fail, "1\n");
             }
-            write_str(g_scr_fail, "1\n");
             break;
     }
 }

@@ -267,6 +267,27 @@ run sensor >/dev/null
 sv=$(val "$ROOT/sys/module/oplus_chg/parameters/ignore_screen_state")
 chk "息屏后还原 0" "$sv" "0"
 
+# ============================================================ 6b. FCC 回写路径：息屏保持
+# 旧实现息屏 30s 后按 scr.orig 还原，把亮屏被压的 2A 写回去，功率再也上不来。
+echo "[6b] 亮屏快充：FCC 回写（息屏不放手）"
+setup
+rm -rf "$ROOT/sys/module/oplus_chg"
+state static 30
+screen_off
+run sensor >/dev/null
+chk "息屏学到基准 3A" "$(val "$BASE/data/run/fcc.norm")" "3000"
+printf '2000000\n' >"$ROOT/sys/class/power_supply/battery/constant_charge_current_max"
+screen_on
+run sensor >/dev/null
+chk "亮屏被压后写回 3A" \
+    "$(val "$ROOT/sys/class/power_supply/battery/constant_charge_current_max")" "3000000"
+printf '2000000\n' >"$ROOT/sys/class/power_supply/battery/constant_charge_current_max"
+screen_off
+run sensor >/dev/null
+run sensor >/dev/null
+chk "息屏也顶回 3A" \
+    "$(val "$ROOT/sys/class/power_supply/battery/constant_charge_current_max")" "3000000"
+
 # ============================================================ 7. 限流
 echo "[7] 电流墙"
 setup
@@ -456,14 +477,31 @@ printf '1,2,3,4,5,6,4200,8,-350,10,11,0,12,13,14,15,16,17,18\n' \
 out=$(run chg)
 echo "$out" | grep -q 'ibat=-350mA' && ok "灭屏 current_now=0 时用 bcc" || bad "ibat 错：$out"
 
-echo "[16] 协议已从日志移除"
-# 面板与日志都不再输出协议结论；原始节点（type/vooc/tech）照抄，排查功率还要用。
+echo "[16] 充电行只记原始节点，不下协议结论"
+# 2.9.72 起删掉协议判定：tech/type 原样记录，不再输出 proto= 字段。
 setup
 state static 30 42 off
-printf '7\n' >"$ROOT/sys/class/oplus_chg/battery/charge_technology"
+printf '9000000\n' >"$ROOT/sys/class/power_supply/usb/voltage_max"
+printf '7\n'       >"$ROOT/sys/class/oplus_chg/battery/charge_technology"
 out=$(run chg)
-echo "$out" | grep -q 'tech=7' && ok "原始 tech 节点照抄" || bad "tech 丢了：$out"
-echo "$out" | grep -q 'proto=' && bad "充电行仍带 proto：$out" || ok "充电行不再带 proto"
+echo "$out" | grep -q 'tech=7' && ok "tech 原样记录" || bad "tech 丢失：$out"
+case "$out" in *proto=*) bad "充电行仍有 proto：$out" ;; *) ok "充电行不含 proto" ;; esac
+
+setup
+state static 30 42 off
+printf 'USB_PD\n' >"$ROOT/sys/class/power_supply/usb/type"
+printf 'USB_PD\n' >"$ROOT/sys/class/power_supply/usb/real_type"
+out=$(run chg)
+echo "$out" | grep -q 'type=USB_PD' && ok "type 原样记录" || bad "type 丢失：$out"
+
+echo "[16b] 拔线行不臆造协议"
+setup
+state static 30 42 off
+printf 'Discharging\n' >"$ROOT/sys/class/power_supply/battery/status"
+rm -f "$ROOT/sys/class/power_supply/usb/voltage_now"
+out=$(run chg)
+echo "$out" | grep -q 'status=Discharging' && ok "status 如实记录" || bad "status 丢失：$out"
+case "$out" in *proto=*) bad "拔线行仍带 proto：$out" ;; *) ok "拔线行不含 proto" ;; esac
 
 echo "[17] 输入侧实测与两侧功率"
 setup
