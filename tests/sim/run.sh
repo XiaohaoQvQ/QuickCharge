@@ -2727,6 +2727,31 @@ t47c sh -c '. /opt/qc/lib/qc.sh; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
 eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "1" "降温后恢复接管（内核参数）"
 rm -rf /sys/module/oplus_chg
 
+# ---------------------------------------------------------------- T47b 极限充电
+# 一个按钮：息屏满速（墙顶到熔断前 1℃、不加 2℃）+ 顶墙才降流 + 停 horae。
+D47b=/tmp/qc47b-max; rm -rf "$D47b"; mkdir -p "$D47b/run"
+t47b() { env SD_DATA=$D47b SD_MODDIR=/opt/qc SD_NO_DAEMON=1 SD_BL=/nonexistent SD_FB=/nonexistent "$@"; }
+t47b sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode static; sd_state_set wall 42;
+  sd_state_set curr_edge 4; sd_state_set aggr 6; sd_state_set fast_cap 55;
+  sd_state_set battery_limit 48; sd_state_set curr_max 6000; sd_state_set horae 1' >/dev/null 2>&1
+t47b sh /opt/qc/action.sh max on >/dev/null 2>&1
+eq "$(grep '^max_mode=' "$D47b/state.conf")" "max_mode=1" "max on：写入极限标记"
+eq "$(grep '^wall=' "$D47b/state.conf")" "wall=47" "max on：墙 = 熔断 48-1"
+eq "$(grep '^curr_edge=' "$D47b/state.conf")" "curr_edge=0" "max on：顶墙才降流"
+eq "$(grep '^temp_mode=' "$D47b/state.conf")" "temp_mode=charge" "max on：只在充电时生效"
+eq "$(grep '^horae=' "$D47b/state.conf")" "horae=0" "max on：停系统热管理"
+w=$(t47b sh -c '. /opt/qc/lib/qc.sh; _sd_st_loaded=0; sd_state_load; _sd_screen_on=0;
+  _sd_screen_ticks=1; sd_curr_target_v; printf "%s" "$_sd_wall_eff"')
+eq "$w" "47" "息屏不再 +2℃，墙保持 47"
+eq "$(t47b sh /opt/qc/action.sh json 2>/dev/null | grep -o '"max":true')" '"max":true' "json 报 max=true"
+t47b sh /opt/qc/action.sh max off >/dev/null 2>&1
+eq "$(grep '^wall=' "$D47b/state.conf")" "wall=42" "max off：恢复原墙"
+eq "$(grep '^curr_edge=' "$D47b/state.conf")" "curr_edge=4" "max off：恢复原提前量"
+eq "$(grep '^aggr=' "$D47b/state.conf")" "aggr=6" "max off：恢复原档位"
+eq "$(grep '^fast_cap=' "$D47b/state.conf")" "fast_cap=55" "max off：恢复快充阈值"
+eq "$(grep '^temp_mode=' "$D47b/state.conf")" "temp_mode=static" "max off：恢复原模式"
+eq "$(grep '^max_mode=' "$D47b/state.conf")" "max_mode=0" "max off：清标记"
+
 # ---------------------------------------------------------------- T48 节点读取
 # sd_read1 从 $(tr ...) 改为 read 内建，省掉每轮几十次 fork。
 # 这里锁住行为：换行/CRLF/空格/无换行/空文件/不存在，六种输入结果必须和旧实现一致。

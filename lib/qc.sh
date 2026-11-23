@@ -510,6 +510,7 @@ _st_hz_prev_mcfr=""
 _st_power_scale=""
 _st_batt_spoof=""
 _st_cool_guard=""
+_st_max_mode=""
 
 sd_state_load() {
     _sd_st_loaded=1
@@ -519,7 +520,7 @@ sd_state_load() {
     _st_curr_edge=""
     _st_log_level=""; _st_tick=""; _st_defrev=""
     _st_hz=""; _st_hz_prev_peak=""; _st_hz_prev_min=""; _st_hz_hard=""; _st_hz_prev_mcfr=""; _st_power_scale=""
-    _st_cells_mode=""; _st_batt_spoof=""; _st_cool_guard=""
+    _st_cells_mode=""; _st_batt_spoof=""; _st_cool_guard=""; _st_max_mode=""
     [ -f "$SD_STATE" ] || { _st_log_level=1; _sd_lv=1; return 0; }
     local k v
     while IFS='=' read -r k v; do
@@ -562,6 +563,7 @@ sd_state_get() {
         cells_mode)     printf '%s' "${_st_cells_mode:-${2:-auto}}" ;;
         batt_spoof)     printf '%s' "${_st_batt_spoof:-${2:-off}}" ;;
         cool_guard)     printf '%s' "${_st_cool_guard:-${2:-1}}" ;;
+        max_mode)       printf '%s' "${_st_max_mode:-${2:-0}}" ;;
         *)              printf '%s' "${2:-}" ;;
     esac
 }
@@ -1580,6 +1582,10 @@ sd_shell_target() {
             ;;
     esac
 
+    if [ "${_st_max_mode:-0}" = 1 ]; then
+        # 极限充电：伪装上限顶到熔断阈值前 1℃，不再受用户设的 42℃ 限制
+        wall=$((limit - 1))
+    fi
     if [ "$wall" -gt 0 ]; then
         barrier=$wall
     else
@@ -2624,7 +2630,16 @@ sd_curr_target_v() {
 
     _sd_sb_note=""
     [ "$_sd_screen_ticks" -gt 0 ] || sd_screen_tick
-    if [ "$_sd_screen_on" = 0 ]; then
+    if [ "${_st_max_mode:-0}" = 1 ]; then
+        # 极限充电：墙直接顶到熔断阈值前 1℃，息屏不再 +2℃，也不再压回 lim-3。
+        # 熔断本身还在，真实温度到 battery_limit 照样撤伪装。
+        sd_limit_for_type_v "${_sd_sent_type:-battery}"
+        case "$_sd_rv" in
+            ''|0|off) ;;
+            *) wall=$((_sd_rv - 1)) ;;
+        esac
+        _sd_sb_note="（极限墙 ${wall}℃）"
+    elif [ "$_sd_screen_on" = 0 ]; then
         wall=$((wall + 2))
         sd_limit_for_type_v "${_sd_sent_type:-battery}"
         case "$_sd_rv" in

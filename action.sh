@@ -31,6 +31,7 @@ Quick Charge (QC) 控制入口。
   wall <35-80|off>             温度墙：真实温度到此即停止伪装
   curr <300-8000|off>          充电限流（mA），按温度联动降流
   curredge <0-6>               限流距墙几度开始降：0=顶到墙才降，4=默认
+  max <on|off>                 极限充电：息屏满速 + 墙顶到熔断前 1℃ + 停 horae（一键）
   boost <on|off>               暴力模式：顶墙才降流 + 档位 10 + 快充阈值 85%
   hz <60-185|off> [soft|hard]  设置刷新率；hard 额外锁定内容帧率匹配
   hzguard <on|off>             开关强制锁定（档位不变，只切换力度）
@@ -232,7 +233,8 @@ sd_do_json() {
     _sbase=0
     [ -f "$SD_FCC_NORM" ] && _sbase=$(tr -d '\r\n' <"$SD_FCC_NORM" 2>/dev/null)
     case "$_sbase" in ''|*[!0-9]*) _sbase=0 ;; esac
-    printf '"screen":%s,"screen_mode":"%s","screen_base":%s,' \
+    printf '"max":%s,"screen":%s,"screen_mode":"%s","screen_base":%s,' \
+        "$([ "$(sd_state_get max_mode 0)" = 1 ] && echo true || echo false)" \
         "$([ "$_sd_screen_on" = 0 ] && echo 0 || echo 1)" \
         "$(sd_scr_state)" "$_sbase"
     printf '"batt_spoof":"%s","batt_real":%s,"thermal":"%s",' \
@@ -556,6 +558,65 @@ sd_menu() {
     done
 }
 
+# 一键极限充电：息屏满速 + 温度墙顶到熔断阈值前 1℃ + 停系统热管理。
+# 关闭时按 run/max.bak 原样恢复，不把用户原来的墙 / 档位吞掉。
+sd_do_max() {
+    local f="$SD_RUN/max.bak" bl k v
+    case "${1:-on}" in
+        on|1)
+            if [ "$(sd_state_get max_mode 0)" = 1 ]; then
+                echo "极限充电已在运行"
+                return 0
+            fi
+            bl=$(sd_state_int battery_limit 48 30 70)
+            [ "$bl" -lt 40 ] && bl=40
+            {
+                printf 'temp_mode=%s\n'  "$(sd_state_get temp_mode off)"
+                printf 'wall=%s\n'       "$(sd_state_get wall 42)"
+                printf 'curr_edge=%s\n'  "$(sd_state_get curr_edge 4)"
+                printf 'aggr=%s\n'       "$(sd_state_get aggr 10)"
+                printf 'fast_cap=%s\n'   "$(sd_state_get fast_cap 55)"
+                printf 'horae=%s\n'      "$(sd_state_get horae 1)"
+            } >"$f" 2>/dev/null
+
+            sd_state_set temp_mode charge
+            sd_state_set wall "$((bl - 1))"
+            sd_state_set curr_edge 0
+            sd_state_set aggr 10
+            sd_state_set fast_cap 85
+            sd_horae 0
+            sd_state_set horae 0
+            sd_state_set max_mode 1
+            echo "极限充电 -> 开启"
+            echo "  息屏保持满速 · 温度墙 $((bl - 1))℃ · 顶墙才降流"
+            echo "  系统热管理已停 · 熔断仍为 ${bl}℃（真实到线即撤伪装）"
+            echo "  关闭: sh action.sh max off" ;;
+        off|0)
+            if [ ! -f "$f" ]; then
+                sd_state_set max_mode 0
+                echo "极限充电 -> 关闭（没有找到上次的配置备份，保持当前值）"
+                return 0
+            fi
+            while IFS='=' read -r k v; do
+                case "$k" in
+                    temp_mode|wall|curr_edge|aggr|fast_cap|horae) ;;
+                    *) continue ;;
+                esac
+                [ -n "$v" ] || continue
+                sd_state_set "$k" "$v"
+            done <"$f"
+            rm -f "$f" 2>/dev/null
+            sd_state_set max_mode 0
+            case "$(sd_state_get horae 1)" in
+                1) sd_horae 1 ;;
+                0) sd_horae 0 ;;
+            esac
+            echo "极限充电 -> 关闭（已恢复开启前的墙 / 档位 / 热管理设置）" ;;
+        *)
+            echo "用法: max on|off"; return 1 ;;
+    esac
+}
+
 # 只给会改状态的命令写段头。power/json/status 这些面板每 3 秒就要调一次，
 # 每次写 6 行会把日志刷满，真正有用的记录全被埋掉。
 case "${1:-}" in
@@ -619,6 +680,7 @@ case "$1" in
              else
                  echo "限流 -> 距墙 $1℃ 开始降"
              fi ;;
+    max)     shift; sd_do_max "${1:-on}" ;;
     boost)   shift
              case "${1:-on}" in
                  on|1)

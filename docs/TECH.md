@@ -793,6 +793,34 @@ su -c 'sh /data/adb/modules/quickcharge/action.sh status | grep 亮屏快充'
 `/sys/class/graphics/fb0/blank`），一次 read、零 fork。不用 `dumpsys power`：
 15 秒一次的 fork 太贵，而且 KernelSU / APatch 的域经常连不上 power 服务。
 
+## 极限充电（核心参数卡底部，一个按钮）
+
+面板「核心参数」最下面那个按钮，一次把几件事做完：
+
+| 项 | 值 | 为什么 |
+|---|---|---|
+| 温度墙 | 电池熔断阈值 − 1℃ | 默认 48℃ 熔断 → 47℃ 墙，不再受滑块 42℃ 的限制 |
+| 限流提前量 | 0 | 到墙才降档，不在墙前 4℃ 就开始掉功率 |
+| 温控档位 | 10 | 温差 12℃，降档区间压到墙前最后几度 |
+| 快充阈值 | 85% | 电量 85% 前都按快充策略走 |
+| 温度模式 | 仅充电 | 不插电时不动系统 |
+| 系统热管理 | 停 horae | 不再由系统按温度额外降频 |
+| 息屏 | 保持满速 | `max_mode=1` 时息屏不 +2℃，也不压回 `lim-3` |
+
+熔断本身不动：真实温度到 `battery_limit`（默认 48℃）照样撤伪装、停止改写。
+开启前的 `wall` / `curr_edge` / `aggr` / `fast_cap` / `temp_mode` / `horae` 会写进
+`run/max.bak`，再点一次按钮原样恢复，不会把用户自己的设置吞掉。
+
+命令行等价：
+
+```sh
+su -c 'sh /data/adb/modules/quickcharge/action.sh max on'
+su -c 'sh /data/adb/modules/quickcharge/action.sh max off'
+```
+
+`max_mode` 只影响两处：`sd_curr_target_v` 的墙与息屏分支、`sd_shell_target` 的屏障。
+其余安全边界（熔断、`fast_cap`、限流）原样生效。
+
 ## 极端功率：`batt_spoof` 与 `thermal`
 
 这两项是**唯一会越过模块安全设计**的开关，都在面板「极端功率」卡里，默认关闭，

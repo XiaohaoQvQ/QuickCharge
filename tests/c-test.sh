@@ -288,6 +288,19 @@ run sensor >/dev/null
 chk "息屏也顶回 3A" \
     "$(val "$ROOT/sys/class/power_supply/battery/constant_charge_current_max")" "3000000"
 
+# ============================================================ 6c. 极限充电：墙顶到熔断前 1℃
+echo "[6c] 极限充电：max_mode 覆盖 42℃ 墙"
+setup
+state static 30 off off 42 10 6000
+printf 'max_mode=1\n' >>"$BASE/data/state.conf"
+screen_off
+out=$(run once)
+echo "$out" | grep -q 'wall=47' && ok "电流墙 42 -> 47（熔断 48-1）" || bad "极限墙未生效：$out"
+setup
+state static 30 off off 42 10 6000
+out=$(run once)
+echo "$out" | grep -q 'wall=42' && ok "关掉后回到用户设的 42" || bad "非极限模式墙被改：$out"
+
 # ============================================================ 7. 限流
 echo "[7] 电流墙"
 setup

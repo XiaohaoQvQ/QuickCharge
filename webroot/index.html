@@ -215,6 +215,13 @@
   <div class="rw"><input type="range" id="shell" min="25" max="60" step="1"></div>
   <div class="switch" id="shellHint">改写上限；真实低于它时不改写</div>
 
+  <div class="acts" style="margin-top:22px;grid-template-columns:1fr">
+    <button id="maxMode">极限充电（息屏满速）</button>
+  </div>
+  <div class="switch" id="maxHint" style="margin-top:6px">
+    一键把墙顶到熔断前 1℃、顶墙才降流、停系统热管理；再点一次恢复原设置
+  </div>
+
   </div></div>
 </div>
 
@@ -705,6 +712,14 @@
     }
     $("wallOff").checked = d.wall === "off";
     $("wall").disabled = d.wall === "off";
+    var mx = d.max === true;
+    var mb = $("maxMode");
+    mb.className = mx ? "on" : "";
+    mb.textContent = mx ? "极限充电 · 已开启" : "极限充电（息屏满速）";
+    $("maxHint").textContent = mx
+      ? "息屏保持满速 · 温度墙 " + (d.wall === "off" ? "关" : d.wall + "℃") +
+        " · 顶墙才降流 · 热管理已停；再点一次恢复"
+      : "一键把墙顶到熔断前 1℃、顶墙才降流、停系统热管理；再点一次恢复原设置";
     if (d.level !== undefined && d.level !== null) {
       var lv = Number(d.level) || 0;
       $("lvNow").textContent = lv >= 2 ? "详细" : (lv === 1 ? "事件" : "关闭");
@@ -1204,6 +1219,15 @@
       var off = this.checked;
       $("wall").disabled = off;
       apply(off ? "wall off" : ("wall " + $("wall").value), off ? "温度墙已关闭" : "温度墙已开启");
+    });
+    $("maxMode").addEventListener("click", function () {
+      var on = !!(S && S.max === true);
+      if (!on) {
+        ask("极限充电会把温度墙顶到电池熔断阈值前 1℃，并停用系统热管理（horae）。\n\n真实高温下继续满速充电会加速电池衰减，长期高温有鼓包风险，且不在保修范围。\n\n确定开启？",
+          function () { apply("max on", "极限充电已开启"); });
+        return;
+      }
+      apply("max off", "已恢复开启前的设置");
     });
     bindRange("battSp", "battSpV", function (v) { return v + "℃"; },
       function (v) { return "batt " + v; });

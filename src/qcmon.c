@@ -79,6 +79,7 @@ typedef struct {
     int hz_hard;
     char hz_prev_mcfr[16];
     int cool_guard;      /* 1=亮屏解除 oplus cool_down 降流 */
+    int max_mode;        /* 1=极限充电：墙顶到熔断前 1℃，息屏不 +2 */
 } conf_t;
 
 static conf_t g_c;
@@ -331,6 +332,7 @@ static void conf_defaults(void)
     /* 默认事件级：0 只留 E，日志面板会空得没法排查 */
     g_c.log_level = 1;
     g_c.cool_guard = 1;
+    g_c.max_mode = 0;
 }
 
 static int parse_i(const char *v, int def)
@@ -391,6 +393,7 @@ static void conf_load(void)
         else if (!strcmp(k, "hz_hard")) g_c.hz_hard = parse_i(v, 0);
         else if (!strcmp(k, "hz_prev_mcfr")) snprintf(g_c.hz_prev_mcfr, sizeof g_c.hz_prev_mcfr, "%s", v);
         else if (!strcmp(k, "cool_guard")) g_c.cool_guard = parse_i(v, 1);
+        else if (!strcmp(k, "max_mode")) g_c.max_mode = parse_i(v, 0);
     }
     fclose(f);
 
@@ -1080,7 +1083,10 @@ static int curr_target(int *out_wall)
         if (wall < 35) wall = 35;
         if (wall > 80) wall = 80;
     }
-    if (!g_screen_on) {
+    if (g_c.max_mode) {
+        /* 极限充电：墙直接顶到熔断阈值前 1℃，息屏不再 +2、也不再压回 lim-3 */
+        if (lim > 0) wall = lim - 1;
+    } else if (!g_screen_on) {
         wall += 2;
         if (lim > 0 && wall > lim - 3) wall = lim - 3;
     }
@@ -2212,6 +2218,7 @@ static int shell_target(void)
     }
 
     int barrier = wall > 0 ? wall : lim - 2;
+    if (g_c.max_mode) barrier = lim - 1;
     if (base >= barrier) {
         base = barrier - 2;
         if (base < 25) base = 25;
