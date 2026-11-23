@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`3.0.0-test`（`versioncode 300001`），C 版为 `3.0.0-test-c`
+- 当前版本：`3.0.1-test`（`versioncode 300003`），C 版为 `3.0.1-test-c`
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -169,7 +169,7 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 | `wall` | `60` | 35 到 60 | 温度墙：真实温度到此停止伪装；60 = 无限制（熔断前 1℃） |
 | `aggr` | `10` | 0 到 10 | 温控档位，越高越激进（CLI 里叫 `gear`） |
 | `curr_max` | `0` | 0 / 300 到 8000 | 充电限流 mA，0 = 不限（面板没有滑块，改这里） |
-| `curr_edge` | `0` | 0 到 6 | 兼容保留：默认 0。电流只分 100%/75% 两档，到墙才降 |
+| `curr_edge` | `0` | 0 到 6 | 兼容保留：默认 0。电流分四档（墙-3 / 墙-1 / 墙），不读这个值 |
 | `fast_cap` | `55` | 20 到 90 | 快充生效的电量阈值 % |
 | `battery_limit` | `48` | 30 到 70 | 电池哨兵熔断阈值 ℃ |
 | `sentinel_limit` | `85` | 60 到 110 | SoC / 主板哨兵熔断阈值 ℃ |
@@ -228,7 +228,7 @@ ACTION=/data/adb/modules/quickcharge/action.sh
 | `fast <20-90>` | 快充生效电量阈值 % |
 | `sentinel <60-110\|off>` | SoC / 主板熔断阈值 |
 | `battery <30-70\|off>` | 电池熔断阈值 |
-| `boost <on\|off>` | 暴力模式：顶墙才降流 + 档位 10 + 快充阈值 85%（面板已移除，命令保留） |
+| `boost <on\|off>` | 暴力模式：四档降流 + 档位 10 + 快充阈值 85%（面板已移除，命令保留） |
 | `pscale <50-200>` | 电流读数校准 % |
 | `cells <auto\|1\|2>` | 电芯数 |
 | `chg` / `snap` | 打印 / 记录一条充电现场 |
@@ -371,19 +371,19 @@ su -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 | 仓库 | 当前版本 | 包名 | versioncode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.0.0-test` | `QuickCharge-v3.0.0-test.zip` + `QuickCharge-v3.0.0-test-完整包.zip` | 300001 |
-| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.0.0-test-c` | `QuickCharge-v3.0.0-test-c.zip` | 300000 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.0.1-test` | `QuickCharge-v3.0.1-test.zip` + `QuickCharge-v3.0.1-test-完整包.zip` | 300003 |
+| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.0.1-test-c` | `QuickCharge-v3.0.1-test-c.zip` | 300002 |
 
 `-完整包.zip` 里是「两个模块包 + 两仓 README + 两仓 RELEASE」，日常刷入用不带后缀的那个即可。
 
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v3.0.0-test
-Quick Charge v3.0.0-test-c
+Quick Charge v3.0.1-test
+Quick Charge v3.0.1-test-c
 ```
 
-tag 与标题一致：shell 仓 `v3.0.0-test`，C 仓 `3.0.0-test-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v3.0.1-test`，C 仓 `3.0.1-test-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
 
 ### 版本号规则（3.0 起）

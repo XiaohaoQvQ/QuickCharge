@@ -1020,12 +1020,12 @@ printf '6000\n' >/sys/devices/virtual/oplus_chg/battery/chg_current_max
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh curr 1500 >/tmp/t17b.log 2>&1
 eq "$(cat /sys/devices/virtual/oplus_chg/battery/chg_current_max)" "1500" "mA 节点写入 mA"
 
-# 46℃ 还没到熔断前 1℃（47），默认就是满功率
+# 43℃ 还没进 75% 档（墙 47，阈值 44），默认就是满功率
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh -c '. /opt/qc/lib/qc.sh; sd_state_set wall 60' >/dev/null 2>&1
-printf '46000\n'   >/sys/class/thermal/thermal_zone1/temp
+printf '43000\n'   >/sys/class/thermal/thermal_zone1/temp
 printf '6000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh curr 2000 >/tmp/t17d.log 2>&1
-eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "2000000" "46℃ 未到墙：保持 100%"
+eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "2000000" "43℃ 未到降档点：保持 100%"
 printf '30000\n' >/sys/class/thermal/thermal_zone1/temp
 
 # 未插电时只记录，不写节点
@@ -1496,7 +1496,7 @@ mtk() {
 C=$(mtk sh /opt/qc/action.sh check)
 case "$C" in *"哨兵 thermal_zone1"*) ok "MTK 电池温区被选为哨兵" ;; *) ng "哨兵选错: $C" ;; esac
 case "$C" in *"MediaTek（MTK）"*) ok "check 识别 MTK 平台" ;; *) ng "平台未识别: $C" ;; esac
-case "$C" in *"降档提前 2℃"*) ok "check 报告 MTK 降档策略" ;; *) ng "缺降档提示: $C" ;; esac
+case "$C" in *"降档提前"*) ng "check 不该再报 MTK 提前降档: $C" ;; *) ok "check 不再报 MTK 提前降档（四档与高通一致）" ;; esac
 case "$C" in *"[ok] 投票"*) ok "check 报告投票接口存在" ;; *) ng "投票未报告: $C" ;; esac
 
 P=$(mtk sh /opt/qc/action.sh probe)
@@ -1545,14 +1545,14 @@ printf '7300000\n' >/sys/class/power_supply/usb/current_max
 C=$(mtk sh /opt/qc/action.sh check)
 case "$C" in *"私有快充"*) ok "协商 10V/7.3A 判为私有快充" ;; *) ng "协议误判: $C" ;; esac
 
-# 降档点：40℃ 未到墙，MTK 与高通都满功率；到 42℃ 一起 75%
+# 降档点：墙 42 → 阈值 39/41/42，MTK 与高通都按同一套四档走
 printf '40000\n' >/sys/class/thermal/thermal_zone1/temp
 T=$(mtk sh -c '. /opt/qc/lib/qc.sh; sd_state_set curr_max 3000; sd_state_set wall 42; sd_zone_scan; sd_curr_target_v; echo $_sd_rv')
-eq "$T" "3000" "MTK 40℃ 未到墙：满功率"
+eq "$T" "2250" "MTK 40℃：进 75% 档"
 printf '42000\n' >/sys/class/thermal/thermal_zone1/temp
 T=$(env SD_DATA=$MTKD SD_MODDIR=/opt/qc SD_NO_DAEMON=1 FAKE_PLAT=sm8750 FAKE_SOCMFR=Qualcomm \
     sh -c '. /opt/qc/lib/qc.sh; sd_state_set curr_max 3000; sd_state_set wall 42; sd_zone_scan; sd_curr_target_v; echo $_sd_rv')
-eq "$T" "2250" "高通 42℃ 到墙：75%"
+eq "$T" "750" "高通 42℃ 到墙：25%"
 printf '26000\n' >/sys/class/thermal/thermal_zone1/temp
 
 
@@ -1603,7 +1603,7 @@ gt() {
 }
 
 C=$(gt sh /opt/qc/action.sh check)
-case "$C" in *"MediaTek（MTK） · mt6895 · 降档提前 2℃"*) ok "GT Neo3 识别为 MTK 且带降档提示" ;; *) ng "平台行不符: $C" ;; esac
+case "$C" in *"MediaTek（MTK） · mt6895"*) ok "GT Neo3 识别为 MTK" ;; *) ng "平台行不符: $C" ;; esac
 case "$C" in *"哨兵 thermal_zone5"*) ok "哨兵选中 mtktsbattery（不是 PMIC/CPU）" ;; *) ng "哨兵选错: $(printf '%s' "$C" | grep 哨兵)" ;; esac
 case "$C" in *"私有快充"*) ok "10V/7.3A 判为私有快充" ;; *) ng "协议误判" ;; esac
 case "$C" in *"10V/7300mA"*) ok "协议电压按 V 显示（不是 10000V）" ;; *) ng "电压单位错: $(printf '%s' "$C" | grep 协议)" ;; esac
@@ -1623,9 +1623,9 @@ eq "$(cat /sys/class/thermal/thermal_zone1/temp)" "40000" "PMIC 未被伪装改�
 eq "$(cat /sys/class/power_supply/battery/temp)" "400" "battery/temp 原样保留"
 eq "$(cat /sys/class/power_supply/battery/input_current_limit)" "7300000" "未设 curr_max 时不动 MTK 限流节点"
 
-# 设 3000mA：40℃ 未到墙，节点保持 3000mA（新逻辑只到墙才降）
+# 设 3000mA：墙 42 → 40℃ 已进 75% 档，节点落到 2250
 gt sh -c '. /opt/qc/lib/qc.sh; sd_state_set wall 42; sd_state_set curr_max 3000' >/dev/null 2>&1
-wait_eq "/sys/class/power_supply/battery/input_current_limit" "3000000" 7 "40℃ 未到墙 42℃：保持 3000mA"
+wait_eq "/sys/class/power_supply/battery/input_current_limit" "2250000" 7 "40℃ 墙 42：75% → 2250mA"
 gt sh -c '. /opt/qc/lib/qc.sh; sd_state_set wall off' >/dev/null 2>&1
 wait_eq "/sys/class/power_supply/battery/input_current_limit" "3000000" 7 "无限制墙 40℃ 仍 3000mA"
 
@@ -1719,7 +1719,7 @@ eq "$(gs cpu-0-0)"     "no"  "CPU 温区不参与熔断"
 printf '40000\n' >/sys/class/thermal/thermal_zone5/temp
 T=$(env SD_DATA=$GT SD_MODDIR=/opt/qc SD_NO_DAEMON=1 FAKE_PLAT= FAKE_SOCMFR=Xiaomi FAKE_HW=hw-unknown \
     sh -c '. /opt/qc/lib/qc.sh; sd_state_set curr_max 3000; sd_state_set wall 42; sd_zone_scan; sd_curr_target_v; echo $_sd_rv')
-eq "$T" "3000" "other 平台 40℃ 未到墙：满功率"
+eq "$T" "2250" "other 平台 40℃：进 75% 档"
 
 # 骁龙侧熔断不变：battery 温区 50℃ 照样熔断
 rm -rf /sys/class/thermal/thermal_zone*
@@ -2022,7 +2022,7 @@ printf '400\n'     >/sys/class/power_supply/battery/temp
 CCM=/sys/class/power_supply/battery/constant_charge_current_max
 
 g7 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_zone_scan; sd_curr_keep' >/dev/null 2>&1
-eq "$(cat $CCM)" "4000000" "40℃ 未到墙 42℃：保持 4000mA"
+eq "$(cat $CCM)" "3000000" "40℃ 墙 42：75% → 3000mA"
 
 # 温度回落必须抬回去。旧实现"只压不抬"，节点会永远停在低档，
 # 用户看到的是"温度降了，功率却没恢复"。
@@ -2088,10 +2088,8 @@ eq "$(grep -cE '^(aggr=7|wall=45)$' "$D7/state.conf")" "2" "并发写两个键�
 
 
 # ---------------------------------------------------------------- T38 限流档位
-# 2.9.5 及之前：wall-8 / wall-3 / wall 三档，墙 42℃ 时 34℃ 就砍到 75%。
-# 用户看到的是"离墙还有 8℃，功率已经掉了"，而且三个阈值上每跨一次档
-# 充电 IC 就重新调节一次输入电流，曲线像波浪。这里把档位钉死成
-# wall-4 / wall-2 / wall，34℃ 必须还是满功率。
+# 四档 100/75/50/25，全部贴着墙：wall-3 起 75%，wall-1 起 50%，到墙 25%。
+# 不设提前量，离墙 4℃ 以上必须还是满功率。
 echo
 echo "===== T38 限流档位贴着墙 ====="
 for _m in /sys/class/thermal/*/temp; do umount -l "$_m" 2>/dev/null; done
@@ -2106,28 +2104,36 @@ q8() {
 }
 printf '34000\n' >/sys/class/thermal/thermal_zone0/temp
 eq "$(q8)" "4000" "34℃：满功率"
-printf '40000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "4000" "40℃：满功率（旧版此时已砍到 50%）"
+printf '38000\n' >/sys/class/thermal/thermal_zone0/temp
+eq "$(q8)" "4000" "38℃（墙前 4℃）：仍满功率"
+printf '39000\n' >/sys/class/thermal/thermal_zone0/temp
+eq "$(q8)" "3000" "39℃（墙-3）：75%"
+printf '41000\n' >/sys/class/thermal/thermal_zone0/temp
+eq "$(q8)" "2000" "41℃（墙-1）：50%"
 printf '42000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "3000" "42℃：到墙 75%"
-printf '46000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "3000" "46℃：过墙后保持 75%，不再降到 25%"
-# 无限制：墙 60 → 熔断前 1℃（47），46℃ 仍满分
+eq "$(q8)" "1000" "42℃ 到墙：25%"
+# 无限制：墙 60 → 熔断前 1℃（47），四档落在 44/46/47
 printf 'wall=60\n' >>"$D8/state.conf"
 printf '40000\n' >/sys/class/thermal/thermal_zone0/temp
 eq "$(q8)" "4000" "无限制墙：40℃ 满功率"
+printf '44000\n' >/sys/class/thermal/thermal_zone0/temp
+eq "$(q8)" "3000" "无限制墙：44℃（47-3）：75%"
 printf '46000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "4000" "无限制墙：46℃ 仍满功率"
+eq "$(q8)" "2000" "无限制墙：46℃：50%"
 printf '47000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "3000" "无限制墙：47℃（熔断前 1℃）才 75%"
+eq "$(q8)" "1000" "无限制墙：47℃（熔断前 1℃）：25%"
 # 自定义墙仍按墙生效，不会越过熔断线
 printf 'wall=44\n' >>"$D8/state.conf"
+printf '40000\n' >/sys/class/thermal/thermal_zone0/temp
+eq "$(q8)" "4000" "自定义墙 44℃：40℃ 满功率"
+printf '41000\n' >/sys/class/thermal/thermal_zone0/temp
+eq "$(q8)" "3000" "自定义墙 44℃：41℃（墙-3）：75%"
 printf '43000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "4000" "自定义墙 44℃：43℃ 满功率"
+eq "$(q8)" "2000" "自定义墙 44℃：43℃（墙-1）：50%"
 printf '44000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "3000" "自定义墙 44℃：到墙 75%"
+eq "$(q8)" "1000" "自定义墙 44℃：到墙 25%"
 printf '47000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "3000" "自定义墙 44℃：47℃ 仍 75%（不压到 25%）"
+eq "$(q8)" "1000" "自定义墙 44℃：47℃ 仍 25%（不回升）"
 
 # ============================================================ T39 暴力模式 / CPU 伪装
 # 两者都是 WebUI 直接调用的组合命令，最容易在改按钮时断掉却没人发现：
@@ -2147,11 +2153,11 @@ q9() {
         sh /opt/qc/action.sh "$@"
 }
 
-eq "$(q9 boost on)" "暴力模式 -> 开启（顶墙才降流 · 档位 10 · 快充阈值 85%）" "boost on 回执"
+eq "$(q9 boost on)" "暴力模式 -> 开启（四档降流 · 档位 10 · 快充阈值 85%）" "boost on 回执"
 eq "$(sed -n 's/^curr_edge=//p' "$D9/state.conf")" "0"  "boost on：限流提前量归零"
 eq "$(sed -n 's/^aggr=//p'      "$D9/state.conf")" "10" "boost on：档位回满 10"
 eq "$(sed -n 's/^fast_cap=//p'  "$D9/state.conf")" "85" "boost on：快充阈值 85%"
-eq "$(q9 boost off)" "暴力模式 -> 关闭（距墙 4℃ 降流 · 档位 10 · 快充阈值 55%）" "boost off 回执"
+eq "$(q9 boost off)" "暴力模式 -> 关闭（四档降流 · 档位 10 · 快充阈值 55%）" "boost off 回执"
 eq "$(sed -n 's/^curr_edge=//p' "$D9/state.conf")" "4"  "boost off：限流提前量回到 4"
 eq "$(sed -n 's/^fast_cap=//p'  "$D9/state.conf")" "55" "boost off：快充阈值回到 55%"
 case "$(q9 boost xx)" in *用法*) ok "boost 非法参数被拒" ;; *) ng "boost 非法参数被拒" ;; esac
@@ -2598,7 +2604,7 @@ printf '0\n' >/sys/module/oplus_chg/parameters/ignore_screen_state
 t47 sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode charge; sd_scr_tick' >/dev/null 2>&1
 eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "1" "有内核参数：置 1 接管"
 t47 sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode charge; _sd_screen_on=0; sd_scr_tick' >/dev/null 2>&1
-eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "0" "有内核参数：息屏还原给驱动"
+eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "1" "有内核参数：息屏也保持接管"
 t47 sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode charge; sd_scr_tick' >/dev/null 2>&1
 t47 sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode off; sd_scr_tick' >/dev/null 2>&1
 eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "0" "切关闭模式：参数还原 0"
@@ -2741,7 +2747,7 @@ eq "$i45" "6000" "亮屏 45℃ 仍全额"
 printf '47000\n' >"$D47b/zone0/temp"
 i47=$(t47b sh -c '. /opt/qc/lib/qc.sh; _sd_st_loaded=0; sd_state_load; _sd_screen_on=1;
   _sd_screen_ticks=1; sd_curr_target')
-eq "$i47" "4500" "到 47℃ 才降 75%"
+eq "$i47" "1500" "47℃ 到墙：降到 25%"
 printf '38000\n' >"$D47b/zone0/temp"
 
 # 自定义墙仍生效，但不超过熔断前 1℃

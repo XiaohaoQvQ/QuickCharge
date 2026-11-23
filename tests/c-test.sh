@@ -265,7 +265,7 @@ screen_off
 run sensor >/dev/null
 run sensor >/dev/null
 sv=$(val "$ROOT/sys/module/oplus_chg/parameters/ignore_screen_state")
-chk "息屏后还原 0" "$sv" "0"
+chk "息屏后仍保持 1" "$sv" "1"
 
 # ============================================================ 6b. FCC 回写路径：息屏保持
 # 旧实现息屏 30s 后按 scr.orig 还原，把亮屏被压的 2A 写回去，功率再也上不来。
@@ -302,16 +302,22 @@ out=$(run once)
 echo "$out" | grep -q 'wall=45' && ok "自定义墙 45 仍按 45 生效" || bad "自定义墙被覆盖：$out"
 
 # ============================================================ 6d. 极限充电：亮屏不分档
-echo "[6d] 默认极限：亮屏到墙才降，不再 45℃ 掉到 75%"
+echo "[6d] 默认极限：四档 100/75/50/25 全部贴着墙"
 setup
 state static 30 off off 60 10 6000
 screen_on
+printf '43000\n' >"$(z thermal_zone0)/temp"
+out=$(run once)
+echo "$out" | grep -q 'curr_target=6000' && ok "43℃（墙前 4℃）仍 100%" || bad "提前降档：$out"
 printf '45000\n' >"$(z thermal_zone0)/temp"
 out=$(run once)
-echo "$out" | grep -q 'curr_target=6000' && ok "45℃ 仍 100%（旧行为 75%）" || bad "提前降档：$out"
+echo "$out" | grep -q 'curr_target=4500' && ok "45℃（47-3 之后）75%" || bad "75% 档未生效：$out"
+printf '46000\n' >"$(z thermal_zone0)/temp"
+out=$(run once)
+echo "$out" | grep -q 'curr_target=3000' && ok "46℃ 50%" || bad "50% 档未生效：$out"
 printf '47000\n' >"$(z thermal_zone0)/temp"
 out=$(run once)
-echo "$out" | grep -q 'curr_target=4500' && ok "47℃ 到极限墙降 75%" || bad "到墙未降：$out"
+echo "$out" | grep -q 'curr_target=1500' && ok "47℃ 到墙 25%" || bad "到墙未降：$out"
 printf '34000\n' >"$(z thermal_zone0)/temp"
 
 # ============================================================ 7. 限流

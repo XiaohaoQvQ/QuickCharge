@@ -311,11 +311,7 @@ sd_check() {
     sd_proto_resolve
     pt=$(sd_plat_text)
     pr=$(sd_proto_text)
-    if [ "$_sd_plat" = mtk ]; then
-        printf '[ok] 平台     %s · %s · 降档提前 2℃\n' "$pt" "$_sd_plat_why"
-    else
-        printf '[ok] 平台     %s · %s\n' "$pt" "$_sd_plat_why"
-    fi
+    printf '[ok] 平台     %s · %s\n' "$pt" "$_sd_plat_why"
     case "$_sd_proto" in
         unknown|none) printf '[--] 协议     %s（%s）\n' "$pr" "$_sd_proto_why" ;;
         *)            printf '[ok] 协议     %s（%s）\n' "$pr" "$_sd_proto_why" ;;
@@ -2603,7 +2599,7 @@ sd_screen_tick() {
 }
 
 sd_curr_target_v() {
-    local ma wall cur pct lim
+    local ma wall cur pct lim t75 t50 t25 last
     [ "$_sd_st_loaded" = 1 ] || sd_state_load
     _sd_clamp "${_st_curr_max:-0}" 0 8000 0
     ma=$_sd_rv
@@ -2628,12 +2624,30 @@ sd_curr_target_v() {
     _sd_sb_note=""
     [ "$_sd_screen_ticks" -gt 0 ] || sd_screen_tick
 
-    # 只留最后一级：到墙才 100%→75%。curr_edge 保留在状态里兼容旧配置，
-    # 但不再参与分档，避免 45℃ 就掉功率。
+    # 四档：100/75/50/25，全部贴着墙走（不提前）：
+    # 墙-3℃ 起 75%，墙-1℃ 起 50%，到墙 25%。
+    # 绝对限流（curr_max）仍在最前面做硬上限，默认 0 = 不设。
+    t75=$((wall - 3)); [ "$t75" -lt 30 ] && t75=30
+    t50=$((wall - 1)); [ "$t50" -le "$t75" ] && t50=$((t75 + 1))
+    t25=$wall;         [ "$t25" -le "$t50" ] && t25=$((t50 + 1))
+
     pct=100
-    [ "$cur" -ge "$wall" ] && pct=75
+    [ "$cur" -ge "$t75" ] && pct=75
+    [ "$cur" -ge "$t50" ] && pct=50
+    [ "$cur" -ge "$t25" ] && pct=25
+
+    # 滞回：降下去就要回落 2℃ 才准升档，避免 1℃ 抖动把电流来回拉
+    last=${_sd_curr_pct:-100}
+    case "$last" in ''|*[!0-9]*) last=100 ;; esac
+    if [ "$pct" -gt "$last" ]; then
+        case "$last" in
+            25) [ "$cur" -le $((t25 - 2)) ] || pct=25 ;;
+            50) [ "$cur" -le $((t50 - 2)) ] || pct=50 ;;
+            75) [ "$cur" -le $((t75 - 2)) ] || pct=75 ;;
+        esac
+    fi
     _sd_curr_pct=$pct
-    sd_dbg charge "电流目标 ${cur}℃/墙 ${wall}℃ → ${pct}% of ${ma}mA${_sd_sb_note}"
+    sd_dbg charge "电流目标 ${cur}℃/墙 ${wall}℃（${t75}/${t50}/${t25}）→ ${pct}% of ${ma}mA${_sd_sb_note}"
     _sd_rv=$((ma * pct / 100))
     return 0
 }
@@ -2867,16 +2881,9 @@ sd_scr_tick() {
     fi
 
     if [ "$_sd_screen_on" = 0 ]; then
+        # 息屏只更新一次基准（记录驱动在息屏放开的峰值），
+        # 然后跟亮屏一样继续接管：两条路径都不在息屏放手。
         sd_scr_learn
-        # 内核参数那条一写就是「永久忽略屏幕」，息屏还原给驱动按正常 FCC 走；
-        # FCC 路径不再放手：一放手，驱动/热管理压下来的档位就没人顶回去，
-        # 用户看到的就是"息屏反而更慢"。
-        if sd_scr_node; then
-            if sd_scr_active; then
-                sd_scr_release; _sd_scr_log=""
-            fi
-            return 0
-        fi
     fi
 
     # 默认开启后所有人都会走到这里，两条路径共用一道温度闸：

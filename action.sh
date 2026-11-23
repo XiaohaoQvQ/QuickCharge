@@ -30,8 +30,8 @@ Quick Charge (QC) 控制入口。
   restart                      重启守护进程（改完参数后强制立即生效）
   wall <35-60|off>             温度墙：60 或 off = 无限制（熔断前 1℃）
   curr <300-8000|off>          充电限流（mA），按温度联动降流
-  curredge <0-6>               兼容保留：默认 0（顶墙），已不参与分档
-  boost <on|off>               暴力模式：顶墙才降流 + 档位 10 + 快充阈值 85%
+  curredge <0-6>               兼容保留：已不参与分档（固定四档 100/75/50/25）
+  boost <on|off>               暴力模式：档位 10 + 快充阈值 85%（分档已是四档）
   hz <60-185|off> [soft|hard]  设置刷新率；hard 额外锁定内容帧率匹配
   hzguard <on|off>             开关强制锁定（档位不变，只切换力度）
   power                        电流 / 电压 / 功率读数（JSON，供面板采样）
@@ -76,7 +76,7 @@ sd_ensure_daemon() {
 }
 
 sd_do_status() {
-    local mode c nc wall aggr curmax curtar sz real slim bc mt src dpid nmn _ce _sb bs
+    local mode c nc wall aggr curmax curtar sz real slim bc mt src dpid nmn _sb bs
     mode=$(sd_state_get temp_mode off)
     [ "$mode" = "dyn" ] && mode=static
     c=$(sd_state_get core_temp off)
@@ -118,11 +118,18 @@ sd_do_status() {
     fi
     printf '热管理    %s\n' "$([ "$(sd_state_get horae 1)" = 0 ] && echo '已停用（horae 停止）' || echo '系统默认')"
     printf '哨兵      %s %s℃ / 上限 %s℃  [%s]\n' "$sz" "${real:--}" "${slim:-off}" "${src:-未读到}"
-    _ce=$(sd_state_int curr_edge 4 0 6)
-    printf '电流上限  %s\n' "$([ "$curmax" -gt 0 ] && echo "${curmax}mA（当前允许 ${curtar}mA，$([ "$_ce" -eq 0 ] && echo '顶墙才降' || echo "距墙 ${_ce}℃ 开始降")）" || echo '关闭')"
+    if [ "$curmax" -gt 0 ]; then
+        printf '电流上限  %s\n' "${curmax}mA（绝对限流，当前允许 ${curtar}mA）"
+    else
+        printf '电流上限  默认关闭（不设绝对限流，跟随温度墙四档 100/75/50/25）\n'
+    fi
     [ "$_sd_screen_ticks" -gt 0 ] || sd_screen_tick
     case "$(sd_scr_state)" in
-        kernel) printf '亮屏快充  已接管（内核 ignore_screen_state）\n' ;;
+        kernel) if [ "$_sd_screen_on" = 0 ]; then
+                    printf '亮屏快充  已接管（内核 ignore_screen_state，息屏保持）\n'
+                else
+                    printf '亮屏快充  已接管（内核 ignore_screen_state）\n'
+                fi ;;
         fcc)    if [ "$_sd_screen_on" = 0 ]; then
                     printf '亮屏快充  已接管（回写 FCC，息屏保持）\n'
                 else
@@ -613,27 +620,23 @@ case "$1" in
     curr)    shift; sd_set_curr "${1:-off}" ;;
     curredge) shift
              case "${1:-}" in
-                 ''|*[!0-9]*) echo "用法: curredge 0-6（0=顶到墙才降流）"; exit 1 ;;
+                 ''|*[!0-9]*) echo "用法: curredge 0-6（兼容参数，已不参与分档）"; exit 1 ;;
              esac
-             [ "$1" -le 6 ] || { echo "用法: curredge 0-6（0=顶到墙才降流）"; exit 1; }
+             [ "$1" -le 6 ] || { echo "用法: curredge 0-6（兼容参数，已不参与分档）"; exit 1; }
              sd_state_set curr_edge "$1"
-             if [ "$1" -eq 0 ]; then
-                 echo "限流 -> 顶到墙才降"
-             else
-                 echo "限流 -> 距墙 $1℃ 开始降"
-             fi ;;
+             echo "限流提前量 -> $1℃（兼容参数，当前固定四档：墙-3/墙-1/墙）" ;;
     boost)   shift
              case "${1:-on}" in
                  on|1)
                      sd_state_set curr_edge 0
                      sd_state_set aggr 10
                      sd_state_set fast_cap 85
-                     echo "暴力模式 -> 开启（顶墙才降流 · 档位 10 · 快充阈值 85%）" ;;
+                     echo "暴力模式 -> 开启（四档降流 · 档位 10 · 快充阈值 85%）" ;;
                  off|0)
                      sd_state_set curr_edge 4
                      sd_state_set aggr 10
                      sd_state_set fast_cap 55
-                     echo "暴力模式 -> 关闭（距墙 4℃ 降流 · 档位 10 · 快充阈值 55%）" ;;
+                     echo "暴力模式 -> 关闭（四档降流 · 档位 10 · 快充阈值 55%）" ;;
                  *)  echo "用法: boost on|off"; exit 1 ;;
              esac ;;
     hz)      shift; sd_hz_set "${1:-}" "${2:-}" ;;
