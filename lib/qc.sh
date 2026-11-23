@@ -510,7 +510,6 @@ _st_hz_prev_mcfr=""
 _st_power_scale=""
 _st_batt_spoof=""
 _st_cool_guard=""
-_st_max_mode=""
 
 sd_state_load() {
     _sd_st_loaded=1
@@ -520,7 +519,7 @@ sd_state_load() {
     _st_curr_edge=""
     _st_log_level=""; _st_tick=""; _st_defrev=""
     _st_hz=""; _st_hz_prev_peak=""; _st_hz_prev_min=""; _st_hz_hard=""; _st_hz_prev_mcfr=""; _st_power_scale=""
-    _st_cells_mode=""; _st_batt_spoof=""; _st_cool_guard=""; _st_max_mode=""
+    _st_cells_mode=""; _st_batt_spoof=""; _st_cool_guard=""
     [ -f "$SD_STATE" ] || { _st_log_level=1; _sd_lv=1; return 0; }
     local k v
     while IFS='=' read -r k v; do
@@ -547,10 +546,10 @@ sd_state_get() {
         battery_limit)  printf '%s' "${_st_battery_limit:-${2:-48}}" ;;
         fast_cap)       printf '%s' "${_st_fast_cap:-${2:-55}}" ;;
         curve_offset)   printf '%s' "${_st_curve_offset:-${2:-120}}" ;;
-        wall)           printf '%s' "${_st_wall:-${2:-42}}" ;;
+        wall)           printf '%s' "${_st_wall:-${2:-60}}" ;;
         aggr)           printf '%s' "${_st_aggr:-${2:-10}}" ;;
         curr_max)       printf '%s' "${_st_curr_max:-${2:-0}}" ;;
-        curr_edge)      printf '%s' "${_st_curr_edge:-${2:-4}}" ;;
+        curr_edge)      printf '%s' "${_st_curr_edge:-${2:-0}}" ;;
         defrev)         printf '%s' "${_st_defrev:-${2:-2}}" ;;
         log_level)      printf '%s' "${_st_log_level:-${2:-1}}" ;;
         tick)           printf '%s' "${_st_tick:-${2:-15}}" ;;
@@ -563,7 +562,6 @@ sd_state_get() {
         cells_mode)     printf '%s' "${_st_cells_mode:-${2:-auto}}" ;;
         batt_spoof)     printf '%s' "${_st_batt_spoof:-${2:-off}}" ;;
         cool_guard)     printf '%s' "${_st_cool_guard:-${2:-1}}" ;;
-        max_mode)       printf '%s' "${_st_max_mode:-${2:-0}}" ;;
         *)              printf '%s' "${2:-}" ;;
     esac
 }
@@ -1536,9 +1534,12 @@ sd_shell_target() {
     base=$_sd_rv
     _sd_clamp "${_st_aggr:-10}" 0 10 10
     gap=$((2 + _sd_rv))
-    case "${_st_wall:-off}" in
+    # 35-59 是真实墙；60 与 off 都表示「不设墙」，直接顶到熔断前 1℃
+    case "${_st_wall:-60}" in
         off|'') wall=0 ;;
-        *) _sd_clamp "${_st_wall:-42}" 35 80 42; wall=$_sd_rv ;;
+        *)
+            _sd_clamp "${_st_wall:-60}" 35 80 60
+            if [ "$_sd_rv" -ge 60 ]; then wall=0; else wall=$_sd_rv; fi ;;
     esac
 
     cur=""
@@ -1582,14 +1583,10 @@ sd_shell_target() {
             ;;
     esac
 
-    if [ "${_st_max_mode:-0}" = 1 ]; then
-        # 极限充电：伪装上限顶到熔断阈值前 1℃，不再受用户设的 42℃ 限制
-        wall=$((limit - 1))
-    fi
     if [ "$wall" -gt 0 ]; then
         barrier=$wall
     else
-        barrier=$((limit - 2))
+        barrier=$((limit - 1))
     fi
     _sd_last_barrier=$barrier
 
@@ -2606,7 +2603,7 @@ sd_screen_tick() {
 }
 
 sd_curr_target_v() {
-    local ma wall cur pct last shift=0 t75 t50 t25 edge lim
+    local ma wall cur pct lim
     [ "$_sd_st_loaded" = 1 ] || sd_state_load
     _sd_clamp "${_st_curr_max:-0}" 0 8000 0
     ma=$_sd_rv
@@ -2616,87 +2613,27 @@ sd_curr_target_v() {
     sd_sentinel_best_v "$_sd_rv" "$_sd_sent_type" || { _sd_rv=$ma; return 0; }
     cur=$_sd_rv
 
-    case "${_st_wall:-off}" in
-        off|'')
-            sd_limit_for_type_v "${_sd_sent_type:-battery}"
-            wall=$_sd_rv
-            case "$wall" in ''|0|off) wall=48 ;; esac
-            wall=$((wall - 4))
-            [ "$wall" -lt 35 ] && wall=35
-            [ "$wall" -gt 80 ] && wall=80 ;;
-        *) _sd_clamp "${_st_wall:-42}" 35 80 42; wall=$_sd_rv
-           [ "$wall" -gt 0 ] || wall=42 ;;
+    # 默认顶墙：墙 = min(用户墙, 熔断前 1℃)。60/off 表示不设墙。
+    # 2.9.75 的极限逻辑已并入默认，不再需要开关。
+    sd_limit_for_type_v "${_sd_sent_type:-battery}"
+    case "$_sd_rv" in ''|0|off) lim=48 ;; *) lim=$_sd_rv ;; esac
+    wall=$((lim - 1))
+    case "${_st_wall:-60}" in
+        off|''|0) ;;
+        *)
+            _sd_clamp "${_st_wall:-60}" 35 60 60
+            if [ "$_sd_rv" -lt 60 ] && [ "$_sd_rv" -lt "$wall" ]; then wall=$_sd_rv; fi ;;
     esac
-
+    _sd_wall_eff=$wall
     _sd_sb_note=""
     [ "$_sd_screen_ticks" -gt 0 ] || sd_screen_tick
-    if [ "${_st_max_mode:-0}" = 1 ]; then
-        # 极限充电：墙直接顶到熔断阈值前 1℃，息屏不再 +2℃，也不再压回 lim-3。
-        # 熔断本身还在，真实温度到 battery_limit 照样撤伪装。
-        sd_limit_for_type_v "${_sd_sent_type:-battery}"
-        case "$_sd_rv" in
-            ''|0|off) ;;
-            *) wall=$((_sd_rv - 1)) ;;
-        esac
-        _sd_sb_note="（极限墙 ${wall}℃）"
-    elif [ "$_sd_screen_on" = 0 ]; then
-        wall=$((wall + 2))
-        sd_limit_for_type_v "${_sd_sent_type:-battery}"
-        case "$_sd_rv" in
-            ''|0|off) ;;
-            *) [ "$wall" -gt $((_sd_rv - 3)) ] && wall=$((_sd_rv - 3)) ;;
-        esac
-        _sd_sb_note="（息屏 +2℃）"
-    fi
-    _sd_wall_eff=$wall
 
-    sd_plat_resolve
-    [ "$_sd_plat" = mtk ] && shift=2
-    _sd_shift_note=""
-    [ "$shift" -gt 0 ] && _sd_shift_note="（MTK 提前 ${shift}℃）"
-
-    _sd_clamp "${_st_curr_edge:-4}" 0 6 4
-    edge=$_sd_rv
-    t75=$((wall - edge - shift))
-    t50=$((wall - edge + 2 - shift))
-    t25=$((wall - edge + 4 - shift))
-    [ "$t75" -lt 30 ] && t75=30
-    sd_limit_for_type_v "${_sd_sent_type:-battery}"
-    lim=$_sd_rv
-    case "$lim" in ''|0|off) lim=48 ;; esac
-    [ "$t25" -ge "$lim" ] && t25=$((lim - 1))
-    [ "$t50" -ge "$t25" ] && t50=$((t25 - 1))
-    [ "$t75" -ge "$t50" ] && t75=$((t50 - 1))
-
-    if [ "${_st_max_mode:-0}" = 1 ]; then
-        # 极限：不按 75/50/25 三档提前掉功率。wall 本身已是熔断前 1℃，
-        # 到墙才降到 75%，再往上就是熔断，中间不再有 lim-3 那一层。
-        t75=$wall
-        pct=100
-        [ "$cur" -ge "$t75" ] && pct=75
-        _sd_curr_pct=$pct
-        sd_dbg charge "电流目标 ${cur}℃/极限墙 ${wall}℃ → ${pct}% of ${ma}mA${_sd_shift_note}${_sd_sb_note}"
-        _sd_rv=$((ma * pct / 100))
-        return 0
-    fi
-
+    # 只留最后一级：到墙才 100%→75%。curr_edge 保留在状态里兼容旧配置，
+    # 但不再参与分档，避免 45℃ 就掉功率。
     pct=100
-    [ "$cur" -ge "$t75" ] && pct=75
-    [ "$cur" -ge "$t50" ] && pct=50
-    [ "$cur" -ge "$t25" ] && pct=25
-
-    last=${_sd_curr_pct:-100}
-    case "$last" in ''|*[!0-9]*) last=100 ;; esac
-    if [ "$pct" -gt "$last" ]; then
-        case "$last" in
-            25) [ "$cur" -le $((t25 - 1)) ] || pct=25 ;;
-            50) [ "$cur" -le $((t50 - 1)) ] || pct=50 ;;
-            75) [ "$cur" -le $((t75 - 1)) ] || pct=75 ;;
-        esac
-    fi
+    [ "$cur" -ge "$wall" ] && pct=75
     _sd_curr_pct=$pct
-
-    sd_dbg charge "电流目标 ${cur}℃/墙${wall}℃ → ${pct}% of ${ma}mA${_sd_shift_note}${_sd_sb_note}"
+    sd_dbg charge "电流目标 ${cur}℃/墙 ${wall}℃ → ${pct}% of ${ma}mA${_sd_sb_note}"
     _sd_rv=$((ma * pct / 100))
     return 0
 }
@@ -2796,25 +2733,15 @@ sd_scr_target() {
     [ "$n" -gt 8000 ] && n=8000
     bt=""
     sd_batt_temp_v && bt=$_sd_rv
-    if [ "${_st_max_mode:-0}" = 1 ]; then
-        # 极限：38/41℃ 两档折损取消，一直给满基准电流，只在熔断前 1℃ 放手。
-        sd_limit_for_type_v battery
-        lim=$_sd_rv
-        case "$lim" in ''|0|off) lim=48 ;; esac
-        case "$bt" in
-            ''|*[!0-9]*) ;;
-            *) [ "$bt" -ge $((lim - 1)) ] && { _sd_rv=0; return 3; } ;;
-        esac
-        _sd_rv=$n
-        [ "$_sd_rv" -ge 500 ]
-        return $?
-    fi
+    # 默认满速：38/41℃ 两档折损已取消，只在熔断前 1℃ 放手。
+    sd_limit_for_type_v battery
+    lim=$_sd_rv
+    case "$lim" in ''|0|off) lim=48 ;; esac
     case "$bt" in
-        ''|*[!0-9]*) _sd_rv=$((n * 7 / 10)) ;;
-        *) if [ "$bt" -le 38 ]; then _sd_rv=$n
-           elif [ "$bt" -le 41 ]; then _sd_rv=$((n * 7 / 10))
-           else _sd_rv=0; return 3; fi ;;
+        ''|*[!0-9]*) ;;
+        *) [ "$bt" -ge $((lim - 1)) ] && { _sd_rv=0; return 3; } ;;
     esac
+    _sd_rv=$n
     [ "$_sd_rv" -ge 500 ]
 }
 
@@ -2955,14 +2882,11 @@ sd_scr_tick() {
     # 默认开启后所有人都会走到这里，两条路径共用一道温度闸：
     # 内核参数那条一写就是「永远不看屏幕」，高温时更不能开。
     # 极限模式下这道闸从写死的 42℃ 抬到熔断前 1℃，与伪装/降流用同一条线。
-    hot_lim=42
-    if [ "${_st_max_mode:-0}" = 1 ]; then
-        sd_limit_for_type_v battery
-        case "$_sd_rv" in
-            ''|0|off) hot_lim=48 ;;
-            *) hot_lim=$((_sd_rv - 1)) ;;
-        esac
-    fi
+    sd_limit_for_type_v battery
+    case "$_sd_rv" in
+        ''|0|off) hot_lim=48 ;;
+        *) hot_lim=$((_sd_rv - 1)) ;;
+    esac
     bt=""
     sd_batt_temp_v && bt=$_sd_rv
     case "$bt" in
@@ -3215,16 +3139,14 @@ sd_cool_tick() {
     # 亮屏游戏就只剩 5~10W。灭屏时驱动自己给 0，写 0 对它是空操作，没有副作用。
 
     # 极限模式下把「留 2」与「交还」两条线一起抬到熔断前 1℃，中间不再轻放。
+    # 默认极限：45℃ 不再留「轻度降流」，一直写 0，到熔断前 1℃ 才交还驱动
     cool_stop=48
-    cool_soft=45
-    if [ "${_st_max_mode:-0}" = 1 ]; then
-        sd_limit_for_type_v battery
-        case "$_sd_rv" in
-            ''|0|off) ;;
-            *) cool_stop=$((_sd_rv - 1)) ;;
-        esac
-        cool_soft=$cool_stop
-    fi
+    sd_limit_for_type_v battery
+    case "$_sd_rv" in
+        ''|0|off) ;;
+        *) cool_stop=$((_sd_rv - 1)) ;;
+    esac
+    cool_soft=$cool_stop
     bt=""
     sd_batt_temp_v && bt=$_sd_rv
     case "$bt" in ''|*[!0-9]*) bt=0 ;; esac

@@ -82,7 +82,7 @@ temp_mode=${1:-static}
 shell_temp=${2:-30}
 core_temp=${3:-off}
 noncore_temp=${4:-off}
-wall=${5:-42}
+wall=${5:-60}
 aggr=${6:-10}
 curr_max=${7:-0}
 curr_edge=4
@@ -289,23 +289,22 @@ chk "息屏也顶回 3A" \
     "$(val "$ROOT/sys/class/power_supply/battery/constant_charge_current_max")" "3000000"
 
 # ============================================================ 6c. 极限充电：墙顶到熔断前 1℃
-echo "[6c] 极限充电：max_mode 覆盖 42℃ 墙"
+echo "[6c] 默认极限：墙 60 = 无限制，顶到熔断前 1℃"
 setup
-state static 30 off off 42 10 6000
-printf 'max_mode=1\n' >>"$BASE/data/state.conf"
+state static 30 off off 60 10 6000
 screen_off
 out=$(run once)
-echo "$out" | grep -q 'wall=47' && ok "电流墙 42 -> 47（熔断 48-1）" || bad "极限墙未生效：$out"
+echo "$out" | grep -q 'wall=47' && ok "默认墙 60 -> 47（熔断 48-1）" || bad "默认极限墙未生效：$out"
 setup
-state static 30 off off 42 10 6000
+state static 30 off off 45 10 6000
+screen_on
 out=$(run once)
-echo "$out" | grep -q 'wall=42' && ok "关掉后回到用户设的 42" || bad "非极限模式墙被改：$out"
+echo "$out" | grep -q 'wall=45' && ok "自定义墙 45 仍按 45 生效" || bad "自定义墙被覆盖：$out"
 
 # ============================================================ 6d. 极限充电：亮屏不分档
-echo "[6d] 极限充电：亮屏到极限墙才降，不再 45℃ 掉到 75%"
+echo "[6d] 默认极限：亮屏到墙才降，不再 45℃ 掉到 75%"
 setup
-state static 30 off off 42 10 6000
-printf 'max_mode=1\n' >>"$BASE/data/state.conf"
+state static 30 off off 60 10 6000
 screen_on
 printf '45000\n' >"$(z thermal_zone0)/temp"
 out=$(run once)
@@ -418,7 +417,7 @@ chk "亮屏 34℃/40% → 0" "$(val "$COOL")" "0"
 
 printf '7\n' >"$COOL"; printf '46000\n' >"$BT"
 run sensor >/dev/null 2>&1
-chk "电池 46℃ → 2" "$(val "$COOL")" "2"
+chk "电池 46℃ 不再轻度降流 → 0" "$(val "$COOL")" "0"
 
 printf '7\n' >"$COOL"; printf '49000\n' >"$BT"
 run sensor >/dev/null 2>&1
@@ -430,7 +429,7 @@ chk "电量 90% 也写 0（写 1 会掉协议）" "$(val "$COOL")" "0"
 
 printf '7\n' >"$COOL"; printf '46000\n' >"$BT"; printf '90\n' >"$CAP"
 run sensor >/dev/null 2>&1
-chk "电量 90% 且 46℃ → 2" "$(val "$COOL")" "2"
+chk "电量 90% 且 46℃ 仍 0" "$(val "$COOL")" "0"
 
 printf '7\n' >"$COOL"; printf '34000\n' >"$BT"; printf '40\n' >"$CAP"
 screen_off

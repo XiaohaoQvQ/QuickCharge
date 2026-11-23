@@ -198,42 +198,18 @@
   <div class="rw"><input type="range" id="aggr" min="0" max="10" step="1"></div>
   <div class="switch" style="margin-top:2px">温差 = 2 + 档位，越高压得越狠</div>
 
-  <div class="row" style="margin-top:18px">
-    <label for="wall">温度墙</label>
-    <span class="val" id="wallV">—</span>
-  </div>
-  <div class="rw"><input type="range" id="wall" min="35" max="80" step="1" value="42"></div>
-  <div class="switch" style="margin-top:2px">
-    <input type="checkbox" id="wallOff"><label for="wallOff">关闭温度墙（伪装持续到熔断阈值前 2℃）</label>
-  </div>
-
-  <div class="row" style="margin-top:18px"><label for="curredge">限流提前量</label><span class="val" id="curredgeV">—</span></div>
-  <div class="rw"><input type="range" id="curredge" min="0" max="6" step="1" value="4"></div>
-  <div class="switch" style="margin-top:2px">0 = 到墙才降；越大越早降</div>
+  <div class="row" style="margin-top:18px"><label for="wall">温度墙</label><span class="val" id="wallV">—</span></div>
+  <div class="rw"><input type="range" id="wall" min="35" max="60" step="1" value="60"></div>
+  <div class="switch" style="margin-top:2px">35~59 为真实墙；拉到 60 = 无限制（熔断前 1℃）</div>
 
   <div class="row" style="margin-top:18px"><label for="shell">基准温度</label><span class="val" id="shellV">—</span></div>
   <div class="rw"><input type="range" id="shell" min="25" max="60" step="1"></div>
   <div class="switch" id="shellHint">改写上限；真实低于它时不改写</div>
 
-  <div class="acts" style="margin-top:22px;grid-template-columns:1fr">
-    <button id="maxMode">极限充电（亮屏息屏满速）</button>
-  </div>
-  <div class="switch" id="maxHint" style="margin-top:6px">
-    一键把亮屏、息屏的降流闸全顶到熔断前 1℃：墙、电流档位、FCC 折损、cool_down、限流、热管理；再点一次恢复原设置
-  </div>
-
-  </div></div>
-</div>
-
-<div class="card fold closed" id="foldCur">
-  <div class="hd" id="foldCurHd" role="button" aria-expanded="false">
-    <h2>熔断阈值<span class="sm" id="sumCur"></span></h2>
-    <span class="chev"></span>
-  </div>
-  <div class="bd" id="foldCurBd"><div class="bd-in">
-  <div class="row" style="margin-top:2px"><label for="batt">电池</label><span class="val" id="battV">—</span></div>
+  <div class="row" style="margin-top:18px"><label for="batt">熔断阈值 · 电池</label><span class="val" id="battV">—</span></div>
   <div class="rw"><input type="range" id="batt" min="30" max="70" step="1"></div>
-  <div class="row" style="margin-top:14px"><label for="soc">主板 / SoC</label><span class="val" id="socV">—</span></div>
+
+  <div class="row" style="margin-top:14px"><label for="soc">熔断阈值 · 主板</label><span class="val" id="socV">—</span></div>
   <div class="rw"><input type="range" id="soc" min="60" max="110" step="1"></div>
   </div></div>
 </div>
@@ -701,25 +677,13 @@
     if (rngPush("aggr", d.aggr)) {
       $("aggrV").textContent = d.aggr + "/10 · 温差 " + d.gap + "℃";
     }
-    if (rngPush("curredge", d.curr_edge)) {
-      $("curredgeV").textContent = Number(d.curr_edge) === 0
-        ? "顶墙" : "距墙 " + d.curr_edge + "℃";
-    }
-    if (d.wall !== "off" && rngPush("wall", d.wall)) {
+    var wallOff = d.wall === "off" || Number(d.wall) >= 60;
+    if (wallOff) {
+      if (!rngBusy("wall")) $("wall").value = 60;
+      $("wallV").textContent = "无限制";
+    } else if (rngPush("wall", d.wall)) {
       $("wallV").textContent = d.wall + "℃";
-    } else if (d.wall === "off") {
-      $("wallV").textContent = "关";
     }
-    $("wallOff").checked = d.wall === "off";
-    $("wall").disabled = d.wall === "off";
-    var mx = d.max === true;
-    var mb = $("maxMode");
-    mb.className = mx ? "on" : "";
-    mb.textContent = mx ? "极限充电 · 已开启" : "极限充电（亮屏息屏满速）";
-    $("maxHint").textContent = mx
-      ? "亮屏息屏都满速 · 温度墙 " + (d.wall === "off" ? "关" : d.wall + "℃") +
-        " · 到墙才降 · 限流与热管理已停；再点一次恢复"
-      : "一键把亮屏、息屏的降流闸全顶到熔断前 1℃：墙、电流档位、FCC 折损、cool_down、限流、热管理；再点一次恢复原设置";
     if (d.level !== undefined && d.level !== null) {
       var lv = Number(d.level) || 0;
       $("lvNow").textContent = lv >= 2 ? "详细" : (lv === 1 ? "事件" : "关闭");
@@ -727,7 +691,7 @@
       $("logDetail").className = lv >= 2 ? "on" : "";
     }
     if (!rngBusy("shell")) {
-      $("shell").max = d.wall === "off" ? 60 : Math.max(25, Number(d.wall) - 2);
+      $("shell").max = wallOff ? 60 : Math.max(25, Number(d.wall) - 2);
     }
     if (rngPush("shell", d.shell_temp)) {
       $("shellV").textContent = d.base_clamped
@@ -736,7 +700,7 @@
     }
     $("shellHint").textContent = d.base_clamped
       ? "基准 ≥ 停止线，区间为空；建议 30~33℃"
-      : (d.wall === "off"
+      : (wallOff
           ? "改写上限；真实低于它时不改写"
           : "须低于墙 " + d.wall + "℃；真实低于它时不改写");
     if (rngPush("batt", d.battery_limit === "off" ? 48 : d.battery_limit)) {
@@ -795,10 +759,9 @@
     $("hzHint").textContent = ht;
     $("hzHint").style.display = ht ? "" : "none";
     $("sumMain").textContent = "档位 " + d.aggr + " · 墙 " +
-      (d.wall === "off" ? "关" : d.wall + "℃");
-    $("sumCur").textContent = "电池 " +
-      (d.battery_limit === "off" ? "关" : d.battery_limit + "℃") +
-      " · 主板 " + (d.sentinel_limit === "off" ? "关" : d.sentinel_limit + "℃");
+      (wallOff ? "无限制" : d.wall + "℃") + " · 熔断 " +
+      (d.battery_limit === "off" ? "关" : d.battery_limit + "℃") + "/" +
+      (d.sentinel_limit === "off" ? "关" : d.sentinel_limit + "℃");
   }
   function hzParse(v) {
     var a = [], p = String(v || "").split(/[ ,]+/), i, n;
@@ -1142,7 +1105,6 @@
   }
   function initFolds() {
     bindFold("foldMain", "qc.fold.main", false);
-    bindFold("foldCur", "qc.fold.cur", false);
     bindFold("foldHz", "qc.fold.hz", false);
     bindFold("foldCpu", "qc.fold.cpu", false);
     bindFold("foldExtreme", "qc.fold.ext", false);
@@ -1193,11 +1155,9 @@
     bindRange("aggr", "aggrV",
       function (v) { return v + "/10 · 温差 " + (Number(v) + 2) + "℃"; },
       function (v) { return "gear " + v; });
-    bindRange("wall", "wallV", function (v) { return v + "℃"; },
+    bindRange("wall", "wallV",
+      function (v) { return Number(v) >= 60 ? "无限制" : v + "℃"; },
       function (v) { return "wall " + v; });
-    bindRange("curredge", "curredgeV",
-      function (v) { return Number(v) === 0 ? "顶墙" : "距墙 " + v + "℃"; },
-      function (v) { return "curredge " + v; });
     bindRange("shell", "shellV", function (v) { return v + "℃"; },
       function (v) { return "base " + v; });
     bindRange("batt", "battV", function (v) { return v + "℃"; },
@@ -1214,20 +1174,6 @@
       } else {
         apply("core " + $("coreT").value, "CPU 伪装 -> " + $("coreT").value + "℃");
       }
-    });
-    $("wallOff").addEventListener("change", function () {
-      var off = this.checked;
-      $("wall").disabled = off;
-      apply(off ? "wall off" : ("wall " + $("wall").value), off ? "温度墙已关闭" : "温度墙已开启");
-    });
-    $("maxMode").addEventListener("click", function () {
-      var on = !!(S && S.max === true);
-      if (!on) {
-        ask("极限充电会把亮屏、息屏所有降流闸顶到电池熔断阈值前 1℃：温度墙、电流档位、亮屏 FCC 的 38/41℃ 折损、cool_down 降流全部取消，同时解除你设的限流并停用系统热管理（horae）。\n\n真实高温下继续满速充电会加速电池衰减，长期高温有鼓包风险，且不在保修范围。\n\n确定开启？",
-          function () { apply("max on", "极限充电已开启"); });
-        return;
-      }
-      apply("max off", "已恢复开启前的设置");
     });
     bindRange("battSp", "battSpV", function (v) { return v + "℃"; },
       function (v) { return "batt " + v; });

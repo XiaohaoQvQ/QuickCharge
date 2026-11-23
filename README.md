@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`2.9.75`（`versioncode 29631`），C 版为 `2.9.75-c`
+- 当前版本：`3.0.0-test`（`versioncode 300001`），C 版为 `3.0.0-test-c`
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -112,15 +112,14 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 模块带 `webroot/index.html`，在 **KernelSU / KsuWebUI / MMRL** 里点模块的「打开」即可。
 纯静态页面，命令走管理器的 `ksu.exec`，与命令行完全一致，改完立即生效。
 
-从上到下十一张卡：
+从上到下十张卡：
 
 | 卡片 | 内容 |
 |---|---|
 | 实时状态 | 真实 / 系统看到 / 配置 / 守护 四格，下面一行结论文案 |
 | 实时功耗 | 电流、功率、电池温度，附一条只在页面打开时采样的曲线 |
 | 温控改写范围 | 全局运行 / 仅充电 / 关闭 三个按钮 |
-| 核心参数 | 档位、温度墙、基准温度、限流提前量；底部一个「极限充电」按钮（一键亮屏息屏满速） |
-| 熔断阈值 | 电池、主板两个阈值 |
+| 核心参数 | 档位、温度墙（60 = 无限制）、基准温度、熔断阈值（电池 / 主板） |
 | 极端功率 | 电池 NTC 伪装与 `thermal`，默认「安全边界未动」 |
 | CPU 伪装 | 核心温度固定值 + 关闭开关 |
 | 刷新率 | 6 格滑块 + 强制锁定 |
@@ -128,7 +127,7 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 | 操作 | 刷新 / 重挂 / 重启守护 三个按钮一行 |
 
 状态卡那行结论只给数字关系，不给形容词：`真实 41℃ → 系统看到 28℃`、
-`真实 41℃ < 基准 43℃`、`真实 43℃ ≥ 墙 42℃ · 交回系统`、`待机中 · 插电后接管`、
+`真实 41℃ < 基准 43℃`、`真实 46℃ ≥ 墙 45℃ · 交回系统`、`待机中 · 插电后接管`、
 `写入失败 · 系统仍读真实温度`。两个数不一样就是在骗系统，一样就是没改写。
 
 **模块描述页也会显示状态**。管理器模块列表里那一行 `description` 由守护同步，三种写法：
@@ -167,10 +166,10 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 | `shell_temp` | `30` | 25 到 60 | `static` 模式的目标壳温 |
 | `core_temp` | `off` | off / 20 到 100 | CPU / GPU / DDR 固定伪装 |
 | `noncore_temp` | `off` | off / 20 到 100 | 其它温区固定伪装 |
-| `wall` | `42` | 35 到 80 | 温度墙：真实温度到此停止伪装 |
+| `wall` | `60` | 35 到 60 | 温度墙：真实温度到此停止伪装；60 = 无限制（熔断前 1℃） |
 | `aggr` | `10` | 0 到 10 | 温控档位，越高越激进（CLI 里叫 `gear`） |
 | `curr_max` | `0` | 0 / 300 到 8000 | 充电限流 mA，0 = 不限（面板没有滑块，改这里） |
-| `curr_edge` | `4` | 0 到 6 | 距墙几度开始降流，0 = 顶到墙才降 |
+| `curr_edge` | `0` | 0 到 6 | 兼容保留：默认 0。电流只分 100%/75% 两档，到墙才降 |
 | `fast_cap` | `55` | 20 到 90 | 快充生效的电量阈值 % |
 | `battery_limit` | `48` | 30 到 70 | 电池哨兵熔断阈值 ℃ |
 | `sentinel_limit` | `85` | 60 到 110 | SoC / 主板哨兵熔断阈值 ℃ |
@@ -218,15 +217,14 @@ ACTION=/data/adb/modules/quickcharge/action.sh
 | `batt <off\|20-45>` | 电池 NTC 伪装（真实 ≥46℃ 自动撤销并冷却 120s） |
 | `gear <0-10>` | 温控档位，`aggr` 为旧名 |
 | `base <25-60>` | 只改基准温度，不切模式 |
-| `wall <35-80\|off>` | 温度墙 |
+| `wall <35-60\|off>` | 温度墙，60 或 off = 无限制 |
 
 **充电**
 
 | 命令 | 作用 |
 |---|---|
 | `curr <300-8000\|off>` | 充电限流 mA，按温度联动降流 |
-| `curredge <0-6>` | 距墙几度开始降流 |
-| `max <on\|off>` | 极限充电：亮屏息屏所有降流闸顶到熔断前 1℃（墙、档位、FCC 折损、cool_down、限流、horae），一键开关 |
+| `curredge <0-6>` | 兼容保留，默认 0；不再参与分档 |
 | `fast <20-90>` | 快充生效电量阈值 % |
 | `sentinel <60-110\|off>` | SoC / 主板熔断阈值 |
 | `battery <30-70\|off>` | 电池熔断阈值 |
@@ -373,20 +371,32 @@ su -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 | 仓库 | 当前版本 | 包名 | versioncode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `2.9.75` | `QuickCharge-v2.9.75.zip` + `QuickCharge-v2.9.75-完整包.zip` | 29631 |
-| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `2.9.75-c` | `QuickCharge-v2.9.75-c.zip` | 29632 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.0.0-test` | `QuickCharge-v3.0.0-test.zip` + `QuickCharge-v3.0.0-test-完整包.zip` | 300001 |
+| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.0.0-test-c` | `QuickCharge-v3.0.0-test-c.zip` | 300000 |
 
 `-完整包.zip` 里是「两个模块包 + 两仓 README + 两仓 RELEASE」，日常刷入用不带后缀的那个即可。
 
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v2.9.75
-Quick Charge v2.9.75-c
+Quick Charge v3.0.0-test
+Quick Charge v3.0.0-test-c
 ```
 
-tag 与标题一致：shell 仓 `v2.9.75`，C 仓 `2.9.75-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v3.0.0-test`，C 仓 `3.0.0-test-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
+
+### 版本号规则（3.0 起）
+
+版本固定三段 `主.次.修订`：
+
+- 修 bug / 小改动：修订 +1（`3.0.1`、`3.0.2` …）；
+- **修订到 100 进一位**：`3.0.100` 的下一个版本是 `3.1.0`；
+- 功能线变更：次版本 +1，修订归零。
+
+`versioncode` 按 `(主×100 + 次)×1000 + 修订×2 + 通道` 计算，通道 1 = shell、0 = C，
+两个包始终一奇一偶、严格递增。例：`3.0.0` → shell `300001` / C `300000`，
+`3.0.100` → `300201` / `300200`，`3.1.0` → `301001` / `301000`。
 
 `versioncode` 是管理器判新旧的唯一依据，shell 版为奇数序列、C 版为偶数序列，两者互不覆盖。
 

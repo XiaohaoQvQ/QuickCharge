@@ -28,10 +28,9 @@ Quick Charge (QC) 控制入口。
   gear <0-10>                  温控档位：越高越激进，可拉开温差 = 2 + 档位（aggr 为旧名）
   base <25-60>                 基准温度（只改数值，不切换模式，供 WebUI 用）
   restart                      重启守护进程（改完参数后强制立即生效）
-  wall <35-80|off>             温度墙：真实温度到此即停止伪装
+  wall <35-60|off>             温度墙：60 或 off = 无限制（熔断前 1℃）
   curr <300-8000|off>          充电限流（mA），按温度联动降流
-  curredge <0-6>               限流距墙几度开始降：0=顶到墙才降，4=默认
-  max <on|off>                 极限充电：息屏满速 + 墙顶到熔断前 1℃ + 停 horae（一键）
+  curredge <0-6>               兼容保留：默认 0（顶墙），已不参与分档
   boost <on|off>               暴力模式：顶墙才降流 + 档位 10 + 快充阈值 85%
   hz <60-185|off> [soft|hard]  设置刷新率；hard 额外锁定内容帧率匹配
   hzguard <on|off>             开关强制锁定（档位不变，只切换力度）
@@ -82,7 +81,7 @@ sd_do_status() {
     [ "$mode" = "dyn" ] && mode=static
     c=$(sd_state_get core_temp off)
     nc=$(sd_state_get noncore_temp off)
-    wall=$(sd_state_get wall off)
+    wall=$(sd_state_get wall 60)
     aggr=$(sd_state_int aggr 10 0 10)
     curmax=$(sd_state_int curr_max 0 0 8000)
     sd_read_real
@@ -101,8 +100,11 @@ sd_do_status() {
         off)    printf ' · 未启用（仅配置改写生效）' ;;
     esac
     printf '\n'
-    printf '温控档位  %s/10（可拉开 %s℃）   温度墙 %s\n' "$aggr" $((2 + aggr)) \
-        "$([ "$wall" = off ] && echo '关（熔断前 2℃ 停止）' || echo "${wall}℃")"
+    case "$wall" in
+        off|''|0) walltxt='无限制（熔断前 1℃）' ;;
+        *) if [ "$wall" -ge 60 ]; then walltxt='无限制（熔断前 1℃）'; else walltxt="${wall}℃"; fi ;;
+    esac
+    printf '温控档位  %s/10（可拉开 %s℃）   温度墙 %s\n' "$aggr" $((2 + aggr)) "$walltxt"
     printf '固定伪装  核心 %s   非核心 %s\n' "$c" "$nc"
     bs=$(sd_state_get batt_spoof off)
     if [ "$bs" != off ]; then
@@ -173,7 +175,7 @@ sd_do_json() {
     [ "$mode" = "dyn" ] && mode=static
     c=$(sd_state_get core_temp off)
     nc=$(sd_state_get noncore_temp off)
-    wall=$(sd_state_get wall off)
+    wall=$(sd_state_get wall 60)
     aggr=$(sd_state_int aggr 10 0 10)
     curmax=$(sd_state_int curr_max 0 0 8000)
     _sd_lv=0
@@ -228,13 +230,12 @@ sd_do_json() {
     printf '"sentinel":"%s","real":%s,"limit":"%s","real_src":"%s","real_age":%s,"real_why":"%s","emul_ok":%s,' \
         "$sname" "$rj" "${slim:-off}" "$src" "$rage" "${_sd_rr_why:-}" "${_sd_rr_emul:--1}"
     printf '"curr_max":%s,"curr_target":%s,"curr_edge":%s,"fast_cap":%s,' \
-        "$curmax" "${curtar:-0}" "$(sd_state_int curr_edge 4 0 6)" "$(sd_state_int fast_cap 55 20 90)"
+        "$curmax" "${curtar:-0}" "$(sd_state_int curr_edge 0 0 6)" "$(sd_state_int fast_cap 55 20 90)"
     [ "$_sd_screen_ticks" -gt 0 ] || sd_screen_tick
     _sbase=0
     [ -f "$SD_FCC_NORM" ] && _sbase=$(tr -d '\r\n' <"$SD_FCC_NORM" 2>/dev/null)
     case "$_sbase" in ''|*[!0-9]*) _sbase=0 ;; esac
-    printf '"max":%s,"screen":%s,"screen_mode":"%s","screen_base":%s,' \
-        "$([ "$(sd_state_get max_mode 0)" = 1 ] && echo true || echo false)" \
+    printf '"screen":%s,"screen_mode":"%s","screen_base":%s,' \
         "$([ "$_sd_screen_on" = 0 ] && echo 0 || echo 1)" \
         "$(sd_scr_state)" "$_sbase"
     printf '"batt_spoof":"%s","batt_real":%s,"thermal":"%s",' \
@@ -366,14 +367,14 @@ sd_set_pscale() {
 
 sd_set_wall() {
     local v="$1" bl base nb
-    if [ "$v" = "off" ] || [ "$v" = "0" ]; then
-        sd_state_set wall off
-        sd_info cmd "温度墙 → off"
-        echo "温度墙 -> 关闭（伪装持续到熔断阈值前 2℃）"
+    if [ "$v" = "off" ] || [ "$v" = "0" ] || [ "$v" = "60" ]; then
+        sd_state_set wall 60
+        sd_info cmd "温度墙 → 60（无限制）"
+        echo "温度墙 -> 无限制（伪装持续到熔断前 1℃）"
         return 0
     fi
-    case "$v" in ''|*[!0-9]*) echo "温度墙需为 35~80 的整数或 off"; return 1 ;; esac
-    [ "$v" -ge 35 ] && [ "$v" -le 80 ] || { echo "温度墙需为 35~80 的整数或 off"; return 1; }
+    case "$v" in ''|*[!0-9]*) echo "温度墙需为 35~60 的整数，60 = 无限制"; return 1 ;; esac
+    [ "$v" -ge 35 ] && [ "$v" -le 60 ] || { echo "温度墙需为 35~60 的整数，60 = 无限制"; return 1; }
     bl=$(sd_state_int battery_limit 48 30 70)
     [ "$v" -ge "$bl" ] && echo "注意：墙 ${v}℃ ≥ 电池熔断 ${bl}℃，墙不会生效（熔断先触发）"
 
@@ -510,11 +511,11 @@ sd_menu_sub() {
             esac ;;
         power)
             printf '\n1) 档位 10  2) 档位 8  3) 档位 5  4) 档位 2\n'
-            printf '5) 温度墙 42℃  6) 温度墙 40℃  7) 温度墙 45℃  8) 关闭温度墙  0) 返回\n选择: '
+            printf '5) 无限制（默认）  6) 温度墙 50℃  7) 温度墙 45℃  0) 返回\n选择: '
             read -r t || return 0
             case "$t" in
                 1) sd_set_aggr 10 ;; 2) sd_set_aggr 8 ;; 3) sd_set_aggr 5 ;; 4) sd_set_aggr 2 ;;
-                5) sd_set_wall 42 ;; 6) sd_set_wall 40 ;; 7) sd_set_wall 45 ;; 8) sd_set_wall off ;;
+                5) sd_set_wall 60 ;; 6) sd_set_wall 50 ;; 7) sd_set_wall 45 ;;
             esac ;;
         charge)
             printf '\n1) 关闭限流  2) 1000mA  3) 2000mA  4) 3000mA  5) 4000mA\n'
@@ -558,72 +559,6 @@ sd_menu() {
     done
 }
 
-# 一键极限充电：亮屏息屏都顶到熔断前 1℃，把所有会提前降流的闸一起抬上去。
-#   温度墙 / 伪装屏障 / 电流档位 / 亮屏 FCC 三档折损 / cool_down 降流 / 限流 / horae
-# 关闭时按 run/max.bak 原样恢复，不把用户原来的墙 / 档位 / 限流吞掉。
-sd_do_max() {
-    local f="$SD_RUN/max.bak" bl k v
-    case "${1:-on}" in
-        on|1)
-            if [ "$(sd_state_get max_mode 0)" = 1 ]; then
-                echo "极限充电已在运行"
-                return 0
-            fi
-            bl=$(sd_state_int battery_limit 48 30 70)
-            [ "$bl" -lt 40 ] && bl=40
-            {
-                printf 'temp_mode=%s\n'  "$(sd_state_get temp_mode off)"
-                printf 'wall=%s\n'       "$(sd_state_get wall 42)"
-                printf 'curr_edge=%s\n'  "$(sd_state_get curr_edge 4)"
-                printf 'aggr=%s\n'       "$(sd_state_get aggr 10)"
-                printf 'fast_cap=%s\n'   "$(sd_state_get fast_cap 55)"
-                printf 'horae=%s\n'      "$(sd_state_get horae 1)"
-                printf 'curr_max=%s\n'   "$(sd_state_get curr_max 0)"
-                printf 'cool_guard=%s\n' "$(sd_state_get cool_guard 1)"
-            } >"$f" 2>/dev/null
-
-            sd_state_set temp_mode charge
-            sd_state_set wall "$((bl - 1))"
-            sd_state_set curr_edge 0
-            sd_state_set aggr 10
-            sd_state_set fast_cap 85
-            # 绝对值限流会让屏幕快充整段放弃接管，极限模式下先解除（原值已备份）
-            sd_state_set curr_max 0
-            sd_state_set cool_guard 1
-            sd_horae 0
-            sd_state_set horae 0
-            sd_state_set max_mode 1
-            echo "极限充电 -> 开启"
-            echo "  亮屏息屏都满速 · 所有降流闸顶到熔断前 1℃（$((bl - 1))℃）"
-            echo "  亮屏 FCC 不再 38/41℃ 折损 · cool_down 不再提前写 2 · 限流已解除"
-            echo "  系统热管理已停 · 熔断仍为 ${bl}℃（真实到线即撤伪装）"
-            echo "  关闭: sh action.sh max off" ;;
-        off|0)
-            if [ ! -f "$f" ]; then
-                sd_state_set max_mode 0
-                echo "极限充电 -> 关闭（没有找到上次的配置备份，保持当前值）"
-                return 0
-            fi
-            while IFS='=' read -r k v; do
-                case "$k" in
-                    temp_mode|wall|curr_edge|aggr|fast_cap|horae|curr_max|cool_guard) ;;
-                    *) continue ;;
-                esac
-                [ -n "$v" ] || continue
-                sd_state_set "$k" "$v"
-            done <"$f"
-            rm -f "$f" 2>/dev/null
-            sd_state_set max_mode 0
-            case "$(sd_state_get horae 1)" in
-                1) sd_horae 1 ;;
-                0) sd_horae 0 ;;
-            esac
-            echo "极限充电 -> 关闭（已恢复开启前的墙 / 档位 / 限流 / 热管理设置）" ;;
-        *)
-            echo "用法: max on|off"; return 1 ;;
-    esac
-}
-
 # 只给会改状态的命令写段头。power/json/status 这些面板每 3 秒就要调一次，
 # 每次写 6 行会把日志刷满，真正有用的记录全被埋掉。
 case "${1:-}" in
@@ -653,11 +588,11 @@ case "$1" in
              v="${1:-}"
              case "$v" in ''|*[!0-9]*) echo "基准温度需为 25~60 的整数"; exit 1 ;; esac
              { [ "$v" -ge 25 ] && [ "$v" -le 60 ]; } || { echo "基准温度需为 25~60 的整数"; exit 1; }
-             w=$(sd_state_get wall off)
+             w=$(sd_state_get wall 60)
              case "$w" in
                  off|''|0) ;;
                  *)
-                     if [ "$v" -ge "$w" ]; then
+                     if [ "$w" -lt 60 ] && [ "$v" -ge "$w" ]; then
                          nb=$((w - 2)); [ "$nb" -lt 25 ] && nb=25
                          sd_info cmd "基准 ${v}℃ ≥ 墙 ${w}℃，收敛 → ${nb}℃"
                          echo "基准 ${v}℃ 不低于温度墙 ${w}℃，按 ${nb}℃ 生效（基准必须低于墙，否则全程不改写）"
@@ -687,7 +622,6 @@ case "$1" in
              else
                  echo "限流 -> 距墙 $1℃ 开始降"
              fi ;;
-    max)     shift; sd_do_max "${1:-on}" ;;
     boost)   shift
              case "${1:-on}" in
                  on|1)

@@ -79,7 +79,6 @@ typedef struct {
     int hz_hard;
     char hz_prev_mcfr[16];
     int cool_guard;      /* 1=亮屏解除 oplus cool_down 降流 */
-    int max_mode;        /* 1=极限充电：墙顶到熔断前 1℃，息屏不 +2 */
 } conf_t;
 
 static conf_t g_c;
@@ -318,12 +317,12 @@ static void conf_defaults(void)
 {
     memset(&g_c, 0, sizeof g_c);
     snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "off");
-    snprintf(g_c.wall, sizeof g_c.wall, "42");
+    snprintf(g_c.wall, sizeof g_c.wall, "60");
     snprintf(g_c.hz, sizeof g_c.hz, "off");
     g_c.shell_temp = 30;
     g_c.aggr = 10;
     g_c.curr_max = 0;
-    g_c.curr_edge = 4;
+    g_c.curr_edge = 0;
     g_c.battery_limit = 48;
     g_c.sentinel_limit = 85;
     g_c.tick = 15;
@@ -332,7 +331,6 @@ static void conf_defaults(void)
     /* 默认事件级：0 只留 E，日志面板会空得没法排查 */
     g_c.log_level = 1;
     g_c.cool_guard = 1;
-    g_c.max_mode = 0;
 }
 
 static int parse_i(const char *v, int def)
@@ -345,15 +343,16 @@ static int parse_i(const char *v, int def)
     return (int)n;
 }
 
-/* wall: "off" 保留为 0（=关闭），其余数值原样收，范围在用时夹紧 */
+/* wall: 35-59 是真实墙；60 与 off 都表示不设墙，由调用方按熔断前 1℃ 处理 */
 static int wall_of(const char *v)
 {
-    if (!v || !*v) return 42;
+    if (!v || !*v) return 60;
     if (!strcmp(v, "off")) return 0;
     char *e = NULL;
     long n = strtol(v, &e, 10);
-    if (e == v) return 42;
-    if (n < 35 || n > 80) return 42;
+    if (e == v) return 60;
+    if (n < 35) return 60;
+    if (n > 60) return 60;
     return (int)n;
 }
 
@@ -382,7 +381,7 @@ static void conf_load(void)
         else if (!strcmp(k, "wall")) snprintf(g_c.wall, sizeof g_c.wall, "%s", v);
         else if (!strcmp(k, "aggr")) g_c.aggr = parse_i(v, 10);
         else if (!strcmp(k, "curr_max")) g_c.curr_max = parse_i(v, 0);
-        else if (!strcmp(k, "curr_edge")) g_c.curr_edge = parse_i(v, 4);
+        else if (!strcmp(k, "curr_edge")) g_c.curr_edge = parse_i(v, 0);
         else if (!strcmp(k, "battery_limit")) g_c.battery_limit = parse_i(v, 48);
         else if (!strcmp(k, "sentinel_limit")) g_c.sentinel_limit = parse_i(v, 85);
         else if (!strcmp(k, "tick")) g_c.tick = parse_i(v, 15);
@@ -393,7 +392,6 @@ static void conf_load(void)
         else if (!strcmp(k, "hz_hard")) g_c.hz_hard = parse_i(v, 0);
         else if (!strcmp(k, "hz_prev_mcfr")) snprintf(g_c.hz_prev_mcfr, sizeof g_c.hz_prev_mcfr, "%s", v);
         else if (!strcmp(k, "cool_guard")) g_c.cool_guard = parse_i(v, 1);
-        else if (!strcmp(k, "max_mode")) g_c.max_mode = parse_i(v, 0);
     }
     fclose(f);
 
@@ -401,7 +399,7 @@ static void conf_load(void)
     if (g_c.tick < 5 || g_c.tick > 300) g_c.tick = 15;
     if (g_c.curr_max < 0) g_c.curr_max = 0;
     if (g_c.curr_max > 8000) g_c.curr_max = 8000;
-    if (g_c.curr_edge < 0 || g_c.curr_edge > 6) g_c.curr_edge = 4;
+    if (g_c.curr_edge < 0 || g_c.curr_edge > 6) g_c.curr_edge = 0;
     if (g_c.battery_limit < 30 || g_c.battery_limit > 70) g_c.battery_limit = 48;
     if (g_c.sentinel_limit < 60 || g_c.sentinel_limit > 110) g_c.sentinel_limit = 85;
     if (g_c.aggr < 0 || g_c.aggr > 10) g_c.aggr = 10;
@@ -1078,52 +1076,16 @@ static int curr_target(int *out_wall)
 
     int wall = wall_of(g_c.wall);
     int lim = limit_for_type(si_cls);
-    if (wall <= 0) {
-        wall = (lim > 0 ? lim : 48) - 4;
-        if (wall < 35) wall = 35;
-        if (wall > 80) wall = 80;
-    }
-    if (g_c.max_mode) {
-        /* 极限充电：墙直接顶到熔断阈值前 1℃，息屏不再 +2、也不再压回 lim-3 */
-        if (lim > 0) wall = lim - 1;
-    } else if (!g_screen_on) {
-        wall += 2;
-        if (lim > 0 && wall > lim - 3) wall = lim - 3;
-    }
+    int l2 = lim > 0 ? lim : 48;
+    /* 默认顶墙：60/off 表示不设墙，直接用熔断前 1℃；自定义墙也不会超过它 */
+    if (wall <= 0 || wall >= 60) wall = l2 - 1;
+    if (wall > l2 - 1) wall = l2 - 1;
     if (out_wall) *out_wall = wall;
     g_wall_eff = wall;
 
-    plat_resolve();
-    int shift = !strcmp(g_plat, "mtk") ? 2 : 0;
-    int edge = g_c.curr_edge;
-
-    int t75 = wall - edge - shift;
-    int t50 = wall - edge + 2 - shift;
-    int t25 = wall - edge + 4 - shift;
-    if (t75 < 30) t75 = 30;
-    int l2 = lim > 0 ? lim : 48;
-    if (t25 >= l2) t25 = l2 - 1;
-    if (t50 >= t25) t50 = t25 - 1;
-    if (t75 >= t50) t75 = t50 - 1;
-
+    /* 只留最后一级：到墙才 100%→75%。curr_edge 保留兼容旧配置，不再参与分档 */
     int pct = 100;
-    if (g_c.max_mode) {
-        /* 极限：到熔断前 1℃ 才降到 75%，中间不再按 lim-3 提前掉功率 */
-        if (cur >= wall) pct = 75;
-        g_last_pct = pct;
-        return ma * pct / 100;
-    }
-    if (cur >= t75) pct = 75;
-    if (cur >= t50) pct = 50;
-    if (cur >= t25) pct = 25;
-
-    /* 滞回：升温才降档，降温要退回阈下一度才升档 */
-    int last = g_last_pct;
-    if (pct > last) {
-        if (last == 25 && cur > t25 - 1) pct = 25;
-        else if (last == 50 && cur > t50 - 1) pct = 50;
-        else if (last == 75 && cur > t75 - 1) pct = 75;
-    }
+    if (cur >= wall) pct = 75;
     g_last_pct = pct;
     return ma * pct / 100;
 }
@@ -1297,17 +1259,11 @@ static int scr_target(int *tgt)
     if (n > 8000) n = 8000;
 
     int bt = batt_temp_ps();
-    if (g_c.max_mode) {
-        /* 极限：取消 38/41℃ 两档折损，只在熔断前 1℃ 放手 */
-        int lim = g_c.battery_limit > 0 ? g_c.battery_limit : 48;
-        if (bt > -100 && bt >= lim - 1) return 3;
-        *tgt = n;
-        return *tgt >= 500 ? 0 : 2;
-    }
-    if (bt <= -100) *tgt = n * 7 / 10;
-    else if (bt <= 38) *tgt = n;
-    else if (bt <= 41) *tgt = n * 7 / 10;
-    else return 3;
+    /* 默认满速：38/41℃ 两档折损已取消，只在熔断前 1℃ 放手 */
+    int lim = g_c.battery_limit > 0 ? g_c.battery_limit : 48;
+    if (bt > -100 && bt >= lim - 1) return 3;
+    *tgt = n;
+    return *tgt >= 500 ? 0 : 2;
 
     if (*tgt < 500) return 2;
     return 0;
@@ -1466,11 +1422,7 @@ static void scr_tick(void)
     }
 
     int bt = batt_temp_ps();
-    int hot = 42;
-    if (g_c.max_mode) {
-        int lim = g_c.battery_limit > 0 ? g_c.battery_limit : 48;
-        hot = lim - 1;
-    }
+    int hot = g_c.battery_limit > 0 ? g_c.battery_limit - 1 : 47;
     if (bt > -100 && bt >= hot) {
         if (scr_active()) scr_release();
         if (strcmp(logged, "hot")) {
@@ -1588,12 +1540,9 @@ static void cool_tick(void)
      * 写 0 对它是空操作，没有副作用。 */
 
     int bt = batt_temp_ps();
-    int stop = 48, soft = 45;
-    if (g_c.max_mode) {
-        int lim = g_c.battery_limit > 0 ? g_c.battery_limit : 48;
-        stop = lim - 1;
-        soft = stop;
-    }
+    /* 默认极限：45℃ 不再留「轻度降流」，到熔断前 1℃ 才交还驱动 */
+    int stop = g_c.battery_limit > 0 ? g_c.battery_limit - 1 : 47;
+    int soft = stop;
     if (bt > -100 && bt >= stop) {        /* 过热：彻底放手 */
         if (g_cool_logged != -2) {
             log_msg("W", "charge", "降流解除：电池 %d℃ 过热，交还驱动控制", bt);
@@ -2241,8 +2190,9 @@ static int shell_target(void)
         return base;
     }
 
-    int barrier = wall > 0 ? wall : lim - 2;
-    if (g_c.max_mode) barrier = lim - 1;
+    if (wall >= 60) wall = 0;      /* 60 = 不设墙 */
+    int barrier = wall > 0 ? wall : lim - 1;
+    if (barrier > lim - 1) barrier = lim - 1;
     if (base >= barrier) {
         base = barrier - 2;
         if (base < 25) base = 25;
