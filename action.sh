@@ -558,8 +558,9 @@ sd_menu() {
     done
 }
 
-# 一键极限充电：息屏满速 + 温度墙顶到熔断阈值前 1℃ + 停系统热管理。
-# 关闭时按 run/max.bak 原样恢复，不把用户原来的墙 / 档位吞掉。
+# 一键极限充电：亮屏息屏都顶到熔断前 1℃，把所有会提前降流的闸一起抬上去。
+#   温度墙 / 伪装屏障 / 电流档位 / 亮屏 FCC 三档折损 / cool_down 降流 / 限流 / horae
+# 关闭时按 run/max.bak 原样恢复，不把用户原来的墙 / 档位 / 限流吞掉。
 sd_do_max() {
     local f="$SD_RUN/max.bak" bl k v
     case "${1:-on}" in
@@ -577,6 +578,8 @@ sd_do_max() {
                 printf 'aggr=%s\n'       "$(sd_state_get aggr 10)"
                 printf 'fast_cap=%s\n'   "$(sd_state_get fast_cap 55)"
                 printf 'horae=%s\n'      "$(sd_state_get horae 1)"
+                printf 'curr_max=%s\n'   "$(sd_state_get curr_max 0)"
+                printf 'cool_guard=%s\n' "$(sd_state_get cool_guard 1)"
             } >"$f" 2>/dev/null
 
             sd_state_set temp_mode charge
@@ -584,11 +587,15 @@ sd_do_max() {
             sd_state_set curr_edge 0
             sd_state_set aggr 10
             sd_state_set fast_cap 85
+            # 绝对值限流会让屏幕快充整段放弃接管，极限模式下先解除（原值已备份）
+            sd_state_set curr_max 0
+            sd_state_set cool_guard 1
             sd_horae 0
             sd_state_set horae 0
             sd_state_set max_mode 1
             echo "极限充电 -> 开启"
-            echo "  息屏保持满速 · 温度墙 $((bl - 1))℃ · 顶墙才降流"
+            echo "  亮屏息屏都满速 · 所有降流闸顶到熔断前 1℃（$((bl - 1))℃）"
+            echo "  亮屏 FCC 不再 38/41℃ 折损 · cool_down 不再提前写 2 · 限流已解除"
             echo "  系统热管理已停 · 熔断仍为 ${bl}℃（真实到线即撤伪装）"
             echo "  关闭: sh action.sh max off" ;;
         off|0)
@@ -599,7 +606,7 @@ sd_do_max() {
             fi
             while IFS='=' read -r k v; do
                 case "$k" in
-                    temp_mode|wall|curr_edge|aggr|fast_cap|horae) ;;
+                    temp_mode|wall|curr_edge|aggr|fast_cap|horae|curr_max|cool_guard) ;;
                     *) continue ;;
                 esac
                 [ -n "$v" ] || continue
@@ -611,7 +618,7 @@ sd_do_max() {
                 1) sd_horae 1 ;;
                 0) sd_horae 0 ;;
             esac
-            echo "极限充电 -> 关闭（已恢复开启前的墙 / 档位 / 热管理设置）" ;;
+            echo "极限充电 -> 关闭（已恢复开启前的墙 / 档位 / 限流 / 热管理设置）" ;;
         *)
             echo "用法: max on|off"; return 1 ;;
     esac

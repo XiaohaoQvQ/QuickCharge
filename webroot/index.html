@@ -216,10 +216,10 @@
   <div class="switch" id="shellHint">改写上限；真实低于它时不改写</div>
 
   <div class="acts" style="margin-top:22px;grid-template-columns:1fr">
-    <button id="maxMode">极限充电（息屏满速）</button>
+    <button id="maxMode">极限充电（亮屏息屏满速）</button>
   </div>
   <div class="switch" id="maxHint" style="margin-top:6px">
-    一键把墙顶到熔断前 1℃、顶墙才降流、停系统热管理；再点一次恢复原设置
+    一键把亮屏、息屏的降流闸全顶到熔断前 1℃：墙、电流档位、FCC 折损、cool_down、限流、热管理；再点一次恢复原设置
   </div>
 
   </div></div>
@@ -715,11 +715,11 @@
     var mx = d.max === true;
     var mb = $("maxMode");
     mb.className = mx ? "on" : "";
-    mb.textContent = mx ? "极限充电 · 已开启" : "极限充电（息屏满速）";
+    mb.textContent = mx ? "极限充电 · 已开启" : "极限充电（亮屏息屏满速）";
     $("maxHint").textContent = mx
-      ? "息屏保持满速 · 温度墙 " + (d.wall === "off" ? "关" : d.wall + "℃") +
-        " · 顶墙才降流 · 热管理已停；再点一次恢复"
-      : "一键把墙顶到熔断前 1℃、顶墙才降流、停系统热管理；再点一次恢复原设置";
+      ? "亮屏息屏都满速 · 温度墙 " + (d.wall === "off" ? "关" : d.wall + "℃") +
+        " · 到墙才降 · 限流与热管理已停；再点一次恢复"
+      : "一键把亮屏、息屏的降流闸全顶到熔断前 1℃：墙、电流档位、FCC 折损、cool_down、限流、热管理；再点一次恢复原设置";
     if (d.level !== undefined && d.level !== null) {
       var lv = Number(d.level) || 0;
       $("lvNow").textContent = lv >= 2 ? "详细" : (lv === 1 ? "事件" : "关闭");
@@ -1223,7 +1223,7 @@
     $("maxMode").addEventListener("click", function () {
       var on = !!(S && S.max === true);
       if (!on) {
-        ask("极限充电会把温度墙顶到电池熔断阈值前 1℃，并停用系统热管理（horae）。\n\n真实高温下继续满速充电会加速电池衰减，长期高温有鼓包风险，且不在保修范围。\n\n确定开启？",
+        ask("极限充电会把亮屏、息屏所有降流闸顶到电池熔断阈值前 1℃：温度墙、电流档位、亮屏 FCC 的 38/41℃ 折损、cool_down 降流全部取消，同时解除你设的限流并停用系统热管理（horae）。\n\n真实高温下继续满速充电会加速电池衰减，长期高温有鼓包风险，且不在保修范围。\n\n确定开启？",
           function () { apply("max on", "极限充电已开启"); });
         return;
       }

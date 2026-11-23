@@ -2668,6 +2668,18 @@ sd_curr_target_v() {
     [ "$t50" -ge "$t25" ] && t50=$((t25 - 1))
     [ "$t75" -ge "$t50" ] && t75=$((t50 - 1))
 
+    if [ "${_st_max_mode:-0}" = 1 ]; then
+        # 极限：不按 75/50/25 三档提前掉功率。wall 本身已是熔断前 1℃，
+        # 到墙才降到 75%，再往上就是熔断，中间不再有 lim-3 那一层。
+        t75=$wall
+        pct=100
+        [ "$cur" -ge "$t75" ] && pct=75
+        _sd_curr_pct=$pct
+        sd_dbg charge "电流目标 ${cur}℃/极限墙 ${wall}℃ → ${pct}% of ${ma}mA${_sd_shift_note}${_sd_sb_note}"
+        _sd_rv=$((ma * pct / 100))
+        return 0
+    fi
+
     pct=100
     [ "$cur" -ge "$t75" ] && pct=75
     [ "$cur" -ge "$t50" ] && pct=50
@@ -2776,7 +2788,7 @@ sd_scr_learn() {
 
 # 目标电流：正常值，按真实电池温度打折；≥42℃ 直接不接管
 sd_scr_target() {
-    local n bt
+    local n bt lim
     _sd_rv=0
     [ -f "$SD_FCC_NORM" ] || return 1
     n=$(cat "$SD_FCC_NORM" 2>/dev/null)
@@ -2784,6 +2796,19 @@ sd_scr_target() {
     [ "$n" -gt 8000 ] && n=8000
     bt=""
     sd_batt_temp_v && bt=$_sd_rv
+    if [ "${_st_max_mode:-0}" = 1 ]; then
+        # 极限：38/41℃ 两档折损取消，一直给满基准电流，只在熔断前 1℃ 放手。
+        sd_limit_for_type_v battery
+        lim=$_sd_rv
+        case "$lim" in ''|0|off) lim=48 ;; esac
+        case "$bt" in
+            ''|*[!0-9]*) ;;
+            *) [ "$bt" -ge $((lim - 1)) ] && { _sd_rv=0; return 3; } ;;
+        esac
+        _sd_rv=$n
+        [ "$_sd_rv" -ge 500 ]
+        return $?
+    fi
     case "$bt" in
         ''|*[!0-9]*) _sd_rv=$((n * 7 / 10)) ;;
         *) if [ "$bt" -le 38 ]; then _sd_rv=$n
@@ -2889,7 +2914,7 @@ sd_scr_state() {
 }
 
 sd_scr_tick() {
-    local mode bt rc key
+    local mode bt rc key hot_lim
     [ "$_sd_st_loaded" = 1 ] || sd_state_load
     mode=$(sd_state_get temp_mode off)
 
@@ -2929,14 +2954,23 @@ sd_scr_tick() {
 
     # 默认开启后所有人都会走到这里，两条路径共用一道温度闸：
     # 内核参数那条一写就是「永远不看屏幕」，高温时更不能开。
+    # 极限模式下这道闸从写死的 42℃ 抬到熔断前 1℃，与伪装/降流用同一条线。
+    hot_lim=42
+    if [ "${_st_max_mode:-0}" = 1 ]; then
+        sd_limit_for_type_v battery
+        case "$_sd_rv" in
+            ''|0|off) hot_lim=48 ;;
+            *) hot_lim=$((_sd_rv - 1)) ;;
+        esac
+    fi
     bt=""
     sd_batt_temp_v && bt=$_sd_rv
     case "$bt" in
         ''|*[!0-9]*) ;;
-        *) if [ "$bt" -ge 42 ]; then
+        *) if [ "$bt" -ge "$hot_lim" ]; then
                sd_scr_active && sd_scr_release
                if [ "$_sd_scr_log" != hot ]; then
-                   sd_warn charge "亮屏快充：电池 ${bt}℃ 偏高，暂停接管"
+                   sd_warn charge "亮屏快充：电池 ${bt}℃ 达到 ${hot_lim}℃，暂停接管"
                    _sd_scr_log=hot
                fi
                return 0
@@ -3161,7 +3195,7 @@ sd_cool_node() {
 }
 
 sd_cool_tick() {
-    local want cur bt cap
+    local want cur bt cap cool_stop cool_soft
 
     [ "$(sd_state_int cool_guard 1 0 1)" = 1 ] || return 0
 
@@ -3180,10 +3214,21 @@ sd_cool_tick() {
     # backlight 节点恒读 0）屏幕判定长期为灭屏，cool_down 停在 7~13 没人清，
     # 亮屏游戏就只剩 5~10W。灭屏时驱动自己给 0，写 0 对它是空操作，没有副作用。
 
+    # 极限模式下把「留 2」与「交还」两条线一起抬到熔断前 1℃，中间不再轻放。
+    cool_stop=48
+    cool_soft=45
+    if [ "${_st_max_mode:-0}" = 1 ]; then
+        sd_limit_for_type_v battery
+        case "$_sd_rv" in
+            ''|0|off) ;;
+            *) cool_stop=$((_sd_rv - 1)) ;;
+        esac
+        cool_soft=$cool_stop
+    fi
     bt=""
     sd_batt_temp_v && bt=$_sd_rv
     case "$bt" in ''|*[!0-9]*) bt=0 ;; esac
-    if [ "$bt" -ge 48 ]; then
+    if [ "$bt" -ge "$cool_stop" ]; then
         if [ "$_sd_cool_log" != hot ]; then
             sd_warn charge "降流解除：电池 ${bt}℃ 过热，交还驱动控制"
             _sd_cool_log=hot
@@ -3198,7 +3243,7 @@ sd_cool_tick() {
     # 电量 ≥85% 曾经写 1（"恒压段只轻放"）。实测这条会掉协议：PKX110 上
     # cool_down 0→1 之后 charge_technology 从 7 变成 14、电流 3.6A → 1.0A，
     # 功率 32W → 9W。恒压段电流本来就由驱动收，不需要再加一档降流。
-    if [ "$bt" -ge 45 ]; then want=2
+    if [ "$bt" -ge "$cool_soft" ]; then want=2
     else want=0
     fi
 

@@ -1107,6 +1107,12 @@ static int curr_target(int *out_wall)
     if (t75 >= t50) t75 = t50 - 1;
 
     int pct = 100;
+    if (g_c.max_mode) {
+        /* 极限：到熔断前 1℃ 才降到 75%，中间不再按 lim-3 提前掉功率 */
+        if (cur >= wall) pct = 75;
+        g_last_pct = pct;
+        return ma * pct / 100;
+    }
     if (cur >= t75) pct = 75;
     if (cur >= t50) pct = 50;
     if (cur >= t25) pct = 25;
@@ -1291,6 +1297,13 @@ static int scr_target(int *tgt)
     if (n > 8000) n = 8000;
 
     int bt = batt_temp_ps();
+    if (g_c.max_mode) {
+        /* 极限：取消 38/41℃ 两档折损，只在熔断前 1℃ 放手 */
+        int lim = g_c.battery_limit > 0 ? g_c.battery_limit : 48;
+        if (bt > -100 && bt >= lim - 1) return 3;
+        *tgt = n;
+        return *tgt >= 500 ? 0 : 2;
+    }
     if (bt <= -100) *tgt = n * 7 / 10;
     else if (bt <= 38) *tgt = n;
     else if (bt <= 41) *tgt = n * 7 / 10;
@@ -1453,10 +1466,15 @@ static void scr_tick(void)
     }
 
     int bt = batt_temp_ps();
-    if (bt > -100 && bt >= 42) {
+    int hot = 42;
+    if (g_c.max_mode) {
+        int lim = g_c.battery_limit > 0 ? g_c.battery_limit : 48;
+        hot = lim - 1;
+    }
+    if (bt > -100 && bt >= hot) {
         if (scr_active()) scr_release();
         if (strcmp(logged, "hot")) {
-            log_msg("W", "charge", "亮屏快充：电池 %d℃ 偏高，暂停接管", bt);
+            log_msg("W", "charge", "亮屏快充：电池 %d℃ 达到 %d℃，暂停接管", bt, hot);
             snprintf(logged, sizeof logged, "hot");
         }
         return;
@@ -1570,7 +1588,13 @@ static void cool_tick(void)
      * 写 0 对它是空操作，没有副作用。 */
 
     int bt = batt_temp_ps();
-    if (bt > -100 && bt >= 48) {          /* 过热：彻底放手 */
+    int stop = 48, soft = 45;
+    if (g_c.max_mode) {
+        int lim = g_c.battery_limit > 0 ? g_c.battery_limit : 48;
+        stop = lim - 1;
+        soft = stop;
+    }
+    if (bt > -100 && bt >= stop) {        /* 过热：彻底放手 */
         if (g_cool_logged != -2) {
             log_msg("W", "charge", "降流解除：电池 %d℃ 过热，交还驱动控制", bt);
             g_cool_logged = -2;
@@ -1584,7 +1608,7 @@ static void cool_tick(void)
      * PKX110 上 cool_down 0→1 之后 charge_technology 从 7 变成 14、
      * 电流从 3.6A 掉到 1.0A，功率 32W → 9W。恒压段电流本来就由驱动
      * 收，不需要再加一档降流，所以只在真过热（≥45℃）时才留 2。 */
-    if (bt > -100 && bt >= 45) want = 2;  /* 偏热：留轻度降流 */
+    if (bt > -100 && bt >= soft) want = 2;  /* 偏热：留轻度降流（极限模式 soft=熔断前1℃） */
     else want = 0;
 
     int cur = 0;

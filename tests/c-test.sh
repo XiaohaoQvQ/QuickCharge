@@ -301,6 +301,20 @@ state static 30 off off 42 10 6000
 out=$(run once)
 echo "$out" | grep -q 'wall=42' && ok "关掉后回到用户设的 42" || bad "非极限模式墙被改：$out"
 
+# ============================================================ 6d. 极限充电：亮屏不分档
+echo "[6d] 极限充电：亮屏到极限墙才降，不再 45℃ 掉到 75%"
+setup
+state static 30 off off 42 10 6000
+printf 'max_mode=1\n' >>"$BASE/data/state.conf"
+screen_on
+printf '45000\n' >"$(z thermal_zone0)/temp"
+out=$(run once)
+echo "$out" | grep -q 'curr_target=6000' && ok "45℃ 仍 100%（旧行为 75%）" || bad "提前降档：$out"
+printf '47000\n' >"$(z thermal_zone0)/temp"
+out=$(run once)
+echo "$out" | grep -q 'curr_target=4500' && ok "47℃ 到极限墙降 75%" || bad "到墙未降：$out"
+printf '34000\n' >"$(z thermal_zone0)/temp"
+
 # ============================================================ 7. 限流
 echo "[7] 电流墙"
 setup

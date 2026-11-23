@@ -795,21 +795,25 @@ su -c 'sh /data/adb/modules/quickcharge/action.sh status | grep 亮屏快充'
 
 ## 极限充电（核心参数卡底部，一个按钮）
 
-面板「核心参数」最下面那个按钮，一次把几件事做完：
+面板「核心参数」最下面那个按钮，一次把亮屏、息屏所有会提前降流的闸抬到同一条线：
 
 | 项 | 值 | 为什么 |
 |---|---|---|
 | 温度墙 | 电池熔断阈值 − 1℃ | 默认 48℃ 熔断 → 47℃ 墙，不再受滑块 42℃ 的限制 |
 | 限流提前量 | 0 | 到墙才降档，不在墙前 4℃ 就开始掉功率 |
+| 电流四档 | 只留最后一级 | 不再按 `lim-3` 在 45℃ 掉到 75%，到 47℃ 才降 |
 | 温控档位 | 10 | 温差 12℃，降档区间压到墙前最后几度 |
 | 快充阈值 | 85% | 电量 85% 前都按快充策略走 |
 | 温度模式 | 仅充电 | 不插电时不动系统 |
+| 亮屏 FCC | 取消 38/41℃ 折损 | 原来 39℃ 打七折、42℃ 直接放手；现在一直给满，47℃ 才放手 |
+| cool_down | 45℃ 不再写 2 | 45℃ 的「轻度降流」取消，只在熔断前 1℃ 交还驱动 |
+| 绝对限流 | 解除 | `curr_max` 一设，屏幕快充整段放弃接管；极限模式下先清掉 |
 | 系统热管理 | 停 horae | 不再由系统按温度额外降频 |
 | 息屏 | 保持满速 | `max_mode=1` 时息屏不 +2℃，也不压回 `lim-3` |
 
 熔断本身不动：真实温度到 `battery_limit`（默认 48℃）照样撤伪装、停止改写。
-开启前的 `wall` / `curr_edge` / `aggr` / `fast_cap` / `temp_mode` / `horae` 会写进
-`run/max.bak`，再点一次按钮原样恢复，不会把用户自己的设置吞掉。
+开启前的 `wall` / `curr_edge` / `aggr` / `fast_cap` / `temp_mode` / `horae` / `curr_max` /
+`cool_guard` 会写进 `run/max.bak`，再点一次按钮原样恢复，不会把用户自己的设置吞掉。
 
 命令行等价：
 
@@ -818,8 +822,17 @@ su -c 'sh /data/adb/modules/quickcharge/action.sh max on'
 su -c 'sh /data/adb/modules/quickcharge/action.sh max off'
 ```
 
-`max_mode` 只影响两处：`sd_curr_target_v` 的墙与息屏分支、`sd_shell_target` 的屏障。
-其余安全边界（熔断、`fast_cap`、限流）原样生效。
+`max_mode` 影响四处：
+
+| 函数 | 改动 |
+|---|---|
+| `sd_curr_target_v` / `curr_target` | 墙 = `lim-1`；不分 75/50/25 三档，到墙才降 |
+| `sd_shell_target` / `shell_target` | 屏障 = `lim-1`，壳温伪装顶到最后一度 |
+| `sd_scr_target` / `scr_target` | 38/41℃ 折损取消，`lim-1` 才放手 |
+| `sd_cool_tick` / `cool_tick` | 45℃ 的 `want=2` 取消，`lim-1` 交还驱动 |
+
+其余安全边界（熔断、`fast_cap`、限流写节点的互斥）原样生效。`max` 解除的是
+「用户自己设的绝对限流」，不是模块的熔断。
 
 ## 极端功率：`batt_spoof` 与 `thermal`
 

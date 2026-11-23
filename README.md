@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`2.9.74`（`versioncode 29629`），C 版为 `2.9.74-c`
+- 当前版本：`2.9.75`（`versioncode 29631`），C 版为 `2.9.75-c`
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -119,7 +119,7 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 | 实时状态 | 真实 / 系统看到 / 配置 / 守护 四格，下面一行结论文案 |
 | 实时功耗 | 电流、功率、电池温度，附一条只在页面打开时采样的曲线 |
 | 温控改写范围 | 全局运行 / 仅充电 / 关闭 三个按钮 |
-| 核心参数 | 档位、温度墙、基准温度、限流提前量；底部一个「极限充电」按钮（一键息屏满速） |
+| 核心参数 | 档位、温度墙、基准温度、限流提前量；底部一个「极限充电」按钮（一键亮屏息屏满速） |
 | 熔断阈值 | 电池、主板两个阈值 |
 | 极端功率 | 电池 NTC 伪装与 `thermal`，默认「安全边界未动」 |
 | CPU 伪装 | 核心温度固定值 + 关闭开关 |
@@ -226,7 +226,7 @@ ACTION=/data/adb/modules/quickcharge/action.sh
 |---|---|
 | `curr <300-8000\|off>` | 充电限流 mA，按温度联动降流 |
 | `curredge <0-6>` | 距墙几度开始降流 |
-| `max <on\|off>` | 极限充电：息屏满速 + 墙顶到熔断前 1℃ + 停 horae，一键开关 |
+| `max <on\|off>` | 极限充电：亮屏息屏所有降流闸顶到熔断前 1℃（墙、档位、FCC 折损、cool_down、限流、horae），一键开关 |
 | `fast <20-90>` | 快充生效电量阈值 % |
 | `sentinel <60-110\|off>` | SoC / 主板熔断阈值 |
 | `battery <30-70\|off>` | 电池熔断阈值 |
@@ -373,19 +373,19 @@ su -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 | 仓库 | 当前版本 | 包名 | versioncode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `2.9.74` | `QuickCharge-v2.9.74.zip` + `QuickCharge-v2.9.74-full.zip` | 29629 |
-| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `2.9.74-c` | `QuickCharge-v2.9.74-c.zip` | 29630 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `2.9.75` | `QuickCharge-v2.9.75.zip` + `QuickCharge-v2.9.75-完整包.zip` | 29631 |
+| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `2.9.75-c` | `QuickCharge-v2.9.75-c.zip` | 29632 |
 
-`-full.zip` 是带完整说明文档的完整包，日常刷入用不带后缀的那个即可。
+`-完整包.zip` 里是「两个模块包 + 两仓 README + 两仓 RELEASE」，日常刷入用不带后缀的那个即可。
 
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v2.9.74
-Quick Charge v2.9.74-c
+Quick Charge v2.9.75
+Quick Charge v2.9.75-c
 ```
 
-tag 与标题一致：shell 仓 `v2.9.74`，C 仓 `2.9.74-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v2.9.75`，C 仓 `2.9.75-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
 
 `versioncode` 是管理器判新旧的唯一依据，shell 版为奇数序列、C 版为偶数序列，两者互不覆盖。

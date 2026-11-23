@@ -2730,19 +2730,44 @@ rm -rf /sys/module/oplus_chg
 # ---------------------------------------------------------------- T47b 极限充电
 # 一个按钮：息屏满速（墙顶到熔断前 1℃、不加 2℃）+ 顶墙才降流 + 停 horae。
 D47b=/tmp/qc47b-max; rm -rf "$D47b"; mkdir -p "$D47b/run"
-t47b() { env SD_DATA=$D47b SD_MODDIR=/opt/qc SD_NO_DAEMON=1 SD_BL=/nonexistent SD_FB=/nonexistent "$@"; }
+# 自建一个 battery 温区，温度完全可控（m℃），不受宿主 /sys 影响
+mkdir -p "$D47b/zone0"
+printf 'battery\n' >"$D47b/zone0/type"
+printf '38000\n'  >"$D47b/zone0/temp"
+t47b() { env SD_DATA=$D47b SD_MODDIR=/opt/qc SD_NO_DAEMON=1 SD_BL=/nonexistent SD_FB=/nonexistent \
+         SD_ZONE_GLOB="$D47b/zone*" "$@" ; }
 t47b sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode static; sd_state_set wall 42;
   sd_state_set curr_edge 4; sd_state_set aggr 6; sd_state_set fast_cap 55;
-  sd_state_set battery_limit 48; sd_state_set curr_max 6000; sd_state_set horae 1' >/dev/null 2>&1
+  sd_state_set battery_limit 48; sd_state_set curr_max 5000; sd_state_set horae 1;
+  sd_state_set cool_guard 0' >/dev/null 2>&1
 t47b sh /opt/qc/action.sh max on >/dev/null 2>&1
 eq "$(grep '^max_mode=' "$D47b/state.conf")" "max_mode=1" "max on：写入极限标记"
 eq "$(grep '^wall=' "$D47b/state.conf")" "wall=47" "max on：墙 = 熔断 48-1"
 eq "$(grep '^curr_edge=' "$D47b/state.conf")" "curr_edge=0" "max on：顶墙才降流"
 eq "$(grep '^temp_mode=' "$D47b/state.conf")" "temp_mode=charge" "max on：只在充电时生效"
 eq "$(grep '^horae=' "$D47b/state.conf")" "horae=0" "max on：停系统热管理"
+eq "$(grep '^curr_max=' "$D47b/state.conf")" "curr_max=0" "max on：解除绝对限流"
+eq "$(grep '^cool_guard=' "$D47b/state.conf")" "cool_guard=1" "max on：打开 cool_down 解除"
+
+# 极限下用户仍可手动设 curr_max，此时电流档位不应再按 lim-3 提前掉
+t47b sh -c '. /opt/qc/lib/qc.sh; sd_state_set curr_max 6000' >/dev/null 2>&1
 w=$(t47b sh -c '. /opt/qc/lib/qc.sh; _sd_st_loaded=0; sd_state_load; _sd_screen_on=0;
   _sd_screen_ticks=1; sd_curr_target_v; printf "%s" "$_sd_wall_eff"')
 eq "$w" "47" "息屏不再 +2℃，墙保持 47"
+printf '41000\n' >"$D47b/zone0/temp"
+i41=$(t47b sh -c '. /opt/qc/lib/qc.sh; _sd_st_loaded=0; sd_state_load; _sd_screen_on=1;
+  _sd_screen_ticks=1; sd_curr_target')
+eq "$i41" "6000" "亮屏 41℃ 不再打七折（旧行为 4200）"
+printf '45000\n' >"$D47b/zone0/temp"
+i45=$(t47b sh -c '. /opt/qc/lib/qc.sh; _sd_st_loaded=0; sd_state_load; _sd_screen_on=1;
+  _sd_screen_ticks=1; sd_curr_target')
+eq "$i45" "6000" "亮屏 45℃ 仍全额（旧行为 4500，45 才到 t75）"
+printf '47000\n' >"$D47b/zone0/temp"
+i47=$(t47b sh -c '. /opt/qc/lib/qc.sh; _sd_st_loaded=0; sd_state_load; _sd_screen_on=1;
+  _sd_screen_ticks=1; sd_curr_target')
+eq "$i47" "4500" "到极限墙 47℃ 才降到 75%"
+printf '38000\n' >"$D47b/zone0/temp"
+
 eq "$(t47b sh /opt/qc/action.sh json 2>/dev/null | grep -o '"max":true')" '"max":true' "json 报 max=true"
 t47b sh /opt/qc/action.sh max off >/dev/null 2>&1
 eq "$(grep '^wall=' "$D47b/state.conf")" "wall=42" "max off：恢复原墙"
@@ -2750,6 +2775,8 @@ eq "$(grep '^curr_edge=' "$D47b/state.conf")" "curr_edge=4" "max off：恢复原
 eq "$(grep '^aggr=' "$D47b/state.conf")" "aggr=6" "max off：恢复原档位"
 eq "$(grep '^fast_cap=' "$D47b/state.conf")" "fast_cap=55" "max off：恢复快充阈值"
 eq "$(grep '^temp_mode=' "$D47b/state.conf")" "temp_mode=static" "max off：恢复原模式"
+eq "$(grep '^curr_max=' "$D47b/state.conf")" "curr_max=5000" "max off：恢复原限流"
+eq "$(grep '^cool_guard=' "$D47b/state.conf")" "cool_guard=0" "max off：恢复原 cool_guard"
 eq "$(grep '^max_mode=' "$D47b/state.conf")" "max_mode=0" "max off：清标记"
 
 # ---------------------------------------------------------------- T48 节点读取
