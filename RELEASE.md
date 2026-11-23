@@ -1,50 +1,41 @@
-# Quick Charge v2.9.72（shell 版）
+# Quick Charge v2.9.73（shell 版）
 
-> 对应包：`QuickCharge-v2.9.72.zip` · `versioncode 29625`
+> 对应包：`QuickCharge-v2.9.73.zip` · `versioncode 29627`
 
-日志三处修整：不再记录已取消的协议结论、C 守护时间戳回到本地时区、充电现场行不再被采样噪声刷屏。
+息屏不再掉功率：接管期间亮屏息屏共用同一个 FCC 目标，息屏不再把亮屏被压低的档位写回去。
 
-## 一、协议判定退出日志
+## 一、根因
 
-面板在 2.9.67 就不显示协议了，日志里却还在刷 `[proto] → vooc（tech=13）`，每行充电现场也挂着 `proto=vooc`——用户看到的是「界面没有，日志还在记」。
+「亮屏快充」原来只处理亮屏方向：驱动在 `fb_notifier` 里把 FCC 压到 1.5～2A，模块写回基准。
+但接管时抓的 `scr.orig` 正是被压低后的值，息屏 30 秒后释放，又把 2A 原样写回。亮屏刚顶上去、
+息屏又掉下来，看起来就是「息屏反而更慢」。
 
-现在两侧都删掉：
+## 二、改法
 
-- C 守护：删除 `chg_proto()` 整函数、`g_proto_last` 缓存、`[proto]` 事件行，充电行与启动 env 行去掉 `proto=` 字段。
-- shell：`sd_chg_line_fill` 不再调用 `sd_proto_resolve`，判重签名与日志行同步去掉 `proto=`；`sd_chg_snapshot` 的协议切换事件删除。
+| 场景 | 旧行为 | 2.9.73 |
+|---|---|---|
+| 亮屏被压 | 写回基准 | 不变 |
+| 息屏 | 30 秒后释放，写回 2A | 继续维持基准，不释放 |
+| 内核参数路径 | 息屏还原 | 不变，息屏本来不压 |
+| 电池 42℃ 以上 | 释放 | 不变，两路共用一道闸 |
 
-保留的是**现场节点**，不是结论：`type=` / `rtype=` / `vooc=` / `tech=` 仍照抄，排查「为什么只有 9V/2A」时这几项是唯一直接证据。`sd_proto_resolve` 只服务 `action.sh check`，不再进日志。
+- `sd_scr_tick` 息屏分支只在内核参数路径释放；FCC 路径继续走温度闸与写回。
+- 息屏时 `sd_scr_apply` 失败不再落 `scr.fail`：边缘读数偶尔读不到，落盘后要等重启才恢复。
+- `action.sh status` 在息屏保持时显示「已接管（回写 FCC，息屏保持）」。
+- 文档同步：TECH 的「亮屏快充」章节改名「屏幕快充」并补息屏行为。
 
-`action.sh power` 的 JSON 也去掉了 `proto` 字段，功耗卡标题的「未接充电器」改由 `status` 判断（非 `Charging` / `Full` 即未接），少读一组节点。
-
-## 二、C 守护时间戳回到本地
-
-日志里 `[chg]` 是 `14:27`、`[env]` 是 `22:27`，差 8 小时——脚本写本地时间，静态编译的 qcmon 落 UTC。
-
-原因：qcmon 是静态二进制，没有 tzdata，`localtime_r` 依赖 `TZ`；原来靠 `popen("date +%z")` 取偏移，在这台机器上没成功，整份日志退回 UTC。
-
-修法两层：
-
-1. `service.sh` 在 `exec qcmon` 前 `export SD_TZ=$(date +%z)`，守护直接解析这串 `+0800`，不依赖 popen。
-2. 没有 `SD_TZ` 时回退到 `popen("/system/bin/date +%z")`，再退到 `date +%z`，两条都失败才放弃。
-
-## 三、日志减噪
-
-| 原来 | 现在 |
-|---|---|
-| `zones=80 emul=[thermal_zone0 thermal_zone1 … 80 个名字]` | `emul=80（thermal_zone0 thermal_zone1 thermal_zone2 …）` |
-| 每次读充电现场都因 9.0V↔9.2V 抖一条「变化」 | `usb` 按整伏四舍五入分档，9.0-9.4 同档；9V→5V 掉档仍立刻记 |
-| 开日志时 shell 与 C 各打一条「首帧」 | 有 C 守护时 shell 不再打，交给守护下一拍 |
-
-## 验证
+## 三、验证
 
 | 套件 | 结果 |
 |---|---|
-| `c-test` | 78（协议用例改为「行里不再带 proto」）|
-| `chg-unit` | 44（同上）|
-| `cool-unit` | 20 |
-| `mount` / `zone` | 4 / 6 |
-| `state-unit` | 12 |
-| `sim` | 643（+4：两侧不再输出 `proto`、C 不写 `[proto]` 事件、充电行无 `proto`）|
+| `sim` | 646（+3：息屏顶回、基准不被拉低、内核息屏还原）|
+| `c-test` | 84 |
+| `chg-unit` / `cool-unit` | 44 / 20 |
+| `state-unit` / `mount` / `zone-rank` | 12 / 4 / 6 |
 
-时间戳用 `SD_TZ=+0800` 与不设 `SD_TZ` 两条路径各跑一次守护，日志首行都与 `date` 一致；`grep -c proto` 为 0。
+模拟驱动把 FCC 压到 2A 后，息屏连跑两轮 tick，节点仍回到 6000000，`fcc.norm` 保持 6000。
+
+## 四、仍然拉不回来的情况
+
+电量 80% 以上进入恒压，电流自然下降；非原装头线只协商到 9V/1A 左右。这两类不是模块能改的，
+息屏保持只解决「模块自己把电流放掉」这一种。
