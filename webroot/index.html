@@ -730,9 +730,7 @@
     if (d.unlock === true) xp.push("阶梯已解锁");
     if (ct > 0) xp.push("CPU " + ct + "℃");
     $("sumExtreme").textContent = xp.length ? xp.join(" · ") : "安全边界未动";
-    if (rngPush("coreT", ct > 0 ? ct : 45)) {
-      $("coreTV").textContent = ct > 0 ? ct + "℃" : "关";
-    }
+    rngPush("coreT", ct > 0 ? ct : 45);
     $("coreOff").checked = !(ct > 0);
     $("coreT").disabled = !(ct > 0);
     $("cpuNow").textContent = ct > 0 ? "上报 " + ct + "℃" : "未伪装";
@@ -1162,7 +1160,7 @@
       function (v) { return "battery " + v; });
     bindRange("soc", "socV", function (v) { return v + "℃"; },
       function (v) { return "sentinel " + v; });
-    bindRange("coreT", "coreTV", function (v) { return v + "℃"; },
+    bindRange("coreT", "cpuNow", function (v) { return "上报 " + v + "℃"; },
       function (v) { return "core " + v; });
     $("coreOff").addEventListener("change", function () {
       var off = this.checked;
