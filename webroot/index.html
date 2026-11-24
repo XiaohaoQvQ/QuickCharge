@@ -217,7 +217,7 @@
 
 <div class="card fold closed" id="foldExtreme">
   <div class="hd" id="foldExtremeHd" role="button" aria-expanded="false">
-    <h2>极端功率<span class="sm" id="sumExtreme">安全边界未动</span></h2>
+    <h2>极限功率<span class="sm" id="sumExtreme">安全边界未动</span></h2>
     <span class="chev"></span>
   </div>
   <div class="bd" id="foldExtremeBd"><div class="bd-in">
@@ -236,16 +236,8 @@
     <input type="checkbox" id="thermalOff"><label for="thermalOff">取消充电阶梯限流</label>
   </div>
   <div class="switch" id="thermalHint" style="margin-top:2px">写 0 解除 HAL 限流；电池 ≥45℃ 自动撤销</div>
-  </div></div>
-</div>
 
-<div class="card fold closed" id="foldCpu">
-  <div class="hd" id="foldCpuHd" role="button" aria-expanded="false">
-    <h2>CPU 伪装<span class="sm" id="cpuNow">—</span></h2>
-    <span class="chev"></span>
-  </div>
-  <div class="bd" id="foldCpuBd"><div class="bd-in">
-  <div class="row" style="margin-top:2px"><label for="coreT">上报温度</label><span class="val" id="coreTV">—</span></div>
+  <div class="row" style="margin-top:22px"><label>CPU 伪装</label><span class="val" id="cpuNow">—</span></div>
   <div class="rw"><input type="range" id="coreT" min="20" max="70" step="1" value="45"></div>
   <div class="switch" style="margin-top:2px">
     <input type="checkbox" id="coreOff"><label for="coreOff">关闭伪装（交回真实温度）</label>
@@ -726,12 +718,12 @@
     $("thermalHint").textContent = d.unlock === true
       ? "已解锁：HAL 限流节点写 0；电池 ≥45℃ 自动撤销"
       : "写 0 解除 HAL 限流；电池 ≥45℃ 自动撤销";
-    $("sumExtreme").textContent = (bsp > 0 || d.unlock === true)
-      ? (bsp > 0 ? "电池 " + bsp + "℃" : "") +
-        (bsp > 0 && d.unlock === true ? " · " : "") +
-        (d.unlock === true ? "阶梯已解锁" : "")
-      : "安全边界未动";
     var ct = (d.core && d.core !== "off") ? Number(d.core) : 0;
+    var xp = [];
+    if (bsp > 0) xp.push("电池 " + bsp + "℃");
+    if (d.unlock === true) xp.push("阶梯已解锁");
+    if (ct > 0) xp.push("CPU " + ct + "℃");
+    $("sumExtreme").textContent = xp.length ? xp.join(" · ") : "安全边界未动";
     if (rngPush("coreT", ct > 0 ? ct : 45)) {
       $("coreTV").textContent = ct > 0 ? ct + "℃" : "关";
     }
@@ -1107,7 +1099,6 @@
   function initFolds() {
     bindFold("foldMain", "qc.fold.main", false);
     bindFold("foldHz", "qc.fold.hz", false);
-    bindFold("foldCpu", "qc.fold.cpu", false);
     bindFold("foldExtreme", "qc.fold.ext", false);
     bindFold("foldLog", "qc.fold.log", false);
   }
