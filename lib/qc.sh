@@ -2800,8 +2800,8 @@ sd_scr_apply() {
     fi
 
     sd_scr_fcc_node || return 1
-    # 息屏也走同一条写回逻辑：驱动在息屏边界会重算 FCC，热管理/守护也可能
-    # 顺手把它压下来。以前这里只在亮屏时写，息屏一到就放手，功率掉了没人管。
+    # 只在亮屏时调用（息屏由 sd_scr_tick 直接返回，把 FCC 交还驱动）。
+    # 亮屏后驱动会把 FCC 压到 SCREEN_ON_MAX_FCC_MA，这里按息屏学到的峰值顶回去。
     sd_scr_target
     case $? in
         0) ;;
@@ -2851,13 +2851,26 @@ sd_scr_apply() {
 # 只靠 _sd_scr_on 会让"关开关"这一下落在新进程里判成没接管过。
 sd_scr_active() { [ "$_sd_scr_on" = 1 ] || [ -f "$SD_SCR_ORIG" ]; }
 
-# 退出（拔线/关模式/熔断/高温）时按原值还原。息屏不再走这里——息屏保持接管，
-# 正是为了避免"一还原就把电流压回亮屏档"。
+# 退出（拔线/关模式/熔断/高温）时按原值还原。息屏时 FCC 路径根本不写，
+# 内核参数路径才在这里还原，避免把「永远忽略屏幕」留到下次。
 sd_scr_release() {
-    local p v
+    local p v now
     if [ -f "$SD_SCR_ORIG" ]; then
         while IFS='|' read -r p v; do
             [ -n "$p" ] && [ -e "$p" ] || continue
+            # 电流类节点：驱动已经放宽（息屏边界/温控回收）就别用旧值压回去。
+            # 只对 mA/uA 量级生效，开关型参数（ignore_screen_state 的 0/1）照常还原。
+            now=""
+            case "$v" in
+                ''|*[!0-9]*) ;;
+                *) if [ "$v" -ge 100 ]; then
+                       sd_read1 "$p" && now=$_sd_rv
+                       case "$now" in
+                           ''|*[!0-9]*) ;;
+                           *) [ "$now" -gt "$v" ] && continue ;;
+                       esac
+                   fi ;;
+            esac
             printf '%s\n' "$v" >"$p" 2>/dev/null
         done <"$SD_SCR_ORIG"
         rm -f "$SD_SCR_ORIG" 2>/dev/null
@@ -2905,9 +2918,16 @@ sd_scr_tick() {
     fi
 
     if [ "$_sd_screen_on" = 0 ]; then
-        # 息屏只更新一次基准（记录驱动在息屏放开的峰值），
-        # 然后跟亮屏一样继续接管：两条路径都不在息屏放手。
+        # 息屏只更新基准（记录驱动在息屏放开的峰值），不写任何节点。
+        # 驱动在息屏边界会自己把 FCC 放开到协议允许的峰值，模块这时候写回
+        # 等于替驱动踩刹车：实测 OPPO/一加 60W 直接掉到 30W 档，而且压住之后
+        # 驱动没机会放开，基准也就永远学不到真实峰值（2.9.73 起的回退）。
+        # 内核参数那条一写就是「永久忽略屏幕」，息屏还原给驱动走正常 FCC。
         sd_scr_learn
+        if sd_scr_node && sd_scr_active; then
+            sd_scr_release; _sd_scr_log=""
+        fi
+        return 0
     fi
 
     # 默认开启后所有人都会走到这里，两条路径共用一道温度闸：
@@ -2936,18 +2956,12 @@ sd_scr_tick() {
     sd_scr_apply
     rc=$?
     key=$_sd_scr_way
-    [ "$_sd_screen_on" = 0 ] && key="${_sd_scr_way}:off"
     case "$rc" in
         0)
             if [ "$key" != "$_sd_scr_log" ]; then
                 case "$_sd_scr_way" in
                     kernel) sd_info charge "亮屏快充：已接管（内核 ignore_screen_state）" ;;
-                    fcc)
-                        if [ "$_sd_screen_on" = 0 ]; then
-                            sd_info charge "亮屏快充：息屏保持（回写 FCC，目标 $(cat "$SD_FCC_NORM" 2>/dev/null)mA，节点 ${_sd_scr_node:-?} 实读 ${_sd_scr_cur:-?}mA）"
-                        else
-                            sd_info charge "亮屏快充：已接管（回写 FCC，目标 $(cat "$SD_FCC_NORM" 2>/dev/null)mA，节点 ${_sd_scr_node:-?} 实读 ${_sd_scr_cur:-?}mA）"
-                        fi ;;
+                    fcc)    sd_info charge "亮屏快充：已接管（回写 FCC，目标 $(cat "$SD_FCC_NORM" 2>/dev/null)mA，节点 ${_sd_scr_node:-?} 实读 ${_sd_scr_cur:-?}mA）" ;;
                 esac
                 _sd_scr_log=$key
             fi ;;

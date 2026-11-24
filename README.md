@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`3.0.4`（`versionCode 300009`），C 版为 `3.0.4-c`
+- 当前版本：`3.0.5`（`versionCode 300011`），C 版为 `3.0.5-c`
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -312,7 +312,8 @@ sh /data/adb/modules/quickcharge/action.sh check
    会自动重建覆盖层，但路径全变了就得改代码。
 4. **`charge` 模式轮询固定 10 秒**（不受 `tick` 影响），所以拔电后最长要等一轮才还原真实读数。
 5. **屏幕快充只能改写节点**。厂商驱动在 `fb_notifier` 里压 FCC（亮屏压到 1500 到 2000mA，
-   约 7 到 9W）时，模块靠 `ignore_screen_state` 或回写 FCC 顶回去，亮屏息屏都保持；
+   约 7 到 9W）时，模块靠 `ignore_screen_state` 或回写 FCC 顶回去；回写只在亮屏做，
+   息屏完全交还驱动（息屏是驱动放开 FCC 的窗口，这时写反而会压住功率）；
    节点全部只读、或系统在息屏后另有服务压流，就只能认。电量 80% 以上进入恒压，
    电流本来就会往下掉，这部分不是模块能拉回来的。
 6. **不保证所有机型**。`check` 给出的是"这台机器能用什么"，不是"一定能降温"。
@@ -371,26 +372,26 @@ su -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 | 仓库 | 当前版本 | 包名 | versionCode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.0.4` | `QuickCharge-v3.0.4.zip` | 300009 |
-| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.0.4-c` | `QuickCharge-v3.0.4-c.zip` | 300008 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.0.5` | `QuickCharge-v3.0.5.zip` | 300011 |
+| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.0.5-c` | `QuickCharge-v3.0.5-c.zip` | 300010 |
 
 每个仓库的 Release 只附自己那一份模块包，装哪个版本就去哪个仓库下载，不会混。
 
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v3.0.4
-Quick Charge v3.0.4-c
+Quick Charge v3.0.5
+Quick Charge v3.0.5-c
 ```
 
-tag 与标题一致：shell 仓 `v3.0.4`，C 仓 `3.0.4-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v3.0.5`，C 仓 `3.0.5-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
 
 ### 版本号规则（3.0 起）
 
 版本固定三段 `主.次.修订`：
 
-- 修 bug / 小改动：修订 +1（`3.0.1`、`3.0.4` …）；
+- 修 bug / 小改动：修订 +1（`3.0.1`、`3.0.5` …）；
 - **修订到 100 进一位**：`3.0.100` 的下一个版本是 `3.1.0`；
 - 功能线变更：次版本 +1，修订归零。
 
@@ -415,9 +416,9 @@ updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/up
 
 ```json
 {
-  "version": "3.0.4",
-  "versionCode": 300009,
-  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.0.4/QuickCharge-v3.0.4.zip",
+  "version": "3.0.5",
+  "versionCode": 300011,
+  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.0.5/QuickCharge-v3.0.5.zip",
   "changelog": "https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/RELEASE.md"
 }
 ```
@@ -434,7 +435,7 @@ updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/up
 > **字段名必须是 `versionCode`，中间那个 C 要大写。** `module.prop` 是按行原样解析的键值对，
 > 管理器读的是驼峰 `versionCode`；写成全小写 `versioncode` 不会报错，但本地版本号会被读成
 > `0`，于是远端任何版本都比它大，模块卡片上的「更新」按钮就再也消不掉——装到最新也一样。
-> 3.0.2 及更早的包踩过这个坑，3.0.4 起已改为驼峰。
+> 3.0.2 及更早的包踩过这个坑，3.0.3 起已改为驼峰。
 
 ---
 

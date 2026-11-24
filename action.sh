@@ -131,7 +131,7 @@ sd_do_status() {
                     printf '亮屏快充  已接管（内核 ignore_screen_state）\n'
                 fi ;;
         fcc)    if [ "$_sd_screen_on" = 0 ]; then
-                    printf '亮屏快充  已接管（回写 FCC，息屏保持）\n'
+                    printf '亮屏快充  息屏交还驱动（下次亮屏再接管）\n'
                 else
                     printf '亮屏快充  已接管（回写 FCC）\n'
                 fi ;;
