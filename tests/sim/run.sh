@@ -251,11 +251,11 @@ sleep 1
 # 链接含 & 与 +，必须整串传给 am；被截断就说明少加了引号
 grep -q 'qun.qq.com/universal-share/share?ac=1&authKey=' /tmp/am.args 2>/dev/null && ok "刷写后调用 am 跳转加群页" || ng "未触发加群跳转"
 grep -q 'svctype=4&tempid=h5_group_info' /tmp/am.args 2>/dev/null && ok "加群链接完整未被 & 截断" || ng "加群链接被截断"
-grep -q "覆盖  9 个配置" /tmp/install.log && ok "安装日志有覆盖计数" || ng "安装日志缺覆盖计数"
+grep -q "覆盖  8 个配置" /tmp/install.log && ok "安装日志有覆盖计数" || ng "安装日志缺覆盖计数"
 
 OV=/opt/qc/files
 n=$(find "$OV" -type f 2>/dev/null | wc -l | tr -d ' ')
-eq "$n" "9" "生成 9 个覆盖文件"
+eq "$n" "8" "生成 8 个覆盖文件"
 
 eq "$(grep -c 'fps="144"' "$OV/vendor/etc/thermallevel_to_fps.xml" 2>/dev/null)" "3" "fps 全部改为 144"
 eq "$(grep -c 'fps="90.5"' "$OV/vendor/etc/thermallevel_to_fps.xml" 2>/dev/null)" "0" "小数 fps 也被替换"
@@ -269,7 +269,7 @@ grep -q '150,550\]' "$OV/vendor/etc/devices_config.json" && ok "充电窗口改�
 eq "$(grep -o '150,550\]' "$OV/vendor/etc/devices_config.json" 2>/dev/null | wc -l | tr -d ' ')" "2" "两处窗口都改"
 grep -q 'SkinTemperatureNode: battery' "$OV/vendor/etc/QEGA_Config.txt" && ok "QEGA 取样节点改 battery" || ng "QEGA 未改"
 eq "$(head -1 "$OV/vendor/etc/charging_0.txt")" "470,3000,4500" "充电曲线温度轴 +120"
-eq "$(wc -c <"$OV/vendor/etc/horae_0.conf" | tr -d ' ')" "0" "horae 配置置空"
+[ -f "$OV/vendor/etc/horae_0.conf" ] && ng "horae 配置不再改写" || ok "horae 配置不再改写"
 [ -f "$OV/vendor/etc/sys_thermal_control_config_cdata.xml" ] && ok "CDATA 文件结构可正常改写" || ng "CDATA 文件被误拒绝"
 grep -q 'a < b' "$OV/vendor/etc/sys_thermal_control_config_cdata.xml" && ok "CDATA 内容未被破坏" || ng "CDATA 内容被破坏"
 [ -f "$OV/vendor/etc/sys_thermal_control_config_bad.xml" ] && ng "非配平文件被误接受" || ok "非配平文件被拒绝"
@@ -294,7 +294,7 @@ orig_md5=$(md5sum /vendor/etc/charging_0.txt | awk '{print $1}')
 SD_MODDIR=/opt/qc sh /opt/qc/post-fs-data.sh >/tmp/pfd.log 2>&1
 eq "$?" "0" "post-fs-data 退出码 0"
 m=$(grep -c ' /vendor/etc/' /proc/mounts)
-eq "$m" "9" "9 个 vendor 配置已挂载"
+eq "$m" "8" "8 个 vendor 配置已挂载"
 grep -q 'fps="144"' /vendor/etc/thermallevel_to_fps.xml && ok "挂载后读到的是覆盖层内容" || ng "挂载未生效"
 eq "$(cat "$SDD/boot.count")" "1" "开机计数 1"
 
@@ -374,7 +374,7 @@ eq "$?" "0" "重复卸载不报错"
 echo "===== T5b 清单丢失反推卸载 ====="
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
 SD_MODDIR=/opt/qc sh /opt/qc/post-fs-data.sh >/dev/null 2>&1
-eq "$(grep -c ' /vendor/etc/' /proc/mounts)" "9" "重建后重新挂载"
+eq "$(grep -c ' /vendor/etc/' /proc/mounts)" "8" "重建后重新挂载"
 rm -f "$SDD/mounts.list"
 SD_DATA=$SDD sh /opt/qc/uninstall.sh >/dev/null 2>&1
 eq "$(grep -c ' /vendor/etc/' /proc/mounts)" "0" "清单丢失时按覆盖层反推卸载"
@@ -625,7 +625,7 @@ D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
 case "$D" in "✅ 运行中 · 温控档位"*) ok "运行中描述：状态在前，档位紧接" ;; *) ng "运行中描述: $D" ;; esac
 # 装机默认 temp_mode=charge，描述应如实写"仅充电"
 case "$D" in *"仅充电"*) ok "默认仅充电状态写进描述" ;; *) ng "默认状态不符: $D" ;; esac
-case "$D" in *"配置 9 项"*) ok "描述含挂载数" ;; *) ng "描述缺挂载数: $D" ;; esac
+case "$D" in *"配置 8 项"*) ok "描述含挂载数" ;; *) ng "描述缺挂载数: $D" ;; esac
 
 # 幂等：状态没变时不该再写盘
 M1=$(md5sum /opt/qc/module.prop | awk '{print $1}')
@@ -645,7 +645,7 @@ case "$D" in *"温控档位 9/10"*) ok "旧命令 aggr 仍可用且同步" ;; *)
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz 120 >/dev/null 2>&1
 D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
 case "$D" in *"高刷 120Hz"*) ok "高刷状态同步" ;; *) ng "高刷未同步: $D" ;; esac
-case "$D" in *"配置 9 项"*) ok "改高刷后挂载数仍在" ;; *) ng "挂载数丢失: $D" ;; esac
+case "$D" in *"配置 8 项"*) ok "改高刷后挂载数仍在" ;; *) ng "挂载数丢失: $D" ;; esac
 
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp off >/dev/null 2>&1
 D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
@@ -1059,8 +1059,8 @@ rm -rf "$SDD" /opt/qc
 cp -a /mod /opt/qc && chmod +x /opt/qc/*.sh
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/t18inst.log 2>&1
 eq "$?" "0" "NoMount 环境下安装成功"
-eq "$(find /opt/qc/system -type f 2>/dev/null | wc -l | tr -d ' ')" "9" "安装即生成 9 个注入文件"
-eq "$(wc -l <"$SDD/nm.list" 2>/dev/null | tr -d ' ')" "9" "注入清单 9 行"
+eq "$(find /opt/qc/system -type f 2>/dev/null | wc -l | tr -d ' ')" "8" "安装即生成 8 个注入文件"
+eq "$(wc -l <"$SDD/nm.list" 2>/dev/null | tr -d ' ')" "8" "注入清单 8 行"
 grep -q "NoMount 接管" /tmp/t18inst.log && ok "安装日志说明 NoMount 接管" || ng "安装日志未说明 NoMount 接管"
 eq "$(find /opt/qc/system -name "*.xml" | wc -l | tr -d " ")" "5" "注入路径结构与系统一致"
 
@@ -1068,7 +1068,7 @@ eq "$(find /opt/qc/system -name "*.xml" | wc -l | tr -d " ")" "5" "注入路径�
 # 安装后是「待重启」，摘要要等守护起来才写，这里造个守护现场
 fake_daemon_start
 MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_sync_desc' >/dev/null 2>&1
-grep -q '配置 9 项' /opt/qc/module.prop && ok "简介显示配置 9 项" || ng "简介未按注入数显示"
+grep -q '配置 8 项' /opt/qc/module.prop && ok "简介显示配置 8 项" || ng "简介未按注入数显示"
 grep -q '未挂载' /opt/qc/module.prop && ng "简介仍写未挂载" || ok "简介不再写未挂载"
 fake_daemon_stop
 
@@ -1087,9 +1087,12 @@ grep -q '<x/>' /opt/qc/system/vendor/etc/thermallevel_to_fps.xml && ok "新内�
 [ -f /tmp/nm.calls ] && ng "仅内容变化就 reload 了" || ok "仅内容变化不 reload"
 
 # 删掉一个覆盖文件：镜像要跟着删，并且必须 reload 一次
-rm -f /opt/qc/files/vendor/etc/horae_0.conf
+# （horae*.conf 3.0.8 起不再改写，这里用一个临时文件走同一条同步路径）
+printf 'probe\n' >/opt/qc/files/vendor/etc/qc-sync-probe.conf
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh mount >/dev/null 2>&1
+rm -f /opt/qc/files/vendor/etc/qc-sync-probe.conf
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh mount >/tmp/t18m2.log 2>&1
-[ -f /opt/qc/system/vendor/etc/horae_0.conf ] && ng "多余注入文件没删" || ok "多余注入文件已删"
+[ -f /opt/qc/system/vendor/etc/qc-sync-probe.conf ] && ng "多余注入文件没删" || ok "多余注入文件已删"
 grep -q "reload" /tmp/nm.calls 2>/dev/null && ok "集合变化触发 reload" || ng "集合变化未 reload"
 eq "$(wc -l <"$SDD/nm.list" 2>/dev/null | tr -d ' ')" "8" "清单同步为 8 行"
 
@@ -1263,7 +1266,6 @@ rm -f /tmp/settings.db
 printf 'system/peak_refresh_rate=60\nsystem/min_refresh_rate=60\nsecure/match_content_frame_rate=3\n' >/tmp/settings.db
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz 120 >/dev/null 2>&1
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hzguard on >/dev/null 2>&1
-SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh horae 0 >/dev/null 2>&1
 eq "$(settings get system peak_refresh_rate)" "120" "锁定已写入 120"
 eq "$(settings get secure match_content_frame_rate)" "1" "内容帧率匹配已锁 1"
 SD_DATA=$SDD sh /opt/qc/uninstall.sh >/dev/null 2>&1
@@ -2428,14 +2430,12 @@ printf '380\n' >/sys/class/power_supply/battery/temp
 eq "$(t42 sh /opt/qc/action.sh batt off 2>&1 | grep -c '关闭')" \
    "1" "batt off：关闭"
 
-eq "$(t42 sh /opt/qc/action.sh thermal off 2>&1 | grep -c '停止')" \
-   "1" "thermal off：停 horae"
+# thermal/horae 已在 3.0.8 删除：只管性能/亮度，和充电无关
+eq "$(t42 sh /opt/qc/action.sh thermal off 2>&1 | grep -c '未知命令')" \
+   "1" "thermal 命令已删除（未知命令）"
 
-eq "$(t42 sh /opt/qc/action.sh json | grep -o '"thermal":"[a-z]*"')" \
-   '"thermal":"off"' "json：热管理状态"
-
-eq "$(t42 sh /opt/qc/action.sh thermal on 2>&1 | grep -c '开启')" \
-   "1" "thermal on：恢复"
+eq "$(t42 sh /opt/qc/action.sh json | grep -c '"unlock":')" \
+   "1" "json：带 unlock 字段"
 
 # ---------------------------------------------------------------- T44 元模块接管挂载
 # Hybrid Mount / Magic Mount / Mountify 都在 metamount（KSU）或 post-mount（APatch）
@@ -2462,7 +2462,7 @@ eq "$(wc -l <"$D44/mounts.list" 2>/dev/null | tr -d ' ')" \
    "0" "meta 下一条 bind 都不产生"
 
 eq "$(find /opt/qc/system -type f 2>/dev/null | wc -l | tr -d ' ')" \
-   "9" "9 个文件交付到 system/"
+   "8" "8 个文件交付到 system/"
 
 has "$(cat "$D44/log.txt" 2>/dev/null)" "已交给 Hybrid Mount" "日志写明交给 Hybrid"
 
@@ -2515,7 +2515,7 @@ eq "$(t45 sh -c '. /opt/qc/lib/qc.sh; sd_mount_mode')" \
 eq "$(wc -l <"$D45/mounts.list" 2>/dev/null | tr -d ' ')" \
    "0" "Mountify 下一条 bind 都不产生"
 eq "$(find /opt/qc/system -type f 2>/dev/null | wc -l | tr -d ' ')" \
-   "9" "9 个文件交付到 system/"
+   "8" "8 个文件交付到 system/"
 
 has "$(cat "$D45/log.txt" 2>/dev/null)" "已交给 Mountify" "日志写明交给 Mountify"
 has "$(t45 sh /opt/qc/action.sh status 2>&1)" "Mountify 托管" "status 标出 Mountify 托管"
@@ -2903,14 +2903,51 @@ _t51=$(sh /opt/qc/action.sh tiers 2>&1)
 has "$_t51" "charge_control_limit" "tiers：列出 thermal HAL 限流节点"
 has "$_t51" "thermal_charging"     "tiers：列出温控限充开关"
 has "$_t51" "cool_down"            "tiers：列出 oplus 降流档"
-has "$_t51" "horae 只管"            "tiers：说明 horae 与充电阶梯无关"
+has "$_t51" "unlock on"            "tiers：指向 unlock 解除限流"
 hasnt "$_t51" "一个都没找到"        "tiers：找到节点时不报空"
 
-sh /opt/qc/action.sh thermal off >/dev/null 2>&1
 _t51=$(sh /opt/qc/action.sh status 2>&1)
-has "$_t51" "horae 已停" "status：热管理行写明是 horae"
-hasnt "$_t51" "热管理    已停用" "status：不再把 horae 写成热管理总开关"
-sh /opt/qc/action.sh thermal on >/dev/null 2>&1
+has "$_t51" "阶梯解锁  关闭" "status：列出阶梯解锁状态"
+hasnt "$_t51" "热管理    " "status：不再出现热管理行"
+
+# ---------------------------------------------------------------- T52 充电阶梯解锁
+# thermal off 已删除：它只停 horae，管的是性能/亮度，与充电无关。
+# unlock 才是真正动 HAL 限流节点的开关，必须有原值备份和超温撤销。
+B52=/sys/class/power_supply/battery
+mkdir -p "$B52"
+printf '38\n' >"$B52/temp"
+printf '0\n'  >"$B52/charge_control_limit"
+printf '1\n'  >"$B52/thermal_charging"
+D52=/data/adb/qc-t52
+rm -rf "$D52"; mkdir -p "$D52/run"
+u52() { env SD_NO_DAEMON=1 SD_DATA=$D52 SD_MODDIR=/opt/qc sh /opt/qc/action.sh "$@" 2>&1; }
+has "$(u52 status)" "阶梯解锁  关闭" "unlock：默认关闭"
+hasnt "$(u52 help)" "thermal <on|off>" "help：thermal 命令已移除"
+
+u52 unlock on >/dev/null 2>&1
+eq "$(cat "$B52/thermal_charging")" "0" "unlock on：thermal_charging 写 0"
+[ -f "$D52/run/unlock.orig" ] && ok "unlock on：原值已备份" || ng "unlock on：没备份原值"
+has "$(u52 status)" "阶梯解锁  已开启" "unlock：status 显示已开启"
+
+u52 unlock off >/dev/null 2>&1
+eq "$(cat "$B52/thermal_charging")" "1" "unlock off：还原原值 1"
+[ -f "$D52/run/unlock.orig" ] && ng "unlock off：备份文件没删" || ok "unlock off：备份文件已清"
+
+# 超温拒绝：先写 46℃ 再开，节点不应被写
+printf '46\n' >"$B52/temp"
+u52 unlock on >/dev/null 2>&1
+eq "$(cat "$B52/thermal_charging")" "1" "unlock on：46℃ 拒绝开启，不写节点"
+eq "$(grep -c '^chg_unlock=1' "$D52/state.conf" 2>/dev/null)" "0" "unlock on：46℃ 不置状态位"
+
+# 开启后升温：守护下一轮撤销并还原
+printf '38\n' >"$B52/temp"
+u52 unlock on >/dev/null 2>&1
+eq "$(cat "$B52/thermal_charging")" "0" "降到 38℃ 后可开启"
+printf '46\n' >"$B52/temp"
+env SD_DATA=$D52 SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_unlock_tick' 2>/dev/null
+eq "$(cat "$B52/thermal_charging")" "1" "升到 46℃：守护撤销并还原"
+eq "$(grep -c '^chg_unlock=1' "$D52/state.conf" 2>/dev/null)" "0" "升到 46℃：状态位清回 0"
+rm -rf "$D52"
 
 # 失败清单放在最后统一列一遍：滚动日志里翻不到的那几条，这里能一次看全
 if [ "$FAIL" -gt 0 ]; then

@@ -30,6 +30,16 @@ if [ -d "$SD_RUN/daemon.lock" ] || [ -f "$SD_RUN/daemon.pid" ]; then
 fi
 
 sd_state_load
+# 3.0.8 删掉了 horae 开关（它只管性能/亮度，与充电无关）。老用户若把它停在 0，
+# 这里恢复系统默认并把状态行清掉，否则入口没了，horae 会一直停着。
+if [ -f "$SD_STATE" ] && grep -q '^horae=' "$SD_STATE" 2>/dev/null; then
+    if [ "$(sed -n 's/^horae=//p' "$SD_STATE" | head -1)" = 0 ]; then
+        setprop persist.sys.horae.enable 1 2>/dev/null
+        start horae 2>/dev/null
+        sd_info boot "horae 开关已移除，恢复系统默认"
+    fi
+    sed -i '/^horae=/d' "$SD_STATE" 2>/dev/null
+fi
 sd_boot_mark
 rm -f "$SD_DATA/need_reboot" 2>/dev/null
 sd_zone_scan

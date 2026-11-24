@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`3.0.7`（`versionCode 300015`），C 版为 `3.0.7-c`
+- 当前版本：`3.0.8`（`versionCode 300017`），C 版为 `3.0.8-c`
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -176,7 +176,7 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 | `hz` | `off` | 60 到 185 / off | 刷新率 |
 | `tick` | `15` | 5 到 300 | 守护轮询间隔（秒），`charge` 模式固定 10s 不受它影响 |
 | `log_level` | `1` | 0 到 4 | 0 只留 E / 1 事件（默认）/ 2 事件+快照 / 3 逐轮 / 4 调试 |
-| `horae` | `1` | 0 / 1 | OPPO horae 服务开关（只管性能/亮度，不碰充电） |
+| `chg_unlock` | `0` | 0 / 1 | 充电阶梯解锁：写 0 解除 HAL 限流，电池 ≥45℃ 自动撤销 |
 | `curve_offset` | `120` | 0 到 300 | 充电曲线偏移，0.1℃ 单位（120 = +12℃） |
 | `power_scale` | `100` | 50 到 200 | 电流读数校准 % |
 | `cells_mode` | `auto` | auto / 1 / 2 | 电芯数 |
@@ -239,7 +239,7 @@ ACTION=/data/adb/modules/quickcharge/action.sh
 |---|---|
 | `hz <60-185\|off> [soft\|hard]` | 刷新率，`hard` 额外锁定内容帧率匹配 |
 | `hzguard <on\|off>` | 强制锁定开关（档位不变，只切力度） |
-| `thermal <on\|off>` / `horae <0\|1>` | OPPO horae 服务（性能/亮度温控），**不影响充电阶梯** |
+| `unlock <on\|off>` | 取消充电阶梯限流（`charge_control_limit` / `thermal_charging` 写 0，原值备份，≥45℃ 自动撤销） |
 | `tiers` | 充电阶梯诊断：列出 `charge_control_limit`、`thermal_charging`、`cool_down` 等节点与当前值 |
 | `power` | 电流 / 电压 / 功率读数（JSON） |
 | `level <0-4>` | 日志级别 |
@@ -268,13 +268,14 @@ ACTION=/data/adb/modules/quickcharge/action.sh
 | 电流单位 | 多为 µA | 多为 mA | 读原始文本判断量级，回写保留原单位 |
 | 充电节点 | `oplus_chg` | `mtk_charger` / `charger` | 多个候选路径依次尝试 |
 
-欧加真（ColorOS / RealmeUI）额外有 `horae` 热管理服务和 `ignore_screen_state` 开关，
-两者都是可选路径：找不到就跳过，不报错、不影响其它功能。
+欧加真（ColorOS / RealmeUI）额外有 `ignore_screen_state` 开关，找不到就跳过，
+不报错、不影响其它功能。
 
-注意 `horae` 与充电无关：它管 CPU/GPU 降频、亮度、部分场景限帧，停了不会改变充电电流。
 充电的「阶梯」由系统 thermal HAL 写 `charge_control_limit` / `thermal_charging`，
 以及充电驱动按电池温度自己分档（欧加是 `oplus_chg/battery/cool_down`）。
-想知道本机谁在限流，跑 `action.sh tiers`。
+想知道本机谁在限流，跑 `action.sh tiers`；要解除 HAL 侧限制，用 `action.sh unlock on`。
+3.0.8 删掉了原来的 `thermal` / `horae` 开关：它只管 CPU/GPU 降频与亮度，
+跟充电毫无关系，留着只会让人以为能解决掉功率。
 
 不确定自己机器支持哪些，直接跑：
 
@@ -378,26 +379,26 @@ su -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 | 仓库 | 当前版本 | 包名 | versionCode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.0.7` | `QuickCharge-v3.0.7.zip` | 300015 |
-| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.0.7-c` | `QuickCharge-v3.0.7-c.zip` | 300014 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.0.8` | `QuickCharge-v3.0.8.zip` | 300017 |
+| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.0.8-c` | `QuickCharge-v3.0.8-c.zip` | 300016 |
 
 每个仓库的 Release 只附自己那一份模块包，装哪个版本就去哪个仓库下载，不会混。
 
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v3.0.7
-Quick Charge v3.0.7-c
+Quick Charge v3.0.8
+Quick Charge v3.0.8-c
 ```
 
-tag 与标题一致：shell 仓 `v3.0.7`，C 仓 `3.0.7-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v3.0.8`，C 仓 `3.0.8-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
 
 ### 版本号规则（3.0 起）
 
 版本固定三段 `主.次.修订`：
 
-- 修 bug / 小改动：修订 +1（`3.0.1`、`3.0.7` …）；
+- 修 bug / 小改动：修订 +1（`3.0.1`、`3.0.8` …）；
 - **修订到 100 进一位**：`3.0.100` 的下一个版本是 `3.1.0`；
 - 功能线变更：次版本 +1，修订归零。
 
@@ -422,9 +423,9 @@ updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/up
 
 ```json
 {
-  "version": "3.0.7",
-  "versionCode": 300015,
-  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.0.7/QuickCharge-v3.0.7.zip",
+  "version": "3.0.8",
+  "versionCode": 300017,
+  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.0.8/QuickCharge-v3.0.8.zip",
   "changelog": "https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/RELEASE.md"
 }
 ```

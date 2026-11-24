@@ -40,8 +40,7 @@ Quick Charge (QC) 控制入口。
   sentinel <60-110|off>        SoC/主板哨兵熔断阈值
   battery <30-70|off>          电池哨兵熔断阈值
   cells <auto|1|2>             电芯数：自动判断 / 强制单芯 / 强制双芯
-  horae <0|1>                  OPPO horae 服务开关（性能/亮度温控，thermal 为同义）
-  thermal <on|off>             同 horae：只停性能温控，不影响充电阶梯（见 tiers）
+  unlock <on|off>              取消充电阶梯限流（写 thermal HAL 的限流节点，≥45℃ 自动撤销）
   tiers                        充电阶梯诊断：列出所有能限流的节点与当前值
   level <0-4>                  日志 0关（默认） 1事件 2详细 3逐轮 4调试；开 1/2 会先写环境头
   logs [e|w|i|d|boot|daemon|N] 查看日志
@@ -117,7 +116,11 @@ sd_do_status() {
     else
         printf '电池伪装  关闭（电池 NTC 真实）\n'
     fi
-    printf '热管理    %s\n' "$([ "$(sd_state_get horae 1)" = 0 ] && echo 'horae 已停（只管性能/亮度，不影响充电阶梯）' || echo 'horae 系统默认')"
+    if [ "$(sd_state_get chg_unlock 0)" = 1 ]; then
+        printf '阶梯解锁  已开启（写 0 解除 HAL 限流，电池 ≥%s℃ 自动撤销）\n' "$SD_UNLOCK_HARD"
+    else
+        printf '阶梯解锁  关闭（系统按温度分档；unlock on 可解除）\n'
+    fi
     printf '哨兵      %s %s℃ / 上限 %s℃  [%s]\n' "$sz" "${real:--}" "${slim:-off}" "${src:-未读到}"
     if [ "$curmax" -gt 0 ]; then
         printf '电流上限  %s\n' "${curmax}mA（绝对限流，当前允许 ${curtar}mA）"
@@ -246,10 +249,10 @@ sd_do_json() {
     printf '"screen":%s,"screen_mode":"%s","screen_base":%s,' \
         "$([ "$_sd_screen_on" = 0 ] && echo 0 || echo 1)" \
         "$(sd_scr_state)" "$_sbase"
-    printf '"batt_spoof":"%s","batt_real":%s,"thermal":"%s",' \
+    printf '"batt_spoof":"%s","batt_real":%s,"unlock":%s,' \
         "$(sd_state_get batt_spoof off)" \
         "$(sd_batt_real_v && printf '%s' "$_sd_rv" || printf 'null')" \
-        "$([ "$(sd_state_get horae 1)" = 0 ] && echo off || echo on)"
+        "$([ "$(sd_state_get chg_unlock 0)" = 1 ] && echo true || echo false)"
     printf '"battery_limit":%s,"sentinel_limit":%s,' "$blj" "$slj"
     printf '"log_level":%s,"tick":%s,"mounted":%s,"daemon":%s,"daemon_age":%s,"boot_count":%s,"safety":%s,' \
         "$(sd_state_int log_level 0 0 4)" "$(sd_state_int tick 15 5 300)" \
@@ -672,14 +675,19 @@ case "$1" in
     sentinel) shift; sd_set_limit sentinel_limit "${1:-85}" 60 110 "SoC 哨兵" 85 ;;
     battery)  shift; sd_set_limit battery_limit  "${1:-48}" 30 70  "电池哨兵" 48 ;;
     batt)     shift; sd_set_batt "${1:-off}" ;;
-    thermal)  shift
-              case "${1:-}" in
-                  on|1)  sd_horae 1; sd_state_set horae 1; echo "horae -> 开启" ;;
-                  off|0) sd_horae 0; sd_state_set horae 0
-                         echo "horae -> 停止（只管性能/亮度温控）"
-                         echo "充电阶梯不受影响，要看谁在限流请执行: sh action.sh tiers" ;;
-                  *)     echo "用法: thermal on|off"; exit 1 ;;
-              esac ;;
+    unlock)  shift
+             case "${1:-}" in
+                 on|1)
+                     sd_state_set chg_unlock 1
+                     sd_unlock_tick
+                     echo "阶梯解锁 -> 开启（写 0 解除 HAL 限流；电池 ≥${SD_UNLOCK_HARD}℃ 自动撤销）"
+                     echo "原值备份在 $SD_UNLOCK_ORIG；unlock off 还原" ;;
+                 off|0)
+                     sd_state_set chg_unlock 0
+                     sd_unlock_restore
+                     echo "阶梯解锁 -> 关闭（已还原原值）" ;;
+                 *)  echo "用法: unlock on|off"; exit 1 ;;
+             esac ;;
     tiers)   sd_tier_report ;;
     cells)    shift
               case "${1:-auto}" in
@@ -687,12 +695,6 @@ case "$1" in
                             echo "电芯数: ${1:-auto}（auto=按 bcc_parms 自动判断）" ;;
                   *)        echo "用法: cells auto|1|2"; exit 1 ;;
               esac ;;
-    horae)   shift
-             case "${1:-}" in
-                 0|1) sd_horae "$1"; sd_state_set horae "$1"
-                       echo "horae -> $([ "$1" = 1 ] && echo 开启 || echo 停止)" ;;
-                 *)   echo "用法: horae 0|1"; exit 1 ;;
-             esac ;;
     level)   shift
              if sd_set_log "${1:-2}"; then
                  echo "日志级别 -> $(sd_state_int log_level 0 0 4)（0 关 / 1 事件 / 2 详细 / 3 逐轮 / 4 调试）"
@@ -719,7 +721,6 @@ case "$1" in
         sd_spoof_clear
         sd_shell_emul 0
         sd_umount_overrides purge
-        sd_horae 1
         printf '0\n' 2>/dev/null >"$SD_DATA/boot.count"
         rm -f "$SD_STATE"
         sd_info cmd "已恢复初始状态"
@@ -747,12 +748,12 @@ esac
 
 _rc=$?
 case "$_CMD" in
-    temp|shell|core|noncore|gear|aggr|base|wall|curr|curredge|boost|fast|screen|sentinel|battery|horae|level|hz|hzguard)
+    temp|shell|core|noncore|gear|aggr|base|wall|curr|curredge|boost|fast|screen|sentinel|battery|unlock|level|hz|hzguard)
         sd_ensure_daemon >/dev/null 2>&1
         sd_daemon_kick ;;
 esac
 case "$_CMD" in
-    temp|shell|core|noncore|gear|aggr|base|wall|curr|curredge|boost|fast|screen|sentinel|battery|horae|level|hz|hzguard|\
+    temp|shell|core|noncore|gear|aggr|base|wall|curr|curredge|boost|fast|screen|sentinel|battery|unlock|level|hz|hzguard|\
     mount|umount|rebuild|reboot-safe|reset)
         [ "$_rc" = "0" ] && sd_sync_desc ;;
 esac

@@ -91,9 +91,8 @@ su -c '/data/adb/modules/quickcharge/bin/qcmon sensor'   # 跑一轮热路径并
 su -c '/data/adb/modules/quickcharge/bin/qcmon bench 200' # 热路径耗时
 ```
 
-差异只在这些地方，都不影响充电行为：C 版没有 `sd_horae`（开机时 shell 已经设过
-`persist.sys.horae.enable`），也没有 `action.sh` 的命令行子集——面板和命令行仍然
-走 `action.sh`，两版共用。
+差异只在这些地方，都不影响充电行为：C 版没有 `action.sh` 的命令行子集——面板和
+命令行仍然走 `action.sh`，两版共用。
 
 ## 默认策略
 
@@ -867,7 +866,7 @@ su -c 'sh /data/adb/modules/quickcharge/action.sh wall 45'
 ```sh
 su -c 'sh /data/adb/modules/quickcharge/action.sh batt 30'   # 电池温区按 30℃ 上报
 su -c 'sh /data/adb/modules/quickcharge/action.sh batt off'  # 交回真实
-su -c 'sh /data/adb/modules/quickcharge/action.sh thermal off' # 停 horae
+su -c 'sh /data/adb/modules/quickcharge/action.sh unlock on'  # 解除阶梯限流
 ```
 
 ### `batt_spoof`：为什么可以开，又为什么有硬上限
@@ -899,27 +898,32 @@ ADC，不是 thermal zone。所以：
 想让「电池 45℃ 还满功率」，靠这个开关做不到——那需要改 `charging_*.txt` 的曲线，
 本模块不做。
 
-### `thermal`：停掉 horae
+### `unlock`：取消充电阶梯限流
 
-`thermal off` 等价于 `horae 0`：`setprop persist.sys.horae.enable 0` + `stop horae`。
-
-它**只**影响这两件事：`horae` 是欧加的性能温控服务，管 CPU/GPU 降频、亮度上限、
-部分场景限帧。停掉后高负载不再被调频，机身会更热且没有降频兜底。
-
-**它不影响充电。** 用户反馈「停用热管理不能取消阶梯充电」，观察是对的——充电的
-阶梯来自另外两条路径，都不经过 horae：
+充电的「阶梯」来自两处，都不是 horae：
 
 | 来源 | 节点 | 谁在写 |
 |---|---|---|
-| 系统 thermal HAL | `battery/charge_control_limit`、`thermal_charging` | vendor 的 thermal-engine / HAL |
+| 系统 thermal HAL | `battery/charge_control_limit`、`thermal_charging`、`step_charging` | vendor 的 thermal-engine / HAL |
 | 充电驱动自己分档 | `oplus_chg/battery/cool_down`、`constant_charge_current_max` | `oplus_chg` 驱动按电池温度 |
 
-3.0.7 之前 `status` 把这行写成「热管理 已停用」，读起来像总开关，属于文案误导，
-已改为「horae 已停（只管性能/亮度，不影响充电阶梯）」。想知道本机谁在限流，
-跑 `action.sh tiers`：它会把上面这些节点的当前值与可写性列出来。
+`unlock on` 只动第一类：把这些节点写 0（= 不限流），写之前把原值存进
+`run/unlock.orig`，`unlock off` / 超温 / 卸载时逐行还原。
 
-不改 `sys.thermal.enable`、不杀 thermal HAL。那会让 SoC 的过温保护一起失效，
-后果是关机或重启，不是"更快"。
+刻意不碰两处：
+
+- `usb/current_max`：那是输入侧能力上限，写它会打断 PD/VOOC 协商（3.0.4 的教训：
+  写它之后 60W 掉到 37W）；
+- `cool_down`：写它会让 OPlus 重选档。PKB110 实测 `ibat` 4.3A 时写 `2→0`，三秒后
+  18W 掉到 9.7W。这个节点交给 `sd_cool_tick`，只在确实被降流（<2.5A）时写。
+
+**安全边界**：电池真实温度（`power_supply/battery/temp` 的 ADC，不是温区）≥45℃
+立刻撤销并还原，读不到温度也撤销——不猜。这条兜底写在 `sd_unlock_tick` 最前面，
+先于任何写入。
+
+3.0.8 删掉了原来的 `thermal` / `horae` 开关。它只在做
+`setprop persist.sys.horae.enable` + `stop horae`，管的是 CPU/GPU 降频、亮度、
+限帧，跟充电电流没有关系；留在 UI 里只会让人以为能解决掉功率。
 
 ### 收益的真实边界
 
@@ -928,7 +932,7 @@ ADC，不是 thermal zone。所以：
 | 手段 | 收益 | 代价 |
 |---|---|---|
 | 提高 `wall` / 关墙 | 高，直接解除软件降流 | 机身更热，可随时改回 |
-| `thermal off` | 中，高负载时不被降频、充电不被压流 | 无降频兜底 |
+| `unlock on` | 中，HAL 侧不再按温度压流 | 机身更热，≥45℃ 自动撤销 |
 | `batt_spoof` | 中低，仅对读温区的策略有效 | 电池长期高温，寿命与安全 |
 | 抬浮充电压 | 高（多 4～6% 容量） | **本模块不做**，需改 dtbo，不可回滚 |
 

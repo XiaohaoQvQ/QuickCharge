@@ -42,9 +42,8 @@ sd_apply_state() {
 
     [ "$mode" = "dyn" ] && { mode=static; sd_state_set temp_mode static; }
     case "$mode" in
-        static) sd_horae "$(sd_state_get horae 1)"; sd_shell_emul "$(sd_shell_target)" ;;
+        static) sd_shell_emul "$(sd_shell_target)" ;;
         charge)
-            sd_horae "$(sd_state_get horae 1)"
             sd_charge_tick ;;
 
     esac
@@ -172,6 +171,7 @@ sd_daemon() {
         case "$_sd_rv" in Charging|Full) sd_curr_keep; _sd_chg=1 ;; esac
         sd_scr_tick
         sd_cool_tick
+        sd_unlock_tick
         sd_chg_snapshot "$_sd_chg"
 
         # 充电时压到 3s：cool_down 被驱动抬高后要尽快清零，慢一拍就白等一轮。

@@ -90,7 +90,7 @@ SD_DEFAULTS="temp_mode=charge
 shell_temp=30
 core_temp=off
 noncore_temp=off
-horae=1
+chg_unlock=0
 sentinel_limit=85
 battery_limit=48
 fast_cap=55

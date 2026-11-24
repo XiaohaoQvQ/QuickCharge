@@ -233,9 +233,9 @@
   <div class="switch" id="battSpHint" style="margin-top:2px">按此值上报；≥46℃ 撤销</div>
 
   <div class="switch" style="margin-top:18px">
-    <input type="checkbox" id="thermalOff"><label for="thermalOff">停用 horae 温控服务</label>
+    <input type="checkbox" id="thermalOff"><label for="thermalOff">取消充电阶梯限流</label>
   </div>
-  <div class="switch" id="thermalHint" style="margin-top:2px">只管 CPU/GPU 降频与亮度，不影响充电</div>
+  <div class="switch" id="thermalHint" style="margin-top:2px">写 0 解除 HAL 限流；电池 ≥45℃ 自动撤销</div>
   </div></div>
 </div>
 
@@ -722,14 +722,14 @@
           ? " · 真实 " + d.batt_real + "℃" : " · 真实温度读不到") +
         "；真实 ≥46℃ 自动撤销"
       : "电池温度保持真实；开启后才改写";
-    $("thermalOff").checked = d.thermal === "off";
-    $("thermalHint").textContent = d.thermal === "off"
-      ? "horae 已停：不再按温度降频；充电阶梯不受影响"
-      : "只管 CPU/GPU 降频与亮度，不影响充电";
-    $("sumExtreme").textContent = (bsp > 0 || d.thermal === "off")
+    $("thermalOff").checked = d.unlock === true;
+    $("thermalHint").textContent = d.unlock === true
+      ? "已解锁：HAL 限流节点写 0；电池 ≥45℃ 自动撤销"
+      : "写 0 解除 HAL 限流；电池 ≥45℃ 自动撤销";
+    $("sumExtreme").textContent = (bsp > 0 || d.unlock === true)
       ? (bsp > 0 ? "电池 " + bsp + "℃" : "") +
-        (bsp > 0 && d.thermal === "off" ? " · " : "") +
-        (d.thermal === "off" ? "horae 停用" : "")
+        (bsp > 0 && d.unlock === true ? " · " : "") +
+        (d.unlock === true ? "阶梯已解锁" : "")
       : "安全边界未动";
     var ct = (d.core && d.core !== "off") ? Number(d.core) : 0;
     if (rngPush("coreT", ct > 0 ? ct : 45)) {
@@ -1195,12 +1195,12 @@
     $("thermalOff").addEventListener("change", function () {
       var el = this, off = el.checked;
       if (off) {
-        ask("停用 horae 后系统不再按温度降频，机身会更热且没有降频兜底。\n\n注意：这只影响性能温控，不会取消充电阶梯。\n\n确定停用？",
-          function () { apply("thermal off", "horae 已停用"); },
+        ask("解除阶梯限流会写 0 到 charge_control_limit / thermal_charging，\n充电不再按温度降档，机身会更热。\n\n原值会备份，电池 ≥45℃ 时自动撤销并还原。\n\n确定开启？",
+          function () { apply("unlock on", "阶梯限流已解除"); },
           function () { el.checked = false; });
         return;
       }
-      apply("thermal on", "horae 已恢复");
+      apply("unlock off", "阶梯限流已还原");
     });
     bindRange("hz", "hzV",
       function (v) { return hzLabel(v); },

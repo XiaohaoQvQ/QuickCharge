@@ -486,7 +486,6 @@ _st_off_manual=""
 _st_shell_temp=""
 _st_core_temp=""
 _st_noncore_temp=""
-_st_horae=""
 _st_sentinel_limit=""
 _st_battery_limit=""
 _st_fast_cap=""
@@ -510,7 +509,7 @@ _st_cool_guard=""
 sd_state_load() {
     _sd_st_loaded=1
     _st_temp_mode=""; _st_off_manual=""; _st_shell_temp=""; _st_core_temp=""; _st_noncore_temp=""
-    _st_horae=""; _st_sentinel_limit=""; _st_battery_limit=""; _st_fast_cap=""
+    _st_sentinel_limit=""; _st_battery_limit=""; _st_fast_cap=""
     _st_curve_offset=""; _st_wall=""; _st_aggr=""; _st_curr_max=""
     _st_curr_edge=""
     _st_log_level=""; _st_tick=""; _st_defrev=""
@@ -537,7 +536,6 @@ sd_state_get() {
         shell_temp)     printf '%s' "${_st_shell_temp:-${2:-30}}" ;;
         core_temp)      printf '%s' "${_st_core_temp:-${2:-off}}" ;;
         noncore_temp)   printf '%s' "${_st_noncore_temp:-${2:-off}}" ;;
-        horae)          printf '%s' "${_st_horae:-${2:-1}}" ;;
         sentinel_limit) printf '%s' "${_st_sentinel_limit:-${2:-85}}" ;;
         battery_limit)  printf '%s' "${_st_battery_limit:-${2:-48}}" ;;
         fast_cap)       printf '%s' "${_st_fast_cap:-${2:-55}}" ;;
@@ -558,6 +556,7 @@ sd_state_get() {
         cells_mode)     printf '%s' "${_st_cells_mode:-${2:-auto}}" ;;
         batt_spoof)     printf '%s' "${_st_batt_spoof:-${2:-off}}" ;;
         cool_guard)     printf '%s' "${_st_cool_guard:-${2:-1}}" ;;
+        chg_unlock)     printf '%s' "${_st_chg_unlock:-${2:-0}}" ;;
         *)              printf '%s' "${2:-}" ;;
     esac
 }
@@ -2066,13 +2065,6 @@ sd_sentinel_guard() {
     return 0
 }
 
-sd_horae() {
-    case "$1" in
-        1) setprop persist.sys.horae.enable 1; start horae 2>/dev/null; sd_info thermal "horae 启动" ;;
-        0) setprop persist.sys.horae.enable 0; stop horae 2>/dev/null; sd_info thermal "horae 停止" ;;
-    esac
-}
-
 SD_CFG_DIRS="/vendor/etc /odm/etc /system/vendor/etc /system/system_ext/etc /vendor/qti/etc"
 
 sd_count_tags() { grep -o '<[/]*[A-Za-z_]' "$1" 2>/dev/null | wc -l | tr -d ' '; }
@@ -2144,8 +2136,6 @@ sd_xf_curve() {
         { print }' "$2" 2>/dev/null >"$3"
 }
 
-sd_xf_horae() { : >"$2"; return 0; }
-
 sd_transform() {
     local src="$1" dst="$2" tmp rc=1 kind=xml bk
     tmp="$dst.sdtmp"
@@ -2165,7 +2155,6 @@ sd_transform() {
         devices_config.json)           kind=json; sd_xf_chargejson "$src" "$tmp"; rc=$? ;;
         QEGA_Config.txt)               kind=text; sd_xf_qega "$src" "$tmp"; rc=$? ;;
         charging_*.txt)                kind=text; sd_xf_curve "$(sd_state_int curve_offset 120 0 300)" "$src" "$tmp"; rc=$? ;;
-        horae*.conf)                   kind=empty; sd_xf_horae "$src" "$tmp"; rc=$? ;;
         *) return 1 ;;
     esac
 
@@ -2226,8 +2215,7 @@ sd_build_overrides() {
             -name 'sys_thermal_config.xml' -o \
             -name 'devices_config.json' -o \
             -name 'QEGA_Config.txt' -o \
-            -name 'charging_*.txt' -o \
-            -name 'horae*.conf' \
+            -name 'charging_*.txt' \
             \) 2>/dev/null | while IFS= read -r f; do
             rel="${f#/}"
             sd_transform "$f" "$SD_OVERRIDES/$rel"
@@ -3242,6 +3230,89 @@ sd_cool_tick() {
     fi
 }
 
+# ---------------------------------------------------------------- 充电阶梯解锁
+# 「阶梯」的两个来源：系统 thermal HAL 按温度写 charge_control_limit /
+# thermal_charging，以及驱动按电池温度自己分档。unlock 只动 HAL 侧——
+# 写 0 表示不限流——并在写之前把原值备份到 run/unlock.orig，关闭、超温、
+# 卸载时还原。
+#
+# 刻意不碰两处：
+#   - usb/current_max：输入侧能力上限，写它会打断 PD/VOOC 协商（3.0.4 的教训）；
+#   - cool_down：写它会让 OPlus 重选档。PKB110 实测 ibat 4.3A 时写 2→0，
+#     三秒后 18W 掉到 9.7W；交给 sd_cool_tick 只在真被降流时写。
+SD_UNLOCK_ORIG="$SD_RUN/unlock.orig"
+SD_UNLOCK_HARD=45
+_sd_unlock_log=""
+_sd_unlock_at=0
+
+sd_unlock_list() {
+    printf '%s\n' \
+        "$SD_PS/battery/charge_control_limit" \
+        "$SD_PS/battery/thermal_charging" \
+        "$SD_PS/battery/step_charging" \
+        "$SD_OPLUS_CHG/thermal_charging" \
+        "$SD_OPLUS_CHG/step_charging"
+}
+
+sd_unlock_restore() {
+    local p v n=0
+    [ -f "$SD_UNLOCK_ORIG" ] || return 0
+    while IFS='|' read -r p v; do
+        [ -n "$p" ] && [ -e "$p" ] || continue
+        printf '%s\n' "$v" >"$p" 2>/dev/null && n=$((n + 1))
+    done <"$SD_UNLOCK_ORIG"
+    rm -f "$SD_UNLOCK_ORIG"
+    _sd_unlock_log=""
+    [ "$n" -gt 0 ] && sd_dbg charge "阶梯解锁：还原 $n 个节点"
+    return 0
+}
+
+sd_unlock_tick() {
+    local on p cur n=0 now
+    on=$(sd_state_get chg_unlock 0)
+    if [ "$on" != 1 ]; then
+        sd_unlock_restore
+        return 0
+    fi
+
+    # 兜底先于写入：读不到真实电池温度就不猜，直接撤销。
+    if ! sd_batt_real_v; then
+        sd_state_set chg_unlock 0
+        sd_unlock_restore
+        sd_warn charge "阶梯解锁已撤销：读不到电池真实温度，不猜安全"
+        return 0
+    fi
+    if [ "$_sd_rv" -ge "$SD_UNLOCK_HARD" ]; then
+        sd_state_set chg_unlock 0
+        sd_unlock_restore
+        sd_warn charge "阶梯解锁已撤销：电池真实 ${_sd_rv}℃ ≥ ${SD_UNLOCK_HARD}℃"
+        return 0
+    fi
+
+    for p in $(sd_unlock_list); do
+        [ -e "$p" ] && [ -w "$p" ] || continue
+        sd_read1 "$p" || continue
+        cur=$_sd_rv
+        [ "$cur" = 0 ] && continue
+        grep -qxF "$p|$cur" "$SD_UNLOCK_ORIG" 2>/dev/null ||
+            printf '%s|%s\n' "$p" "$cur" >>"$SD_UNLOCK_ORIG"
+        if printf '0\n' >"$p" 2>/dev/null; then
+            n=$((n + 1))
+        elif [ "$_sd_unlock_log" != fail ]; then
+            sd_warn charge "阶梯解锁失败：${p#$SD_PS/} 写不进去"
+            _sd_unlock_log=fail
+        fi
+    done
+
+    # HAL 可能过一轮又写回去，这里会再压 0；日志按分钟节流，免得刷屏。
+    now=$(date +%s)
+    if [ "$n" -gt 0 ] && [ $((now - _sd_unlock_at)) -ge 60 ]; then
+        sd_info charge "阶梯解锁：$n 个节点写 0（原值备份在 run/unlock.orig）"
+        _sd_unlock_at=$now
+    fi
+    return 0
+}
+
 # ---------------------------------------------------------------- 充电快照
 
 # 以前查一次充电问题要 cat 七八个节点：usb 电压、电流上限、电池电流、
@@ -3445,9 +3516,8 @@ _sd_tier_row() {
     return 0
 }
 
-# 「thermal off」只停 horae（性能/亮度温控），碰不到充电路径。用户反馈
-# 「停用热管理并没有取消阶梯充电」，是因为 status 把这行写成「热管理 已停用」，
-# 看起来像总开关。这里把真正能改电流的节点全列出来，谁在限一眼可见。
+# 把真正能改充电电流的节点全列出来，谁在限一眼可见。
+# 3.0.8 删掉了 horae 开关：它只管 CPU/GPU 降频与亮度，跟充电无关。
 sd_tier_report() {
     local bt="" tech="" st="" cool=""
     _sd_tier_hit=0
@@ -3478,11 +3548,10 @@ sd_tier_report() {
     printf '\n电池 %s℃  协议 %s  状态 %s\n' "${bt:-?}" "${tech:-?}" "${st:-?}"
 
     printf '\n判读：\n'
-    printf '  horae 只管 CPU/GPU 降频和亮度，停它不会改上面任何值。\n'
-    printf '  充电阶梯来自两处：系统 thermal HAL 写 charge_control_limit /\n'
-    printf '  thermal_charging，以及充电驱动按电池温度自己分档（oplus 的 cool_down）。\n'
-    printf '  想试不按温度降：batt 32（伪装电池温区；驱动若直读 NTC 则无效，\n'
-    printf '  ≥46℃ 自动撤销）。改完用 diag 看 ibat 是否回升。\n'
+    printf '  阶梯来自两处：系统 thermal HAL 写 charge_control_limit / thermal_charging，\n'
+    printf '  以及充电驱动按电池温度自己分档（oplus 的 cool_down）。\n'
+    printf '  取消这些限制：unlock on（写入前备份原值，电池 ≥45℃ 自动撤销）\n'
+    printf '  只想看当前谁在限：保持现状，用 diag 采样对比 unlock 前后。\n'
 }
 
 sd_chg_snapshot() {
