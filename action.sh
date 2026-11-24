@@ -135,7 +135,7 @@ sd_do_status() {
                 else
                     printf '亮屏快充  已接管（回写 FCC）\n'
                 fi ;;
-        none)   printf '亮屏快充  本机不支持（无屏幕状态参数）\n' ;;
+        none)   printf '亮屏快充  本机不支持（无屏幕状态参数，也没有电池侧电流节点）\n' ;;
         disabled) printf '亮屏快充  当前「关闭」模式，不接管\n' ;;
         *)      if [ "$_sd_screen_on" = 0 ]; then
                     printf '亮屏快充  已记基准，等待接管\n'

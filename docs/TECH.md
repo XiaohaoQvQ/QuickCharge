@@ -770,6 +770,26 @@ su -c 'sh /data/adb/modules/quickcharge/action.sh status | grep 亮屏快充'
 | 退出条件 | 拔线 / 熔断 / 切到「关闭」模式，下一轮立即还原 |
 | 本机不支持 | 面板显示"本机不支持" |
 
+### 回写目标只能是电池侧节点
+
+3.0.3 及更早把 `usb/current_max` 当成 FCC 的兜底候选，这是错的。它的语义是
+**USB 端口能力上限**（PD 协商用，插电前常见就是 2000mA），不是电池充电电流。
+往里写字会让充电器重新协商，实测 OPPO Find X8 从 60W 掉到 37W，一加 12 停在 33W：
+
+```
+17:48:22  pb=60.4W          ← 原装快充正在爬坡
+17:48:25  回写 FCC 目标 2000mA  ← 模块写的
+17:48:28  pb=37.9W          ← 掉档，之后一直 37-40W
+```
+
+所以 3.0.4 起回写目标只认 `battery/constant_charge_current_max`、
+`battery/current_max`、`oplus_chg/battery/chg_current_max` 这类**电池侧**节点；
+`usb/`、`charger/`、`pc_port/`、`wireless/`、`input_current_limit` 全部排除。
+一个电池侧节点都找不到时判定"本机不支持"，什么都不写——宁可不管，也不能打断快充协商。
+
+同理，基准值现在绑定节点名（`run/fcc.node`）：节点换了就作废旧基线重学，
+不会拿 usb 端口的历史 2000mA 去压电池侧的 6000mA。
+
 **走回写 FCC 那条路的机型，要先息屏充一次。** 模块需要在那时记下正常的 FCC 作为基准
 （`run/fcc.norm`），亮屏后才能知道"该写回多少"。没有基准时面板会提示，
 不会瞎猜一个电流值。有 `ignore_screen_state` 的机型不需要基准，开机充电即接管。

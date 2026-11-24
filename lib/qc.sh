@@ -213,7 +213,7 @@ sd_dump_env() {
     if sd_scr_fcc_node; then
         _sd_emit I env "fcc 节点=${_sd_sf} 目标=$(cat "$SD_FCC_NORM" 2>/dev/null || printf '未学')"
     else
-        _sd_emit I env "fcc 节点=none（本机没有可回写的电流节点，屏幕快充只能走内核参数）"
+        _sd_emit I env "fcc 节点=none（只有输入侧节点 usb/current_max 之类，写它会打断 PD/VOOC 协商，不接管）"
     fi
     return 0
 }
@@ -2671,6 +2671,7 @@ SD_SCR_ORIG="$SD_RUN/scr.orig"
 SD_SCR_WAY="$SD_RUN/scr.way"
 SD_SCR_FAIL="$SD_RUN/scr.fail"
 SD_FCC_NORM="$SD_RUN/fcc.norm"
+SD_FCC_NORM_NODE="$SD_RUN/fcc.node"
 _sd_scr_on=0
 _sd_scr_way=""
 _sd_scr_log=""
@@ -2694,21 +2695,34 @@ sd_scr_node() {
     return 1
 }
 
+# 输入侧节点：USB 端口能力、充电器能力、MTK 输入限流。写这些会重新协商 PD/VOOC，
+# 不是改电池充电电流，绝不能拿来当屏幕快充的回写目标。
+sd_scr_is_input() {
+    case "$1" in
+        */usb/*|*/charger/*|*/pc_port/*|*/wireless/*|*input_current_limit*) return 0 ;;
+    esac
+    return 1
+}
+
 sd_scr_fcc_node() {
     _sd_curr_prepare
     local n pref
-    # 优先级：电池侧 FCC → 电池侧 current_max → 欧加 chg_current_max → USB 输入上限
-    # chg_current_max 才是欧加真正的充电电流上限；漏掉它就会一路落到
-    # usb/current_max（充电器能力值，通常固定 2A），拿 2A 当目标反而压功率。
-    # 有些欧加机只暴露 usb/current_max（模块的限流也走它），所以留作兜底。
-    for pref in constant_charge_current_max battery/current_max chg_current_max usb/current_max; do
+    # 优先级：电池侧 FCC → 电池侧 current_max → 欧加 chg_current_max。
+    # 3.0.3 及更早把 usb/current_max 当兜底，那是 USB 端口能力上限（PD 协商用，
+    # 常见固定 2000mA），往里写会让充电器重新协商，实测 OPPO/一加从 60W 掉到
+    # 37W，用户看到的就是「功率锁 30W」。宁可判定不支持，也不碰输入侧节点。
+    for pref in constant_charge_current_max battery/current_max chg_current_max; do
         for n in $_sd_curr_nodes; do
             case "$n" in
-                *"$pref") [ -e "$n" ] && { _sd_sf=$n; return 0; } ;;
+                *"$pref"*)
+                    sd_scr_is_input "$n" && continue
+                    [ -e "$n" ] && { _sd_sf=$n; return 0; }
+                    ;;
             esac
         done
     done
     for n in $_sd_curr_nodes; do
+        sd_scr_is_input "$n" && continue
         case "$n" in
             */current_max|*/constant_charge_current) [ -e "$n" ] && { _sd_sf=$n; return 0; } ;;
         esac
@@ -2726,12 +2740,19 @@ sd_scr_read_ma() {
 }
 
 sd_scr_learn() {
-    local v old=0
+    local v old=0 nprev=""
     sd_scr_fcc_node || return 1
     sd_scr_read_ma "$_sd_sf" || return 1
     v=$_sd_rv
     [ "$v" -ge 500 ] || return 1
     [ "$v" -gt 8000 ] && v=8000
+    # 基线必须绑在节点上：换了节点（例如从 usb/current_max 换到电池侧 FCC）
+    # 就把旧基线作废重学，否则会拿旧节点的历史最大值去压新节点。
+    [ -f "$SD_FCC_NORM_NODE" ] && nprev=$(cat "$SD_FCC_NORM_NODE" 2>/dev/null)
+    if [ "$nprev" != "$_sd_sf" ]; then
+        rm -f "$SD_FCC_NORM" 2>/dev/null
+        printf '%s\n' "$_sd_sf" >"$SD_FCC_NORM_NODE" 2>/dev/null
+    fi
     if [ -f "$SD_FCC_NORM" ]; then
         old=$(cat "$SD_FCC_NORM" 2>/dev/null)
         case "$old" in ''|*[!0-9]*) old=0 ;; esac
@@ -2947,7 +2968,7 @@ sd_scr_tick() {
             sd_scr_active && sd_scr_release
             if [ "$_sd_screen_on" = 1 ]; then
                 if [ "$_sd_scr_log" != "fail" ]; then
-                    sd_warn charge "亮屏快充：本机不支持（无屏幕状态参数，FCC 也写不进去）"
+                    sd_warn charge "亮屏快充：本机不支持（无屏幕状态参数，也没有电池侧电流节点）"
                     _sd_scr_log=fail
                 fi
                 printf '1\n' >"$SD_SCR_FAIL" 2>/dev/null

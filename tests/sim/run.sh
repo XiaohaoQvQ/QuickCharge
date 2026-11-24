@@ -2665,11 +2665,14 @@ printf '380\n' >/sys/class/power_supply/battery/temp
 t47b() { env SD_DATA=$D47b SD_MODDIR=/opt/qc SD_NO_DAEMON=1 SD_BL="$D47b/bl" SD_FB=/nonexistent \
          SD_CURR_NODES=/sys/class/power_supply/usb/current_max \
          FAKE_PLAT=sm8850 FAKE_SOCMFR=Qualcomm FAKE_HW=qcom "$@"; }
+# 3.0.4 起 usb/current_max 不再当 FCC 目标：它是端口能力上限，写它会重新协商
+# PD/VOOC（实测欧加机型从 60W 掉到 37W）。只有输入侧节点时必须判定不支持。
 t47b sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode charge; _sd_screen_on=0; sd_scr_tick' >/dev/null 2>&1
-eq "$(cat "$D47b/run/fcc.norm" 2>/dev/null)" "6000" "只有 usb 节点：也记基准 6000mA"
+eq "$(cat "$D47b/run/fcc.norm" 2>/dev/null)" "" "只有 usb 节点：不记基准"
 printf '2000000\n' >/sys/class/power_supply/usb/current_max
 t47b sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode charge; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
-eq "$(cat /sys/class/power_supply/usb/current_max)" "6000000" "只有 usb 节点：亮屏写回 6A"
+eq "$(cat /sys/class/power_supply/usb/current_max)" "2000000" "只有 usb 节点：亮屏不写端口上限"
+eq "$(t47b sh /opt/qc/action.sh status 2>/dev/null | grep -c '本机不支持')" "1" "只有 usb 节点：状态报不支持"
 t47b sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode off; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
 eq "$(cat /sys/class/power_supply/usb/current_max)" "2000000" "切关闭模式：usb 节点还原 2A"
 
