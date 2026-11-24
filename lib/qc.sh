@@ -3421,6 +3421,70 @@ sd_chg_line() {
     printf '%s' "$_sd_chg_line_v"
 }
 
+# 电流节点统一显示成 mA：7 位以上按 µA 换算，cool_down 这类小整数原样输出。
+_sd_tier_val() {
+    local v=$1
+    case "$v" in
+        ''|*[!0-9-]*) printf '%s' "$v"; return 0 ;;
+    esac
+    if [ "${#v}" -ge 7 ]; then
+        printf '%smA' "$((v / 1000))"
+    else
+        printf '%s' "$v"
+    fi
+}
+
+_sd_tier_row() {
+    local p=$1 hint=$2 v w
+    [ -e "$p" ] || return 1
+    sd_read1 "$p" || return 1
+    v=$(_sd_tier_val "$_sd_rv")
+    [ -w "$p" ] && w=yes || w=no
+    printf '  %-38s %-11s %-4s %s\n' "${p#$SD_PS/}" "$v" "$w" "$hint"
+    _sd_tier_hit=$((_sd_tier_hit + 1))
+    return 0
+}
+
+# 「thermal off」只停 horae（性能/亮度温控），碰不到充电路径。用户反馈
+# 「停用热管理并没有取消阶梯充电」，是因为 status 把这行写成「热管理 已停用」，
+# 看起来像总开关。这里把真正能改电流的节点全列出来，谁在限一眼可见。
+sd_tier_report() {
+    local bt="" tech="" st="" cool=""
+    _sd_tier_hit=0
+
+    sd_batt_temp_v && bt=$_sd_rv
+    sd_read1 "$SD_PS/battery/charge_technology" 2>/dev/null && tech=$_sd_rv
+    sd_batt_status_v && st=$_sd_rv
+
+    printf '充电阶梯诊断（能左右充电电流的节点）\n\n'
+    printf '  %-38s %-11s %-4s %s\n' "node" "value" "wr" "note"
+
+    _sd_tier_row "$SD_PS/battery/charge_control_limit"    "thermal HAL 额外限流，0=未限"
+    _sd_tier_row "$SD_PS/battery/charge_control_limit_max" "thermal HAL 可写到这个上限"
+    _sd_tier_row "$SD_PS/battery/thermal_charging"        "1=系统温控正在限充"
+    _sd_tier_row "$SD_PS/battery/step_charging"           "阶梯充电开关（部分机型有）"
+    _sd_tier_row "$SD_PS/battery/constant_charge_current_max" "电池侧 FCC，驱动当前允许值"
+    _sd_tier_row "$SD_PS/battery/constant_charge_current" "同上（瞬时目标）"
+    _sd_tier_row "$SD_PS/battery/current_max"             "电池侧上限"
+    _sd_tier_row "$SD_PS/battery/input_current_limit"     "MTK 输入限流"
+    _sd_tier_row "$SD_PS/usb/current_max"                 "输入侧上限，写它会打断 PD/VOOC"
+    _sd_tier_row "$SD_PS/battery/bcc_current"             "分电流档（双电芯）"
+    _sd_tier_row "$SD_OPLUS_CHG/cool_down"                "亮屏降流档，0=不降"
+
+    if [ "$_sd_tier_hit" -eq 0 ]; then
+        printf '  （一个都没找到：这台机的限流在驱动内部，没有对外节点）\n'
+    fi
+
+    printf '\n电池 %s℃  协议 %s  状态 %s\n' "${bt:-?}" "${tech:-?}" "${st:-?}"
+
+    printf '\n判读：\n'
+    printf '  horae 只管 CPU/GPU 降频和亮度，停它不会改上面任何值。\n'
+    printf '  充电阶梯来自两处：系统 thermal HAL 写 charge_control_limit /\n'
+    printf '  thermal_charging，以及充电驱动按电池温度自己分档（oplus 的 cool_down）。\n'
+    printf '  想试不按温度降：batt 32（伪装电池温区；驱动若直读 NTC 则无效，\n'
+    printf '  ≥46℃ 自动撤销）。改完用 diag 看 ibat 是否回升。\n'
+}
+
 sd_chg_snapshot() {
     local charging="${1:-0}" line st now why key
     [ "${_sd_lv:-0}" -ge 2 ] || return 0

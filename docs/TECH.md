@@ -902,8 +902,21 @@ ADC，不是 thermal zone。所以：
 ### `thermal`：停掉 horae
 
 `thermal off` 等价于 `horae 0`：`setprop persist.sys.horae.enable 0` + `stop horae`。
-欧加的温度策略服务停掉后，不再按温度调频、不再压低充电电流。副作用同样直接：
-**机身会更热，且没有降频兜底**，长时间游戏或边充边玩时更明显。
+
+它**只**影响这两件事：`horae` 是欧加的性能温控服务，管 CPU/GPU 降频、亮度上限、
+部分场景限帧。停掉后高负载不再被调频，机身会更热且没有降频兜底。
+
+**它不影响充电。** 用户反馈「停用热管理不能取消阶梯充电」，观察是对的——充电的
+阶梯来自另外两条路径，都不经过 horae：
+
+| 来源 | 节点 | 谁在写 |
+|---|---|---|
+| 系统 thermal HAL | `battery/charge_control_limit`、`thermal_charging` | vendor 的 thermal-engine / HAL |
+| 充电驱动自己分档 | `oplus_chg/battery/cool_down`、`constant_charge_current_max` | `oplus_chg` 驱动按电池温度 |
+
+3.0.7 之前 `status` 把这行写成「热管理 已停用」，读起来像总开关，属于文案误导，
+已改为「horae 已停（只管性能/亮度，不影响充电阶梯）」。想知道本机谁在限流，
+跑 `action.sh tiers`：它会把上面这些节点的当前值与可写性列出来。
 
 不改 `sys.thermal.enable`、不杀 thermal HAL。那会让 SoC 的过温保护一起失效，
 后果是关机或重启，不是"更快"。

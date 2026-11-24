@@ -2891,6 +2891,27 @@ case "$line" in
 esac
 rm -rf "$D50"
 
+# ---------------------------------------------------------------- T51 充电阶梯诊断
+# 用户反馈「停用热管理并不能取消阶梯充电」：thermal off 实际只 setprop + stop horae，
+# 与充电无关。之前的 status 写「热管理 已停用」，看起来像总开关，属于文案误导。
+mkdir -p /sys/class/power_supply/battery /sys/class/oplus_chg/battery
+printf '0\n'       >/sys/class/power_supply/battery/charge_control_limit
+printf '3000000\n' >/sys/class/power_supply/battery/charge_control_limit_max
+printf '1\n'       >/sys/class/power_supply/battery/thermal_charging
+printf '7\n'       >/sys/class/oplus_chg/battery/cool_down
+_t51=$(sh /opt/qc/action.sh tiers 2>&1)
+has "$_t51" "charge_control_limit" "tiers：列出 thermal HAL 限流节点"
+has "$_t51" "thermal_charging"     "tiers：列出温控限充开关"
+has "$_t51" "cool_down"            "tiers：列出 oplus 降流档"
+has "$_t51" "horae 只管"            "tiers：说明 horae 与充电阶梯无关"
+hasnt "$_t51" "一个都没找到"        "tiers：找到节点时不报空"
+
+sh /opt/qc/action.sh thermal off >/dev/null 2>&1
+_t51=$(sh /opt/qc/action.sh status 2>&1)
+has "$_t51" "horae 已停" "status：热管理行写明是 horae"
+hasnt "$_t51" "热管理    已停用" "status：不再把 horae 写成热管理总开关"
+sh /opt/qc/action.sh thermal on >/dev/null 2>&1
+
 # 失败清单放在最后统一列一遍：滚动日志里翻不到的那几条，这里能一次看全
 if [ "$FAIL" -gt 0 ]; then
     printf '\n===== 失败清单 =====\n%s' "$FAILED"

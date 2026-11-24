@@ -233,9 +233,9 @@
   <div class="switch" id="battSpHint" style="margin-top:2px">按此值上报；≥46℃ 撤销</div>
 
   <div class="switch" style="margin-top:18px">
-    <input type="checkbox" id="thermalOff"><label for="thermalOff">停用系统热管理（horae）</label>
+    <input type="checkbox" id="thermalOff"><label for="thermalOff">停用 horae 温控服务</label>
   </div>
-  <div class="switch" id="thermalHint" style="margin-top:2px">停掉欧加温控服务，不再按温度降频</div>
+  <div class="switch" id="thermalHint" style="margin-top:2px">只管 CPU/GPU 降频与亮度，不影响充电</div>
   </div></div>
 </div>
 
@@ -724,12 +724,12 @@
       : "电池温度保持真实；开启后才改写";
     $("thermalOff").checked = d.thermal === "off";
     $("thermalHint").textContent = d.thermal === "off"
-      ? "horae 已停：系统不再按温度降频"
-      : "停掉欧加温控服务，不再按温度降频";
+      ? "horae 已停：不再按温度降频；充电阶梯不受影响"
+      : "只管 CPU/GPU 降频与亮度，不影响充电";
     $("sumExtreme").textContent = (bsp > 0 || d.thermal === "off")
       ? (bsp > 0 ? "电池 " + bsp + "℃" : "") +
         (bsp > 0 && d.thermal === "off" ? " · " : "") +
-        (d.thermal === "off" ? "热管理停用" : "")
+        (d.thermal === "off" ? "horae 停用" : "")
       : "安全边界未动";
     var ct = (d.core && d.core !== "off") ? Number(d.core) : 0;
     if (rngPush("coreT", ct > 0 ? ct : 45)) {
@@ -1195,12 +1195,12 @@
     $("thermalOff").addEventListener("change", function () {
       var el = this, off = el.checked;
       if (off) {
-        ask("停用 horae 后系统不再按温度降频，机身会更热且没有降频兜底。\n\n确定停用？",
-          function () { apply("thermal off", "系统热管理已停用"); },
+        ask("停用 horae 后系统不再按温度降频，机身会更热且没有降频兜底。\n\n注意：这只影响性能温控，不会取消充电阶梯。\n\n确定停用？",
+          function () { apply("thermal off", "horae 已停用"); },
           function () { el.checked = false; });
         return;
       }
-      apply("thermal on", "系统热管理已恢复");
+      apply("thermal on", "horae 已恢复");
     });
     bindRange("hz", "hzV",
       function (v) { return hzLabel(v); },

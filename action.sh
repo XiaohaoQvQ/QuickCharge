@@ -40,8 +40,9 @@ Quick Charge (QC) 控制入口。
   sentinel <60-110|off>        SoC/主板哨兵熔断阈值
   battery <30-70|off>          电池哨兵熔断阈值
   cells <auto|1|2>             电芯数：自动判断 / 强制单芯 / 强制双芯
-  horae <0|1>                  OPPO 热管理服务开关（thermal on|off 为同义）
-  thermal <on|off>             系统热管理总开关：off 停 horae，不再按温度降频
+  horae <0|1>                  OPPO horae 服务开关（性能/亮度温控，thermal 为同义）
+  thermal <on|off>             同 horae：只停性能温控，不影响充电阶梯（见 tiers）
+  tiers                        充电阶梯诊断：列出所有能限流的节点与当前值
   level <0-4>                  日志 0关（默认） 1事件 2详细 3逐轮 4调试；开 1/2 会先写环境头
   logs [e|w|i|d|boot|daemon|N] 查看日志
   mount | umount               手动挂载 / 卸载配置覆盖层
@@ -116,7 +117,7 @@ sd_do_status() {
     else
         printf '电池伪装  关闭（电池 NTC 真实）\n'
     fi
-    printf '热管理    %s\n' "$([ "$(sd_state_get horae 1)" = 0 ] && echo '已停用（horae 停止）' || echo '系统默认')"
+    printf '热管理    %s\n' "$([ "$(sd_state_get horae 1)" = 0 ] && echo 'horae 已停（只管性能/亮度，不影响充电阶梯）' || echo 'horae 系统默认')"
     printf '哨兵      %s %s℃ / 上限 %s℃  [%s]\n' "$sz" "${real:--}" "${slim:-off}" "${src:-未读到}"
     if [ "$curmax" -gt 0 ]; then
         printf '电流上限  %s\n' "${curmax}mA（绝对限流，当前允许 ${curtar}mA）"
@@ -673,10 +674,13 @@ case "$1" in
     batt)     shift; sd_set_batt "${1:-off}" ;;
     thermal)  shift
               case "${1:-}" in
-                  on|1)  sd_horae 1; sd_state_set horae 1; echo "系统热管理 -> 开启" ;;
-                  off|0) sd_horae 0; sd_state_set horae 0; echo "系统热管理 -> 停止（horae 已关，温度不再触发系统降频）" ;;
+                  on|1)  sd_horae 1; sd_state_set horae 1; echo "horae -> 开启" ;;
+                  off|0) sd_horae 0; sd_state_set horae 0
+                         echo "horae -> 停止（只管性能/亮度温控）"
+                         echo "充电阶梯不受影响，要看谁在限流请执行: sh action.sh tiers" ;;
                   *)     echo "用法: thermal on|off"; exit 1 ;;
               esac ;;
+    tiers)   sd_tier_report ;;
     cells)    shift
               case "${1:-auto}" in
                   auto|1|2) sd_state_set cells_mode "${1:-auto}"
