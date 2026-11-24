@@ -2742,6 +2742,27 @@ t47c sh -c '. /opt/qc/lib/qc.sh; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
 eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "1" "降温后恢复接管（内核参数）"
 rm -rf /sys/module/oplus_chg
 
+# ---------------------------------------------------------------- T47d 降流解除
+# 电流已经正常时不许写 cool_down：写入本身会让 OPlus 重选档。
+# PKB110 实测 ibat 4.3A 时被写 2→0，三秒后 18W 掉到 9.7W 并一路抖到 6W。
+D47d=/tmp/qc47d; rm -rf "$D47d"; mkdir -p "$D47d/bl" "$D47d/run"
+printf '200\n' >"$D47d/bl/brightness"
+mkdir -p /sys/class/power_supply/battery /sys/class/oplus_chg/battery
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+printf '380\n' >/sys/class/power_supply/battery/temp
+printf '60\n' >/sys/class/power_supply/battery/capacity
+printf '4000000\n' >/sys/class/power_supply/battery/current_now
+printf '2\n' >/sys/class/oplus_chg/battery/cool_down
+t47d() { env SD_DATA=$D47d SD_MODDIR=/opt/qc SD_NO_DAEMON=1 SD_BL="$D47d/bl" SD_FB=/nonexistent \
+         SD_CURR_NODES=/sys/class/power_supply/battery/constant_charge_current_max \
+         FAKE_PLAT=sm8850 FAKE_SOCMFR=Qualcomm FAKE_HW=qcom "$@"; }
+t47d sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_cool_tick' >/dev/null 2>&1
+eq "$(cat /sys/class/oplus_chg/battery/cool_down)" "2" "电流 4A 已正常：不碰 cool_down"
+printf '1000000\n' >/sys/class/power_supply/battery/current_now
+t47d sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_cool_tick' >/dev/null 2>&1
+eq "$(cat /sys/class/oplus_chg/battery/cool_down)" "0" "电流 1A 被降流：写 0 解除"
+rm -rf /sys/class/oplus_chg
+
 # ---------------------------------------------------------------- T47b 默认极限
 # 3.0 起默认就是原来的极限：墙 60 = 无限制 → 熔断前 1℃，FCC 无 38/41℃ 折损，
 # cool_down 到熔断前 1℃ 才交还。这里锁住默认值，防止以后又被调回 42/4。

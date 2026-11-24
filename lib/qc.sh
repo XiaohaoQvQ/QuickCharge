@@ -3164,7 +3164,7 @@ sd_cool_node() {
 }
 
 sd_cool_tick() {
-    local want cur bt cap cool_stop cool_soft
+    local want cur bt cap cool_stop cool_soft iab
 
     [ "$(sd_state_int cool_guard 1 0 1)" = 1 ] || return 0
 
@@ -3219,9 +3219,21 @@ sd_cool_tick() {
     case "$cur" in ''|*[!0-9]*) return 0 ;; esac
     [ "$cur" = "$want" ] && return 0
 
+    # 电流已经正常就别碰这个节点：写入本身会让 OPlus 重选档。
+    # 实测 PKB110：ibat 4.3A 时被写 2→0，三秒后掉到 9.7W 并一路抖到 6W；
+    # PKX110：写 0→1 后 tech 7→14、3.6A→1.0A，32W 掉到 9W。
+    # 只有确实被降流（<2.5A）时，写 0 才是"解降流"，否则只是自己把功率打下来。
+    iab=0
+    sd_chg_current_v && iab=$_sd_rv
+    case "$iab" in ''|*[!0-9-]*) iab=0 ;; esac
+    [ "$iab" -lt 0 ] && iab=$((-iab))
+    if [ "$want" = 0 ] && [ "$iab" -ge 2500000 ]; then
+        return 0
+    fi
+
     if printf '%s\n' "$want" >"$SD_COOL_NODE" 2>/dev/null; then
         if [ "$_sd_cool_log" != "$want" ]; then
-            sd_info charge "降流解除：cool_down ${cur} → ${want}（电池 ${bt}℃ 电量 ${cap}%）"
+            sd_info charge "降流解除：cool_down ${cur} → ${want}（电池 ${bt}℃ 电量 ${cap}% 电流 $((iab / 1000))mA）"
             _sd_cool_log=$want
         fi
     elif [ "$_sd_cool_log" != fail ]; then
@@ -3276,7 +3288,9 @@ _sd_chg_fmt() {
 sd_chg_input_v() {
     local p v abs best=0 babs=0
     for p in "$SD_PS/usb/current_now" "$SD_PS/usb/input_current_now" \
-             "$SD_PS/usb/current_avg" "$SD_PS/usb_input/current_now"; do
+             "$SD_PS/usb/current_avg" "$SD_PS/usb_input/current_now" \
+             "$SD_OPLUS_CHG/charger/current_now" "$SD_OPLUS_CHG/current_now" \
+             "$SD_PS/charger/current_now" "$SD_PS/battery/input_current_now"; do
         [ -e "$p" ] || continue
         sd_read1 "$p" || continue
         v=$_sd_rv
