@@ -2188,7 +2188,10 @@ sd_transform() {
 
 sd_fingerprint() {
     local vc off
-    vc=$(sd_prop_get versioncode)
+    # 规范键名是 versionCode（Magisk/KernelSU 都按这个读），旧版曾写成全小写，
+    # 这里两个都试一次，升级过程中不会因为读到空值把指纹打成 0。
+    vc=$(sd_prop_get versionCode)
+    [ -n "$vc" ] || vc=$(sd_prop_get versioncode)
     off=$(sd_state_int curve_offset 120 0 300)
     printf '%s-%s-%s-%s' \
         "$(getprop ro.build.display.id)" \

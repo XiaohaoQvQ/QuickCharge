@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`3.0.2`（`versioncode 300005`），C 版为 `3.0.2-c`
+- 当前版本：`3.0.3`（`versionCode 300007`），C 版为 `3.0.3-c`
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -369,36 +369,36 @@ su -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 两个仓库各自独立发版，同一个功能改动同步提交：
 
-| 仓库 | 当前版本 | 包名 | versioncode |
+| 仓库 | 当前版本 | 包名 | versionCode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.0.2` | `QuickCharge-v3.0.2.zip` | 300005 |
-| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.0.2-c` | `QuickCharge-v3.0.2-c.zip` | 300004 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.0.3` | `QuickCharge-v3.0.3.zip` | 300007 |
+| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.0.3-c` | `QuickCharge-v3.0.3-c.zip` | 300006 |
 
 每个仓库的 Release 只附自己那一份模块包，装哪个版本就去哪个仓库下载，不会混。
 
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v3.0.2
-Quick Charge v3.0.2-c
+Quick Charge v3.0.3
+Quick Charge v3.0.3-c
 ```
 
-tag 与标题一致：shell 仓 `v3.0.2`，C 仓 `3.0.2-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v3.0.3`，C 仓 `3.0.3-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
 
 ### 版本号规则（3.0 起）
 
 版本固定三段 `主.次.修订`：
 
-- 修 bug / 小改动：修订 +1（`3.0.1`、`3.0.2` …）；
+- 修 bug / 小改动：修订 +1（`3.0.1`、`3.0.3` …）；
 - **修订到 100 进一位**：`3.0.100` 的下一个版本是 `3.1.0`；
 - 功能线变更：次版本 +1，修订归零。
 
-`versioncode` 按 `(主×100 + 次)×1000 + 修订×2 + 通道` 计算，通道 1 = shell、0 = C，
+`versionCode` 按 `(主×100 + 次)×1000 + 修订×2 + 通道` 计算，通道 1 = shell、0 = C，
 两个包始终一奇一偶、严格递增。例：`3.0.0` → shell `300001` / C `300000`，
 `3.0.100` → `300201` / `300200`，`3.1.0` → `301001` / `301000`。
 
-`versioncode` 是管理器判新旧的唯一依据，shell 版为奇数序列、C 版为偶数序列，两者互不覆盖。
+`versionCode` 是管理器判新旧的唯一依据，shell 版为奇数序列、C 版为偶数序列，两者互不覆盖。
 
 ### 在线升级
 
@@ -411,13 +411,13 @@ updateJson=https://cdn.jsdelivr.net/gh/XiaohaoQvQ/QuickCharge@main/update.json
 ```
 
 `update.json` 只有四个字段，`versionCode` 是唯一参与比较的数字，必须与 `module.prop` 的
-`versioncode` 一致、且随版本严格递增：
+`versionCode` 一致、且随版本严格递增：
 
 ```json
 {
-  "version": "3.0.2",
-  "versionCode": 300005,
-  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.0.2/QuickCharge-v3.0.2.zip",
+  "version": "3.0.3",
+  "versionCode": 300007,
+  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.0.3/QuickCharge-v3.0.3.zip",
   "changelog": "https://cdn.jsdelivr.net/gh/XiaohaoQvQ/QuickCharge@main/RELEASE.md"
 }
 ```
@@ -426,8 +426,13 @@ updateJson=https://cdn.jsdelivr.net/gh/XiaohaoQvQ/QuickCharge@main/update.json
 - 两个仓库各自维护一份 `update.json`，C 版指 C 仓，否则 shell 用户会被提示装 C 版；
 - jsDelivr 的 `@main` 有缓存，发完新版若管理器还提示旧版本，等几分钟下拉刷新即可。
 
-发版流程因此多一步：改 `module.prop` 的 `version` / `versioncode` 之后，同步改 `update.json`
+发版流程因此多一步：改 `module.prop` 的 `version` / `versionCode` 之后，同步改 `update.json`
 的同名两个字段，否则升级提示会落后一个版本。
+
+> **字段名必须是 `versionCode`，中间那个 C 要大写。** `module.prop` 是按行原样解析的键值对，
+> 管理器读的是驼峰 `versionCode`；写成全小写 `versioncode` 不会报错，但本地版本号会被读成
+> `0`，于是远端任何版本都比它大，模块卡片上的「更新」按钮就再也消不掉——装到最新也一样。
+> 3.0.2 及更早的包踩过这个坑，3.0.3 起已改为驼峰。
 
 ---
 

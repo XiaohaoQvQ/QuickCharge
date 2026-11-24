@@ -72,7 +72,7 @@ setup() {
     MP="$(dirname "$0")/../module.prop"
     [ -f "$MP" ] || MP="$(dirname "$0")/../quickcharge/module.prop"
     cp "$MP" "$BASE/mod/module.prop" 2>/dev/null || \
-        printf 'id=quickcharge\nname=Quick Charge\nversion=2.9.44\nversioncode=29440\ndescription=QC\n' >"$BASE/mod/module.prop"
+        printf 'id=quickcharge\nname=Quick Charge\nversion=2.9.44\nversionCode=29440\ndescription=QC\n' >"$BASE/mod/module.prop"
 }
 
 # 基础 state.conf
