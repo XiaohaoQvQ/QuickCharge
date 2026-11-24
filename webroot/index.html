@@ -84,6 +84,11 @@
   }
   .acts button:active{background:var(--line)}
   .acts button.on{background:rgba(255,107,53,.14);border-color:var(--accent);color:var(--accent)}
+  .bigbtn{display:block;width:100%;margin-top:24px;padding:16px 10px;border-radius:14px;
+    border:1px solid var(--line);background:transparent;color:var(--fg);
+    font-size:15px;font-weight:700;letter-spacing:.4px;line-height:1.3}
+  .bigbtn:active{background:var(--line)}
+  .bigbtn.on{background:rgba(255,107,53,.14);border-color:var(--accent);color:var(--accent)}
   footer{margin-top:18px;text-align:center;font-size:12px;color:var(--dim);line-height:1.9}
   footer a,footer .lnk{color:var(--accent-2);text-decoration:none}
   footer .lnk{cursor:pointer}
@@ -232,17 +237,15 @@
   </div>
   <div class="switch" id="battSpHint" style="margin-top:2px">按此值上报；≥46℃ 撤销</div>
 
-  <div class="switch" style="margin-top:18px">
-    <input type="checkbox" id="thermalOff"><label for="thermalOff">取消充电阶梯限流</label>
-  </div>
-  <div class="switch" id="thermalHint" style="margin-top:2px">写 0 解除 HAL 限流；电池 ≥45℃ 自动撤销</div>
-
   <div class="row" style="margin-top:22px"><label>CPU 伪装</label><span class="val" id="cpuNow">—</span></div>
   <div class="rw"><input type="range" id="coreT" min="20" max="70" step="1" value="45"></div>
   <div class="switch" style="margin-top:2px">
     <input type="checkbox" id="coreOff"><label for="coreOff">关闭伪装（交回真实温度）</label>
   </div>
   <div class="switch" id="coreHint" style="margin-top:4px"></div>
+
+  <button id="unlockBtn" class="bigbtn">取消充电阶梯限流</button>
+  <div class="switch" id="thermalHint" style="margin-top:8px">写 0 解除 HAL 限流；电池 ≥45℃ 自动撤销</div>
   </div></div>
 </div>
 
@@ -714,7 +717,10 @@
           ? " · 真实 " + d.batt_real + "℃" : " · 真实温度读不到") +
         "；真实 ≥46℃ 自动撤销"
       : "电池温度保持真实；开启后才改写";
-    $("thermalOff").checked = d.unlock === true;
+    $("unlockBtn").className = d.unlock === true ? "bigbtn on" : "bigbtn";
+    $("unlockBtn").textContent = d.unlock === true
+      ? "阶梯限流已解除 · 点击还原"
+      : "取消充电阶梯限流";
     $("thermalHint").textContent = d.unlock === true
       ? "已解锁：HAL 限流节点写 0；电池 ≥45℃ 自动撤销"
       : "写 0 解除 HAL 限流；电池 ≥45℃ 自动撤销";
@@ -1183,12 +1189,11 @@
       $("battSp").disabled = true;
       apply("batt off", "电池 NTC 伪装已关闭");
     });
-    $("thermalOff").addEventListener("change", function () {
-      var el = this, off = el.checked;
-      if (off) {
+    $("unlockBtn").addEventListener("click", function () {
+      var el = this;
+      if (!hasCls(el, "on")) {
         ask("解除阶梯限流会写 0 到 charge_control_limit / thermal_charging，\n充电不再按温度降档，机身会更热。\n\n原值会备份，电池 ≥45℃ 时自动撤销并还原。\n\n确定开启？",
-          function () { apply("unlock on", "阶梯限流已解除"); },
-          function () { el.checked = false; });
+          function () { apply("unlock on", "阶梯限流已解除"); });
         return;
       }
       apply("unlock off", "阶梯限流已还原");
