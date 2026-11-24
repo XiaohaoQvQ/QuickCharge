@@ -407,7 +407,7 @@ tag 与标题一致：shell 仓 `v3.0.3`，C 仓 `3.0.3-c`。历史发行版从 
 `module.prop` 里多一行 `updateJson`，指向仓库根目录的 `update.json`：
 
 ```properties
-updateJson=https://cdn.jsdelivr.net/gh/XiaohaoQvQ/QuickCharge@main/update.json
+updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/update.json
 ```
 
 `update.json` 只有四个字段，`versionCode` 是唯一参与比较的数字，必须与 `module.prop` 的
@@ -418,13 +418,15 @@ updateJson=https://cdn.jsdelivr.net/gh/XiaohaoQvQ/QuickCharge@main/update.json
   "version": "3.0.3",
   "versionCode": 300007,
   "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.0.3/QuickCharge-v3.0.3.zip",
-  "changelog": "https://cdn.jsdelivr.net/gh/XiaohaoQvQ/QuickCharge@main/RELEASE.md"
+  "changelog": "https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/RELEASE.md"
 }
 ```
 
-- `updateJson` 与 `changelog` 都走 jsDelivr，`raw.githubusercontent.com` 在国内经常超时；
-- 两个仓库各自维护一份 `update.json`，C 版指 C 仓，否则 shell 用户会被提示装 C 版；
-- jsDelivr 的 `@main` 有缓存，发完新版若管理器还提示旧版本，等几分钟下拉刷新即可。
+- `updateJson` 用 Release 的 `latest/download/` 直链，**每次发版必须把 `update.json` 一起作为资产上传**，
+  它靠 GitHub 的 `latest` 重定向指向最新一版，没有 CDN 缓存，发完立刻生效；
+- 不用 jsDelivr：`@main` 分支缓存 12 小时且不能 purge，发版后一整天收不到提示；
+- `changelog` 同理，用 `latest/download/RELEASE.md`，每次发版一并上传；
+- 两个仓库各自维护一份，C 版指 C 仓，否则 shell 用户会被提示装 C 版。
 
 发版流程因此多一步：改 `module.prop` 的 `version` / `versionCode` 之后，同步改 `update.json`
 的同名两个字段，否则升级提示会落后一个版本。

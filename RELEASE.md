@@ -31,6 +31,19 @@ KernelSU 的 `list` 命令把 `module.prop` 的键原样输出，管理器再按
 
 也可以直接点卡片上的「更新」按钮装这一版——它下载的就是 3.0.3，装完同样会恢复正常。
 
+## 更新通道改用 Releases 直链
+
+`module.prop` 的 `updateJson` 从 jsDelivr 换成了：
+
+```properties
+updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/update.json
+```
+
+jsDelivr 的 `@main` 分支缓存 12 小时、不能 purge，发版后一整天收不到提示，这次踩到了。
+`latest/download/` 是 GitHub 自己的重定向，每次实时解析到最新一版，没有缓存层。
+
+代价是每次发版要**把 `update.json` 和 `RELEASE.md` 一起作为 Release 资产上传**，漏传就会 404。
+
 ## 版本号
 
 `3.0.3` / `versionCode 300007`。C 版同步发布 `3.0.3-c` / `300006`，各仓 Release 只附自己
