@@ -1132,8 +1132,15 @@ done
 eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "30000" "电池 49℃ 仍写 30℃"
 grep -q '熔断' "$SDD/log.txt" 2>/dev/null && ng "仍出现熔断日志" || ok "不再有熔断日志"
 [ -s "$SDD/run/hb" ] && ok "高温期心跳照常" || ng "高温期心跳停写"
-J=$(SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/action.sh json)
-printf '%s' "$J" | grep -q '"real":49' && ok "面板仍能看到真实 49℃" || ng "面板读不到真实温度"
+# 守护刚写完 sensor 就被读到，偶尔会撞上写一半的行（截断后还没写完），
+# 那种情况下 json 会退回现场读，值仍是 49。这里轮询几轮再断言，避免假失败。
+J=""; _i=0
+while [ "$_i" -lt 12 ]; do
+    J=$(SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/action.sh json)
+    case "$J" in *'"real":49'*) break ;; esac
+    sleep 0.3; _i=$((_i + 1))
+done
+printf '%s' "$J" | grep -q '"real":49' && ok "面板仍能看到真实 49℃" || ng "面板读不到真实温度: $J"
 kill -TERM "$D22A" 2>/dev/null; wait_dead "$D22A"
 
 # ============================================================ T23 卸载还原系统设置

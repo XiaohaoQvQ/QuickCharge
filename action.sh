@@ -20,7 +20,7 @@ Quick Charge (QC) 控制入口。
   zones                        温区判定全表：type / 语义类 / 是否 core 候选
   check                        适配检查：一次采样，直接给出能用哪些功能
   diag [秒] [间隔]             现场诊断采样（默认 120s/2s），排查掉功率用
-  temp <off|static|charge> [℃] 温度模式（默认 static 25℃）
+  temp <off|static|charge> [℃] 温度模式（默认 charge 25℃）
   shell <℃|off>                等同 temp static
   core <off|20-100>            CPU/GPU/DDR 固定伪装
   noncore <off|20-100>         其它温区固定伪装（电池 NTC 要单独用 batt 开）
@@ -379,11 +379,11 @@ sd_menu_sub() {
     local t
     case "$1" in
         temp)
-            printf '\n温度模式: 1) 关闭  2) 静态 30℃  3) 静态 35℃  4) 静态 40℃  5) 充电辅助  0) 返回\n选择: '
+            printf '\n温度模式: 1) 关闭  2) 静态 22℃  3) 静态 25℃  4) 静态 28℃  5) 仅充电 25℃  0) 返回\n选择: '
             read -r t || return 0
             case "$t" in
-                1) sd_set_temp off ;; 2) sd_set_temp static 30 ;; 3) sd_set_temp static 35 ;;
-                4) sd_set_temp static 40 ;; 5) sd_set_temp charge ;;
+                1) sd_set_temp off ;; 2) sd_set_temp static 22 ;; 3) sd_set_temp static 25 ;;
+                4) sd_set_temp static 28 ;; 5) sd_set_temp charge ;;
             esac ;;
         core)
             printf '\n核心伪装: 1) 关闭  2) 40℃  3) 45℃  4) 50℃  5) 55℃  6) 60℃  0) 返回\n选择: '
