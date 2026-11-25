@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`3.1.1`（`versionCode 301101`），C 版为 `3.1.1-c`
+- 当前版本：`3.1.2`（`versionCode 301201`），C 版为 `3.1.2-c`
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -379,19 +379,19 @@ su 0 sh -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 | 仓库 | 当前版本 | 包名 | versionCode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.1.1` | `QuickCharge-v3.1.1.zip` | 301101 |
-| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.1.1-c` | `QuickCharge-v3.1.1-c.zip` | 301100 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.1.2` | `QuickCharge-v3.1.2.zip` | 301201 |
+| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.1.2-c` | `QuickCharge-v3.1.2-c.zip` | 301200 |
 
 每个仓库的 Release 只附自己那一份模块包，装哪个版本就去哪个仓库下载，不会混。
 
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v3.1.1
-Quick Charge v3.1.1-c
+Quick Charge v3.1.2
+Quick Charge v3.1.2-c
 ```
 
-tag 与标题一致：shell 仓 `v3.1.1`，C 仓 `3.1.1-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v3.1.2`，C 仓 `3.1.2-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
 
 ### 版本号规则（3.0 起）
@@ -424,9 +424,9 @@ updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/up
 
 ```json
 {
-  "version": "3.1.1",
-  "versionCode": 301101,
-  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.1.1/QuickCharge-v3.1.1.zip",
+  "version": "3.1.2",
+  "versionCode": 301201,
+  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.1.2/QuickCharge-v3.1.2.zip",
   "changelog": "https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/RELEASE.md"
 }
 ```

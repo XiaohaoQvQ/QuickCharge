@@ -641,6 +641,8 @@ NoMount 类元模块（NoMount-Suite、`maxsteeel/nomount`）用 VFS 路径重�
 
 面板「挂载」格显示 `注入 N` 而不是 `0`，日志里有 `生效方式` 一行，能分清「真的没挂」和「用注入代替了挂载」。镜像写不进模块目录（只读安装）时才退回 `bind mount`，并在日志里记一条 `W`。
 
+`sd_nm_mirror` 返回 2 有两种情形，调用方按产物数区分：`$SD_OVERRIDES` 里一个文件都没有（源配置缺失，无事可做）时静默跳过，不记 `W`、安装界面也不报错；有产物却镜像不进去才算真失败。同理，`sd_mount_overrides` 先 `find` 数一遍产物再决定要不要报。
+
 ### 二、挂载类（Hybrid Mount / Magic Mount / Mountify）
 
 这三家都在 `metamount`（KernelSU）或 `post-mount`（APatch）阶段挂载，**晚于所有模块的 `post-fs-data.sh`**。本模块如果在 `post-fs-data` 里自己 bind，随后就会被它们的 OverlayFS / Magic Mount 整体重挂覆盖掉，表现为「配置改写不生效」，而 `status` 里那几条挂载也确实从 `/proc/mounts` 消失了。

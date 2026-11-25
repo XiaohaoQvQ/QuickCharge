@@ -65,13 +65,16 @@ n=$(find "$SD_OVERRIDES" -type f 2>/dev/null | wc -l | tr -d ' ')
 nm_n=0
 nm_tag=""
 
+# sd_nm_mirror 返回 2 有两种含义：有东西要镜像却没写进去（真失败），
+# 以及一个覆盖文件都没产出（无事可做）。后者在源配置缺失的机器上很常见，
+# 报"写入失败"会让人以为模块坏了，所以只在 n>0 时才当失败报。
 if sd_nm_active; then
     sd_nm_mirror
     rc=$?
     if [ "$rc" -ne 2 ]; then
         nm_n=$(wc -l <"$SD_NM_LIST" 2>/dev/null | tr -d ' ')
         nm_tag="NoMount"
-    else
+    elif [ "${n:-0}" -gt 0 ]; then
         ui_print "! NoMount 写入失败，重启后改用 bind mount"
     fi
 elif sd_mm_active; then
@@ -81,7 +84,7 @@ elif sd_mm_active; then
     if [ "$rc" -ne 2 ]; then
         nm_n=$(wc -l <"$SD_NM_LIST" 2>/dev/null | tr -d ' ')
         nm_tag="$mmn"
-    else
+    elif [ "${n:-0}" -gt 0 ]; then
         ui_print "! $mmn 写入失败，重启后改用 bind mount"
     fi
 fi
@@ -178,7 +181,7 @@ done
 sd_sync_desc
 
 if [ "${n:-0}" -eq 0 ]; then
-    ui_print "! 未匹配到可改写的配置，只有运行时温度伪装可用"
+    ui_print "- 无可改写配置 · 运行期温度伪装照常生效"
 elif [ "${nm_n:-0}" -gt 0 ]; then
     ui_print "- 覆盖  $n 个配置 · ${nm_tag:-NoMount} 接管 $nm_n 个"
 else

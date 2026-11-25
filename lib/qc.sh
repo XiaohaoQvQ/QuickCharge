@@ -1953,8 +1953,8 @@ sd_transform() {
     bk="$SD_BACKUP$src"
     if [ ! -f "$bk" ]; then
         mkdir -p "$(dirname "$bk")" 2>/dev/null
-        # 备份失败要留痕：以前 2>/dev/null 把错误吞了，只建目录不留文件，
-        # 等真要回滚时才发现备份是空的。
+        # 备份是给用户手取的存档（$SD_DATA/backup$src），模块不会自动回滚它。
+        # 失败要留痕：以前 2>/dev/null 把错误吞了，目录建了文件没有，事后想取原件才发现是空的。
         cp -p "$src" "$bk" 2>/dev/null || sd_warn override "备份失败: $src"
     fi
     mkdir -p "$(dirname "$dst")" 2>/dev/null
@@ -2199,6 +2199,10 @@ sd_mount_overrides() {
     local src rel dst n=0 nchg=0 chgfail="$SD_RUN/chcon.fail" total mmn
     [ -d "$SD_OVERRIDES" ] || return 1
 
+    # rc=2 既可能是镜像真写失败，也可能只是没有覆盖文件可镜像。后者在源配置
+    # 缺失的机器上每轮都会遇到，不该报"写入失败"。先数一遍产物用来区分。
+    total=$(find "$SD_OVERRIDES" -type f 2>/dev/null | wc -l | tr -d ' ')
+
     if sd_nm_active; then
         sd_nm_mirror
         case $? in
@@ -2215,7 +2219,7 @@ sd_mount_overrides() {
                 fi
                 return 0 ;;
             *)
-                sd_warn mount "NoMount 镜像写入失败，退回 bind mount" ;;
+                [ "$total" -gt 0 ] && sd_warn mount "NoMount 镜像写入失败，退回 bind mount" ;;
         esac
     fi
 
@@ -2223,7 +2227,7 @@ sd_mount_overrides() {
         mmn=$(sd_mm_name)
         sd_nm_mirror
         case $? in
-            2) sd_warn mount "$mmn 镜像写入失败，退回 bind mount" ;;
+            2) [ "$total" -gt 0 ] && sd_warn mount "$mmn 镜像写入失败，退回 bind mount" ;;
             *)
                 : >"$SD_MOUNTS" 2>/dev/null
                 sd_info mount "已交给 $mmn，system/ 下 $(wc -l <"$SD_NM_LIST" 2>/dev/null | tr -d ' ') 个文件，开机挂载"
@@ -2233,7 +2237,6 @@ sd_mount_overrides() {
 
     sd_umount_overrides
     : >"$chgfail"
-    total=$(find "$SD_OVERRIDES" -type f 2>/dev/null | wc -l | tr -d ' ')
 
     ( cd "$SD_OVERRIDES" 2>/dev/null || exit 1
       find . -type f 2>/dev/null | while IFS= read -r rel; do
