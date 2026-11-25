@@ -22,7 +22,6 @@ setup() {
     cat >"$BASE/data/state.conf" <<'EOF'
 temp_mode=static
 shell_temp=30
-cool_guard=1
 log_level=3
 EOF
 }
@@ -38,21 +37,42 @@ cool() { cat "$ROOT/oplus/battery/cool_down" | tr -d ' \r\n'; }
 setb() { printf '%s\n' "$2" >"$ROOT/ps/battery/$1"; }
 setcool() { printf '%s\n' "$1" >"$ROOT/oplus/battery/cool_down"; }
 
-echo "[1] 亮屏充电：按温度/电量给出目标值"
+echo "[1] 充电中被降流就压回 0（不看温度/电量）"
 setup; run_cool 1
 chk "34℃/40% → 0" "$(cool)" "0"
 
 setup; setb temp 46000; run_cool 1
-chk "46℃ → 0（默认极限）" "$(cool)" "0"
+chk "46℃ → 0" "$(cool)" "0"
 
 setup; setb temp 49000; run_cool 1
-chk "49℃ → 不干预" "$(cool)" "7"
+chk "49℃ 也压 0（不看温度）" "$(cool)" "0"
 
 setup; setb capacity 90; run_cool 1
 chk "90% 也写 0（写 1 会掉协议，见 qcmon.c cool_tick）" "$(cool)" "0"
 
 setup; setb capacity 90; setb temp 46000; run_cool 1
-chk "90% 且 46℃ → 0（默认极限）" "$(cool)" "0"
+chk "90% 且 46℃ → 0" "$(cool)" "0"
+
+echo "[1b] 电流闸：已经满速时不要碰这个节点"
+# 实测 PKB110：4.3A 时被写 2→0，三秒后掉到 9.7W 并一路抖到 6W。
+# 写入本身会让 OPlus 重选档，所以只有 ibat < 2.5A 才允许写。
+setup; setb current_now 4300000; run_cool 1
+chk "4.3A 充电中 → 不动节点" "$(cool)" "7"
+
+setup; setb current_now 4300000; setb temp 49000; run_cool 1
+chk "4.3A + 49℃ → 仍不动" "$(cool)" "7"
+
+setup; setb current_now 1500000; run_cool 1
+chk "1.5A（已降流）→ 写 0" "$(cool)" "0"
+
+setup; setb current_now -4300000; run_cool 1
+chk "电流为负也按绝对值判（4.3A → 不动）" "$(cool)" "7"
+
+setup; setb current_now 2500000; run_cool 1
+chk "正好 2.5A → 不动（边界含在闸内）" "$(cool)" "7"
+
+setup; setb current_now 2499000; run_cool 1
+chk "2499mA → 写 0" "$(cool)" "0"
 
 echo "[2] 不该动的场景"
 setup; run_cool 0
@@ -64,7 +84,7 @@ chk "未充电 → 不干预" "$(cool)" "7"
 setup; run_cool 1
 printf 'cool_guard=0\n' >>"$BASE/data/state.conf"
 setcool 7; run_cool 1
-chk "cool_guard=0 → 不干预" "$(cool)" "7"
+chk "残留的 cool_guard 键已失效 → 照样压 0" "$(cool)" "0"
 
 echo "[3] 屏幕判定：任一亮度节点有值就算亮屏"
 run_screen() {
@@ -137,13 +157,17 @@ chk "温区 50℃ / 电量计 52℃ → 取 52" "$(run_guard "$BASE/g/zone5" mtk
 printf '400\n' >"$ROOT/ps/battery/temp"
 chk "非电池温区只读自己 → 40" "$(run_guard "$BASE/g/zone0" battery)" "40"
 
-# 整条熔断：48℃ 上限，取高后的 50 必须触发
-printf 'battery_limit=48\n' >>"$BASE/data/state.conf"
-printf 'temp_mode=static\n' >>"$BASE/data/state.conf"
-GUARD=$(SD_DATA=$BASE/data SD_PS=$ROOT/ps SD_OPLUS_CHG=$ROOT/oplus/battery \
-        SD_ZONE_GLOB="$BASE/g/zone*" MODDIR=$MOD \
-        sh -c '. "$MODDIR/lib/qc.sh"; sd_state_load; _sd_st_loaded=1; sd_sentinel_guard; printf "%s" "$?"' 2>/dev/null)
-chk "电池 50℃ ≥ 48℃ → 熔断" "$GUARD" "1"
+# 熔断整套已删除：sd_sentinel_guard / sd_guard_read_v 都不再存在（防回归）
+if grep -q 'sd_sentinel_guard()' "$MOD/lib/qc.sh" 2>/dev/null; then
+    bad "sd_sentinel_guard 仍在（应已删除）"
+else
+    ok "熔断守卫已删除"
+fi
+if grep -q 'battery_limit' "$MOD/lib/qc.sh" 2>/dev/null; then
+    bad "battery_limit 仍在（应已删除）"
+else
+    ok "battery_limit 配置项已删除"
+fi
 
 echo
 echo "结果：通过 $PASS，失败 $FAIL"

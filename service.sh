@@ -168,7 +168,7 @@ sd_daemon() {
 
         _sd_chg=0
         sd_batt_status_v
-        case "$_sd_rv" in Charging|Full) sd_curr_keep; _sd_chg=1 ;; esac
+        case "$_sd_rv" in Charging|Full) _sd_chg=1 ;; esac
         sd_scr_tick
         sd_cool_tick
         sd_unlock_tick
@@ -177,8 +177,7 @@ sd_daemon() {
         # 充电时压到 3s：cool_down 被驱动抬高后要尽快清零，慢一拍就白等一轮。
         # 以前只在亮屏时压，但有的机型屏幕判定靠不住，干脆充电即压。
         if [ "$_sd_chg" = 1 ]; then
-            _ws=10
-            [ "$(sd_state_int cool_guard 1 0 1)" = 1 ] && _ws=3
+            _ws=3
         else
             _ws=$tick
         fi
@@ -186,28 +185,11 @@ sd_daemon() {
         sd_spoof_pending
         sd_batt_sp_guard
 
-        if ! sd_sentinel_guard; then
-            _sd_last_out=0
-            if sd_pick_sentinel_v; then
-                _sd_last_zone=${_sd_rv##*/}
-                if sd_sentinel_temp_v "$_sd_rv"; then
-                    _sd_last_cur=$_sd_rv
-                    sd_limit_for_type_v "$_sd_sent_type"
-                    case "$_sd_rv" in ''|0|off) _sd_last_lim="" ;; *) _sd_last_lim=$_sd_rv ;; esac
-                fi
-            fi
-            sd_hb_write
-            sd_telemetry_write
-            _sd_pause "$_ws"
-            continue
-        fi
-
         mode=$_st_temp_mode
         if [ "$mode" != "$last_mode" ]; then
             sd_info daemon "温度模式: ${last_mode:-<无>} → $mode"
             last_mode=$mode
             _sd_emul_last=""
-            _sd_wall_hold=0
             sd_sync_desc
         fi
 
@@ -218,13 +200,13 @@ sd_daemon() {
                 sd_shell_target >/dev/null
                 sd_shell_emul "$_sd_last_out"
                 if [ "$_sd_last_out" != "$_log_out" ]; then
-                    sd_info daemon "伪装 真实=${_sd_last_cur:-?}℃ 上报=${_sd_last_out:-0}℃ 墙=${_st_wall:-off}"
+                    sd_info daemon "伪装 上报=${_sd_last_out:-0}℃（恒定）"
                     _log_out=$_sd_last_out
                     _log_cnt=0
                 else
                     _log_cnt=$((_log_cnt + 1))
                     if [ "$_log_cnt" -ge 60 ]; then
-                        sd_info daemon "摘要 真实=${_sd_last_cur:-?}℃ 上报=${_sd_last_out:-0}℃ 墙=${_st_wall:-off}"
+                        sd_info daemon "摘要 上报=${_sd_last_out:-0}℃（恒定）"
                         _log_cnt=0
                     fi
                 fi
@@ -233,17 +215,11 @@ sd_daemon() {
                 sd_charge_tick
                 ;;
             off)
-                _sd_last_cur=""
                 _sd_last_out=0
-                _sd_last_lim=""
-                _sd_last_zone=""
-                if sd_pick_sentinel_v; then
-                    _sd_last_zone=${_sd_rv##*/}
-                    sd_sentinel_temp_v "$_sd_rv" && _sd_last_cur=$_sd_rv
-                fi
                 ;;
         esac
 
+        sd_telemetry_sample
         sd_hb_write
         sd_telemetry_write
 

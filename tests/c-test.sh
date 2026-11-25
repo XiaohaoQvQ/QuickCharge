@@ -79,22 +79,15 @@ setup() {
 state() {
     cat >"$BASE/data/state.conf" <<EOF
 temp_mode=${1:-static}
-shell_temp=${2:-30}
+shell_temp=${2:-25}
 core_temp=${3:-off}
 noncore_temp=${4:-off}
-wall=${5:-60}
-aggr=${6:-10}
-curr_max=${7:-0}
-curr_edge=4
-battery_limit=48
-sentinel_limit=85
 tick=5
-fast_cap=55
 log_level=4
 hz=off
 hz_hard=0
 batt_spoof=off
-cool_guard=1
+defrev=4
 EOF
 }
 
@@ -147,14 +140,13 @@ state static 30
 screen_on
 out=$(run once)
 echo "$out" | grep -q 'real=34'  && ok "真实温度取到 34℃" || bad "真实温度：$out"
-echo "$out" | grep -q 'lim=48'   && ok "电池限值 48℃"     || bad "限值：$out"
-# 屏障 42、真实 34、base 30、gap 12：余量 8℃ 还够，按 base 上报 30（低于真值 4℃）
-echo "$out" | grep -q 'out=30' && ok "上报温度压在屏障下方（30）" || bad "上报温度：$out"
+echo "$out" | grep -q 'out=30' && ok "恒定额定：真实 34℃ 也报 30" || bad "上报温度：$out"
+echo "$out" | grep -q 'lim=-'  && ok "不再有限值字段" || bad "仍输出限值：$out"
 
 # ============================================================ 3. static 全链
 echo "[3] static 模式：壳温模拟 + 核心伪装"
 setup
-state static 30 42 off
+state static 30 42
 screen_on
 daemon_start
 sleep 6
@@ -196,55 +188,37 @@ chk "退出后壳温归零" "$ev" "0"
 has "退出日志" "已还原" "$BASE/data/log.txt"
 
 # ============================================================ 4. charge 模式
-echo "[4] charge 模式：按电量切换"
+echo "[4] charge 模式：插电就接管，不看电量"
 setup
-state charge 30 off off
+state charge 30
 screen_on
 run sensor >/dev/null
-ev=$(val "$(z thermal_zone1)/emul_temp")
-[ -n "$ev" ] && [ "$ev" != 0 ] && ok "电量 40% < fast_cap，接管壳温" || bad "charge 模式未接管（$ev）"
+chk "电量 40%：接管壳温" "$(val "$(z thermal_zone1)/emul_temp")" "30000"
 printf '80\n' >"$ROOT/sys/class/power_supply/battery/capacity"
 run sensor >/dev/null
-ev=$(val "$(z thermal_zone1)/emul_temp")
-chk "电量 80% ≥ fast_cap，关闭模拟" "$ev" "0"
+chk "电量 80%：照样接管（不设电量阈值）" "$(val "$(z thermal_zone1)/emul_temp")" "30000"
+printf 'Discharging\n' >"$ROOT/sys/class/power_supply/battery/status"
+run sensor >/dev/null
+chk "拔电：还原模拟" "$(val "$(z thermal_zone1)/emul_temp")" "0"
+printf 'Charging\n' >"$ROOT/sys/class/power_supply/battery/status"
 
-# ============================================================ 5. 熔断与恢复
-echo "[5] 熔断 / 暂停 / 冷却恢复"
+# ============================================================ 5. 高温继续伪装
+echo "[5] 电池 50℃ / 板温 90℃：仍继续伪装"
 setup
-state static 30 42 off
+state static 30
 screen_on
 daemon_start
 sleep 6
-cv=$(val "$(z thermal_zone2)/temp")
-chk "熔断前已伪装" "$cv" "42000"
-# 把 xo-therm 推到 90（≥ sentinel_limit 85）
+chk "动手前已伪装" "$(val "$(z thermal_zone1)/emul_temp")" "30000"
+# 电池温区与板温一起推到远超旧熔断线（电池 48 / 哨兵 85）
+printf '50000\n' >"$(z thermal_zone0)/temp"
 printf '90000\n' >"$(z thermal_zone3)/temp"
 sleep 7
-cv=$(val "$(z thermal_zone2)/temp")
-chk "熔断后伪装撤销" "$cv" "45000"
-has "熔断日志" "熔断" "$BASE/data/log.txt"
-has "暂停日志" "已暂停伪装" "$BASE/data/log.txt"
-# 回落到 80（85-3=82 以下）。熔断那轮的 sleep 是 5s，冷却判定要再等一轮
-printf '80000\n' >"$(z thermal_zone3)/temp"
-sleep 12
-cv=$(val "$(z thermal_zone2)/temp")
-chk "冷却后自动恢复伪装" "$cv" "42000"
-has "恢复日志" "温度已回落" "$BASE/data/log.txt"
-daemon_stop
-
-# 温区与电量计打架时取高值：连接器侧偏高不能当作"温度其实不高"，
-# 只信偏低的一侧，单点传感器挂了就是漏熔断。
-setup
-state static 30 42 off
-screen_on
-daemon_start
-sleep 6
-printf '50000\n' >"$(z thermal_zone0)/temp"
-sleep 7
-cv=$(val "$(z thermal_zone2)/temp")
-# 旧逻辑会采信偏低的电量计 34℃，不熔断，core 伪装保持 42000
-chk "电池温区 50℃ / 电量计 34℃：取高值熔断" "$cv" "45000"
-has "熔断指向电池温区" "thermal_zone0" "$BASE/data/log.txt"
+chk "电池 50℃ / 板 90℃：伪装不撤" "$(val "$(z thermal_zone1)/emul_temp")" "30000"
+nhas "不再熔断" "熔断" "$BASE/data/log.txt"
+nhas "不再暂停" "已暂停伪装" "$BASE/data/log.txt"
+printf '34000\n' >"$(z thermal_zone0)/temp"
+printf '36000\n' >"$(z thermal_zone3)/temp"
 daemon_stop
 
 # ============================================================ 6. 亮屏快充（内核参数）
@@ -265,7 +239,7 @@ screen_off
 run sensor >/dev/null
 run sensor >/dev/null
 sv=$(val "$ROOT/sys/module/oplus_chg/parameters/ignore_screen_state")
-chk "息屏后仍保持 1" "$sv" "1"
+chk "息屏还原 ignore_screen_state" "$sv" "0"
 
 # ============================================================ 6b. FCC 回写路径：息屏保持
 # 旧实现息屏 30s 后按 scr.orig 还原，把亮屏被压的 2A 写回去，功率再也上不来。
@@ -288,53 +262,6 @@ run sensor >/dev/null
 chk "息屏也顶回 3A" \
     "$(val "$ROOT/sys/class/power_supply/battery/constant_charge_current_max")" "3000000"
 
-# ============================================================ 6c. 极限充电：墙顶到熔断前 1℃
-echo "[6c] 默认极限：墙 60 = 无限制，顶到熔断前 1℃"
-setup
-state static 30 off off 60 10 6000
-screen_off
-out=$(run once)
-echo "$out" | grep -q 'wall=47' && ok "默认墙 60 -> 47（熔断 48-1）" || bad "默认极限墙未生效：$out"
-setup
-state static 30 off off 45 10 6000
-screen_on
-out=$(run once)
-echo "$out" | grep -q 'wall=45' && ok "自定义墙 45 仍按 45 生效" || bad "自定义墙被覆盖：$out"
-
-# ============================================================ 6d. 极限充电：亮屏不分档
-echo "[6d] 默认极限：四档 100/75/50/25 全部贴着墙"
-setup
-state static 30 off off 60 10 6000
-screen_on
-printf '43000\n' >"$(z thermal_zone0)/temp"
-out=$(run once)
-echo "$out" | grep -q 'curr_target=6000' && ok "43℃（墙前 4℃）仍 100%" || bad "提前降档：$out"
-printf '45000\n' >"$(z thermal_zone0)/temp"
-out=$(run once)
-echo "$out" | grep -q 'curr_target=4500' && ok "45℃（47-3 之后）75%" || bad "75% 档未生效：$out"
-printf '46000\n' >"$(z thermal_zone0)/temp"
-out=$(run once)
-echo "$out" | grep -q 'curr_target=3000' && ok "46℃ 50%" || bad "50% 档未生效：$out"
-printf '47000\n' >"$(z thermal_zone0)/temp"
-out=$(run once)
-echo "$out" | grep -q 'curr_target=1500' && ok "47℃ 到墙 25%" || bad "到墙未降：$out"
-printf '34000\n' >"$(z thermal_zone0)/temp"
-
-# ============================================================ 7. 限流
-echo "[7] 电流墙"
-setup
-state static 30 off off 42 10 3000
-screen_on
-run sensor >/dev/null
-cv=$(val "$ROOT/sys/class/power_supply/battery/constant_charge_current_max")
-chk "写入 3A（µA 单位）" "$cv" "3000000"
-[ -f "$BASE/data/run/curr.orig" ] && ok "记录原始值" || bad "curr.orig 未落盘"
-# 目标归零，还原
-state static 30 off off 42 10 0
-run sensor >/dev/null
-cv=$(val "$ROOT/sys/class/power_supply/battery/constant_charge_current_max")
-chk "关闭限流后还原" "$cv" "3000000"
-
 # ============================================================ 8. 电池伪装
 echo "[8] 电池伪装与硬上限"
 setup
@@ -351,17 +278,17 @@ chk "bms 不参与电池伪装" "$nb" "34500"
 # 哨兵仍要读真温 34
 out=$(run once)
 echo "$out" | grep -q 'real=34' && ok "哨兵读真实温度" || bad "哨兵读了伪装值：$out"
-# 真实温度到 47，撤销并冷却
+# 真实温度到 47：不撤销，伪装继续
 printf '47000\n' >"$ROOT/sys/class/power_supply/battery/temp"
 run sensor >/dev/null
-bv=$(val "$(z thermal_zone0)/temp")
-chk "超硬上限撤销伪装" "$bv" "34000"
-has "硬上限日志" "硬上限" "$BASE/data/log.txt"
+chk "电池 47℃ 仍保持伪装" "$(val "$(z thermal_zone0)/temp")" "30000"
+nhas "没有硬上限撤销日志" "硬上限" "$BASE/data/log.txt"
+printf '34000\n' >"$ROOT/sys/class/power_supply/battery/temp"
 
 # ============================================================ 9. off 模式
 echo "[9] off 模式不接管"
 setup
-state off 30 42000 off
+state off 30
 screen_on
 daemon_start
 sleep 6
@@ -378,7 +305,7 @@ state static 30
 screen_on
 run sensor >/dev/null
 d=$(grep '^description=' "$BASE/mod/module.prop" | cut -d= -f2-)
-case "$d" in "✅ 运行中 · 温控档位"*) ok "描述已写回：$d" ;; *) bad "描述未同步：$d" ;; esac
+case "$d" in "✅ 运行中 · 温度伪装"*) ok "描述已写回：$d" ;; *) bad "描述未同步：$d" ;; esac
 
 # 配置项计数：普通挂载走 mounts.list（去重），元模块走 nm.list（不去重）
 seq 1 49 | sed 's|^|/vendor/etc/f|' >"$BASE/data/mounts.list"
@@ -407,7 +334,6 @@ case "$(grep '^description=' "$BASE/mod/module.prop")" in
     *) bad "disable 回退：$(grep '^description=' "$BASE/mod/module.prop")" ;;
 esac
 
-# ============================================================ 11. 降流解除
 echo "[11] 降流解除 cool_down"
 setup
 state static 30
@@ -416,7 +342,10 @@ screen_on
 COOL=$ROOT/sys/class/oplus_chg/battery/cool_down
 BT=$ROOT/sys/class/power_supply/battery/temp
 CAP=$ROOT/sys/class/power_supply/battery/capacity
+CUR=$ROOT/sys/class/power_supply/battery/current_now
 
+# 节点被抬起来就说明驱动已经降过档，此时 ibat 必然不高（fixture 里给 1.5A）
+printf '1500000\n' >"$CUR"
 printf '7\n'     >"$COOL"; printf '34000\n' >"$BT"; printf '40\n' >"$CAP"
 run sensor >/dev/null 2>&1
 chk "亮屏 34℃/40% → 0" "$(val "$COOL")" "0"
@@ -427,7 +356,7 @@ chk "电池 46℃ 不再轻度降流 → 0" "$(val "$COOL")" "0"
 
 printf '7\n' >"$COOL"; printf '49000\n' >"$BT"
 run sensor >/dev/null 2>&1
-chk "电池 49℃ → 不干预" "$(val "$COOL")" "7"
+chk "电池 49℃ 也写 0（不看温度）" "$(val "$COOL")" "0"
 
 printf '7\n' >"$COOL"; printf '34000\n' >"$BT"; printf '90\n' >"$CAP"
 run sensor >/dev/null 2>&1
@@ -444,9 +373,29 @@ chk "灭屏也解除（驱动本来给 0）" "$(val "$COOL")" "0"
 
 printf '7\n' >"$COOL"
 screen_on
-sed -i 's/^cool_guard=.*/cool_guard=0/' "$BASE/data/state.conf"
+printf 'cool_guard=0\n' >>"$BASE/data/state.conf"
 run sensor >/dev/null 2>&1
-chk "cool_guard=0 → 不干预" "$(val "$COOL")" "7"
+chk "残留 cool_guard 键已失效 → 仍写 0" "$(val "$COOL")" "0"
+
+# 电流闸：节点非 0 但电流已经满速时不碰它。写入本身会让 OPlus 重选档，
+# 实测 PKB110 4.3A 时被写 2→0，三秒后从 32W 掉到 6W 并一路抖。
+printf '4300000\n' >"$CUR"
+printf '7\n' >"$COOL"
+run sensor >/dev/null 2>&1
+chk "4.3A 充电中 → 不动 cool_down" "$(val "$COOL")" "7"
+
+# 报 mA 的机型（3000 = 3A）同样要挡住，不能被当成"3mA 已降流"
+printf '3000\n' >"$CUR"
+printf '7\n' >"$COOL"
+run sensor >/dev/null 2>&1
+chk "报 mA 的机型 3A → 同样不动" "$(val "$COOL")" "7"
+
+printf '2499000\n' >"$CUR"
+printf '7\n' >"$COOL"
+run sensor >/dev/null 2>&1
+chk "2499mA（真被降流）→ 写 0" "$(val "$COOL")" "0"
+
+printf '3000000\n' >"$CUR"
 
 # ============================================================ 12. 双实例保护
 echo "[12] 单实例锁"
@@ -462,7 +411,7 @@ daemon_stop
 # ============================================================ 13. 电池温区优选
 echo "[13] 电池温区优选"
 setup
-state static 30 42 off
+state static 30
 # 同时存在 battery(34℃) 与 batt-therm(48℃)：必须选电芯
 mkz thermal_zone8 batt-therm 48000
 out=$(run once)
@@ -478,12 +427,12 @@ echo "$out" | grep -q 'zone=battery(ps)' && ok "温区标注为 battery(ps)" || 
 # ============================================================ 14. 充电快照
 echo "[14] 充电快照"
 setup
-state static 30 42 off
+state static 30
 out=$(run chg)
 echo "$out" | grep -q 'vusb=8.85V'   && ok "vusb 换算 µV→V" || bad "vusb 错：$out"
 echo "$out" | grep -q 'imax=2.00A'   && ok "imax 换算 µA→A" || bad "imax 错：$out"
 echo "$out" | grep -q 'vbat=4.219V'  && ok "vbat 三位小数"   || bad "vbat 错：$out"
-echo "$out" | grep -q 'ibat=-3mA'    && ok "ibat 保留负号"   || bad "ibat 错：$out"
+echo "$out" | grep -q 'ibat=-3000mA' && ok "ibat 负号保留且按 mA 口径归一" || bad "ibat 错：$out"
 echo "$out" | grep -q 'cool=7'       && ok "读 cool_down"    || bad "cool 错：$out"
 echo "$out" | grep -q 'tech=14'      && ok "读 charge_technology" || bad "tech 错：$out"
 echo "$out" | grep -q 'type=USB_DCP' && ok "读 usb/type"     || bad "type 错：$out"
@@ -495,14 +444,14 @@ echo "$out" | grep -q 'vbat=4.219V' && ok "vbat 报 mV 时归一" || bad "mV 未
 
 echo "[15] 电池电流优先取 bcc"
 setup
-state static 30 42 off
+state static 30
 printf '1,2,3,4,5,6,4200,8,-350,10,11,0,12,13,14,15,16,17,18\n' \
     >"$ROOT/sys/class/oplus_chg/battery/bcc_parms"
 out=$(run chg)
 echo "$out" | grep -q 'ibat=-350mA' && ok "current_now=-3mA 时用 bcc 的 -350mA" || bad "ibat 错：$out"
 
 setup
-state static 30 42 off
+state static 30
 printf '0\n' >"$ROOT/sys/class/power_supply/battery/current_now"
 printf '1,2,3,4,5,6,4200,8,-350,10,11,0,12,13,14,15,16,17,18\n' \
     >"$ROOT/sys/class/oplus_chg/battery/bcc_parms"
@@ -512,7 +461,7 @@ echo "$out" | grep -q 'ibat=-350mA' && ok "灭屏 current_now=0 时用 bcc" || b
 echo "[16] 充电行只记原始节点，不下协议结论"
 # 2.9.72 起删掉协议判定：tech/type 原样记录，不再输出 proto= 字段。
 setup
-state static 30 42 off
+state static 30
 printf '9000000\n' >"$ROOT/sys/class/power_supply/usb/voltage_max"
 printf '7\n'       >"$ROOT/sys/class/oplus_chg/battery/charge_technology"
 out=$(run chg)
@@ -520,7 +469,7 @@ echo "$out" | grep -q 'tech=7' && ok "tech 原样记录" || bad "tech 丢失：$
 case "$out" in *proto=*) bad "充电行仍有 proto：$out" ;; *) ok "充电行不含 proto" ;; esac
 
 setup
-state static 30 42 off
+state static 30
 printf 'USB_PD\n' >"$ROOT/sys/class/power_supply/usb/type"
 printf 'USB_PD\n' >"$ROOT/sys/class/power_supply/usb/real_type"
 out=$(run chg)
@@ -528,7 +477,7 @@ echo "$out" | grep -q 'type=USB_PD' && ok "type 原样记录" || bad "type 丢�
 
 echo "[16b] 拔线行不臆造协议"
 setup
-state static 30 42 off
+state static 30
 printf 'Discharging\n' >"$ROOT/sys/class/power_supply/battery/status"
 rm -f "$ROOT/sys/class/power_supply/usb/voltage_now"
 out=$(run chg)
@@ -537,7 +486,7 @@ case "$out" in *proto=*) bad "拔线行仍带 proto：$out" ;; *) ok "拔线行�
 
 echo "[17] 输入侧实测与两侧功率"
 setup
-state static 30 42 off
+state static 30
 printf '2030000\n' >"$ROOT/sys/class/power_supply/usb/current_now"
 printf '9000000\n' >"$ROOT/sys/class/power_supply/usb/voltage_max"
 printf -- '-4000000\n' >"$ROOT/sys/class/power_supply/battery/current_now"
@@ -548,7 +497,7 @@ echo "$out" | grep -q 'pb=16.9W'   && ok "pb = |ibat|×vbat"    || bad "pb 错�
 
 echo "[18] log_level=0 时守护不写日志"
 setup
-state static 30 42 off
+state static 30
 sed -i 's/^log_level=.*/log_level=0/' "$BASE/data/state.conf"
 run bench 1 >/dev/null 2>&1
 n=$(grep -c '\[chg\]' "$BASE/data/log.txt" 2>/dev/null)
@@ -556,7 +505,7 @@ case "$n" in ''|*[!0-9]*) n=0 ;; esac
 chk "级别 0 不落快照" "$n" "0"
 
 setup
-state static 30 42 off
+state static 30
 run bench 1 >/dev/null 2>&1
 n=$(grep -c '\[chg\]' "$BASE/data/log.txt" 2>/dev/null)
 case "$n" in ''|*[!0-9]*) n=0 ;; esac

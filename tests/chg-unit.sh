@@ -52,7 +52,9 @@ line=$(run_sh 'sd_chg_line')
 echo "$line" | grep -q 'vusb=8.85V'   && ok "vusb µV→V"    || bad "vusb: $line"
 echo "$line" | grep -q 'imax=2.00A'   && ok "imax µA→A"    || bad "imax: $line"
 echo "$line" | grep -q 'vbat=4.219V'  && ok "vbat 三位小数" || bad "vbat: $line"
-echo "$line" | grep -q 'ibat=-3mA'    && ok "ibat 保留负号" || bad "ibat: $line"
+# current_now=-3000 按 mA 口径归一成 -3A：真机上充电中不可能是 -3mA，
+# 3000 这种量级一定是 mA 而不是 µA（sd_uv_norm 的判据）。
+echo "$line" | grep -q 'ibat=-3000mA' && ok "ibat 负号保留且按 mA 口径归一" || bad "ibat: $line"
 echo "$line" | grep -q '40%'          && ok "capacity"      || bad "cap: $line"
 echo "$line" | grep -q '34℃'          && ok "temp"          || bad "temp: $line"
 echo "$line" | grep -q 'cool=7'       && ok "cool_down"     || bad "cool: $line"
@@ -149,7 +151,7 @@ echo "$line" | grep -q 'ibat=-350mA' && ok "灭屏 current_now=0 时用 bcc" || 
 
 setup
 line=$(run_sh 'sd_chg_line')
-echo "$line" | grep -q 'ibat=-3mA' && ok "无 bcc 时回退 current_now" || bad "ibat: $line"
+echo "$line" | grep -q 'ibat=-3000mA' && ok "无 bcc 时回退 current_now" || bad "ibat: $line"
 
 setup
 # bcc 第 9 段是个位数噪声（PJD110 实机就是这样），不能盖掉真实电流

@@ -81,6 +81,16 @@ for _m in $(awk '$2 ~ "^/vendor/etc/" {print $2}' /proc/mounts 2>/dev/null); do
 done
 rm -rf /data/adb/quickcharge /opt/qc
 
+# /mod 是套件里的"安装包"，下面全部用例都从它拷进 /opt/qc 跑。以前靠手工
+# 同步，忘了就是整套跑旧代码、断言全绿或全红都不作数。每次从仓库本体刷新。
+_SRC=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)
+if [ -n "$_SRC" ] && [ -f "$_SRC/lib/qc.sh" ]; then
+    rm -rf /mod
+    cp -a "$_SRC" /mod || { echo "无法把仓库拷到 /mod"; exit 1; }
+    rm -rf /mod/.git
+    chmod +x /mod/*.sh 2>/dev/null
+fi
+
 # ---------------------------------------------------------------- 桩
 cat >/usr/local/bin/getprop <<'EOF'
 #!/bin/sh
@@ -286,8 +296,8 @@ grep -q 'a < b' "$OV/vendor/etc/sys_thermal_control_config_cdata.xml" && ok "CDA
 [ -f "$SDD/backup/vendor/etc/thermallevel_to_fps.xml" ] && ok "原件已备份" || ng "原件未备份"
 cmp -s "$SDD/backup/vendor/etc/charging_0.txt" /vendor/etc/charging_0.txt && ok "备份与原件逐字节一致" || ng "备份与原件不一致"
 eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=charge" "默认仅充电时生效"
-eq "$(grep '^wall=' "$SDD/state.conf")" "wall=42" "默认墙 42"
-eq "$(grep '^aggr=' "$SDD/state.conf")" "aggr=10" "默认 aggr 10"
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=25" "默认伪装 25℃"
+grep -q '^wall=' "$SDD/state.conf" && ng "默认配置里仍有 wall" || ok "默认配置无 wall"
 
 echo "===== T1b 覆盖安装不叠加 ====="
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install2.log 2>&1
@@ -314,34 +324,21 @@ MODDIR=/opt/qc
 . /opt/qc/lib/qc.sh
 sd_state_load
 set_temp() { printf '%s\n' "$1" >/sys/class/thermal/thermal_zone1/temp; }
-set_mode() { sd_state_set temp_mode static; sd_state_set shell_temp "$1"; sd_state_set wall "$2"; sd_state_set aggr "$3"; _sd_st_loaded=0; sd_state_load; }
+set_mode() { sd_state_set temp_mode static; sd_state_set shell_temp "$1"; _sd_st_loaded=0; sd_state_load; }
 
-set_mode 30 42 10
-set_temp 38000; t=$(sd_shell_target); eq "$t" "30" "真实 38℃ → 上报 30℃"
-set_temp 39000; t=$(sd_shell_target); eq "$t" "33" "真实 39℃ → 上报 33℃"
-set_temp 40000; t=$(sd_shell_target); eq "$t" "36" "真实 40℃ → 上报 36℃"
-set_temp 41000; t=$(sd_shell_target); eq "$t" "39" "真实 41℃ → 上报 39℃"
-set_temp 42000; t=$(sd_shell_target); eq "$t" "0"  "真实 42℃ → 关闭模拟"
-set_temp 30000; t=$(sd_shell_target); eq "$t" "30" "低温不伪造高温"
-set_mode 30 42 0
-set_temp 39000; t=$(sd_shell_target); eq "$t" "37" "aggr=0 时温差压到 2℃"
-
-echo "===== T3b 熔断 ====="
-set_mode 30 42 10
-set_temp 49000
-sd_sentinel_guard; r=$?
-eq "$r" "1" "电池 49℃ 触发熔断"
-# 熔断只暂停，不能改用户配置：旧实现会落盘 temp_mode=off，重启后仍是 off，
-# 用户看到的就是"模式始终 off、开不起来"。
-eq "$(sd_state_get temp_mode off)" "static" "熔断后模式保持不变"
-eq "$(sd_state_get shell_temp 0)" "30" "熔断后档位保留"
-sd_sentinel_guard; eq "$?" "1" "熔断期间持续暂停"
-set_temp 46000
-sd_sentinel_guard; eq "$?" "1" "46℃ 未进回差，仍暂停"
-set_temp 44000
-sd_sentinel_guard; eq "$?" "0" "44℃ 回落后自动解除"
-eq "$(sd_state_get temp_mode off)" "static" "解除后仍是用户选定的模式"
-_sd_guard_paused=0
+set_mode 25
+set_temp 38000; t=$(sd_shell_target); eq "$t" "25" "真实 38℃ → 仍报 25℃"
+set_temp 47000; t=$(sd_shell_target); eq "$t" "25" "真实 47℃ → 不交还，仍报 25℃"
+set_temp 52000; t=$(sd_shell_target); eq "$t" "25" "真实 52℃ → 仍报 25℃"
+set_temp 20000; t=$(sd_shell_target); eq "$t" "25" "真实 20℃ → 不跟着抬高"
+set_mode 20
+set_temp 39000; t=$(sd_shell_target); eq "$t" "20" "下限 20℃ 可用"
+set_mode 33
+t=$(sd_shell_target); eq "$t" "33" "上限 33℃ 可用"
+set_mode 99
+t=$(sd_shell_target); eq "$t" "33" "越界回落 33℃"
+set_mode 5
+t=$(sd_shell_target); eq "$t" "20" "过低抬到 20℃（避免判 NTC 开路）"
 
 echo "===== T3c 写入与守卫 ====="
 set_mode 30 42 10
@@ -354,18 +351,17 @@ sd_shell_emul 0
 eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "0" "0 表示关闭模拟"
 
 echo "===== T4 参数与写入边界 ====="
-eq "$(sd_state_int shell_temp 30 25 60)" "30" "shell_temp 缺省 30"
+sd_state_set shell_temp 25
+eq "$(sd_state_int shell_temp 25 20 33)" "25" "shell_temp 缺省 25"
 sd_state_set shell_temp 99
-eq "$(sd_state_int shell_temp 30 25 60)" "30" "shell_temp=99 回落 30"
+eq "$(sd_state_int shell_temp 25 20 33)" "25" "shell_temp=99 回落 25"
 sd_state_set shell_temp abc
-eq "$(sd_state_int shell_temp 30 25 60)" "30" "shell_temp=abc 回落 30"
+eq "$(sd_state_int shell_temp 25 20 33)" "25" "shell_temp=abc 回落 25"
 sd_state_set shell_temp -5
-eq "$(sd_state_int shell_temp 30 25 60)" "30" "shell_temp 负数回落 30"
-sd_state_set aggr 99
-eq "$(sd_state_int aggr 10 0 10)" "10" "aggr=99 回落 10"
-sd_shell_emul 19; eq "$?" "1" "19℃ 拒绝写入"
+eq "$(sd_state_int shell_temp 25 20 33)" "25" "shell_temp 负数回落 25"
+sd_shell_emul 15; eq "$?" "1" "15℃ 拒绝写入（emul 下限 20）"
 sd_shell_emul 101; eq "$?" "1" "101℃ 拒绝写入"
-sd_shell_emul 25; eq "$?" "0" "25℃ 允许写入"
+sd_shell_emul 20; eq "$?" "0" "20℃ 允许写入"
 
 echo "===== T4b 路径保护 ====="
 ( SD_DATA=/ ; . /opt/qc/lib/qc.sh; printf '%s' "$SD_DATA" ) >/tmp/pathguard.txt
@@ -394,7 +390,7 @@ eq "$(md5sum /vendor/etc/charging_0.txt | awk '{print $1}')" "$orig_md5" "反推
 echo "===== T5c 守护进程清理 ====="
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
 sd_state_set() { :; }
-printf 'temp_mode=static\nshell_temp=30\ntick=5\nwall=42\naggr=10\n' >"$SDD/state.conf"
+printf 'temp_mode=static\nshell_temp=25\ntick=5\n' >"$SDD/state.conf"
 SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/daemon.log 2>&1 &
 DPID=$!
 sleep 2
@@ -410,20 +406,10 @@ SD_MODDIR=/opt/qc sh /opt/qc/post-fs-data.sh >/dev/null 2>&1
 MODDIR=/opt/qc
 . /opt/qc/lib/qc.sh
 
-printf 'temp_mode=static\nshell_temp=30\nbattery_limit=200\nsentinel_limit=85\nwall=42\naggr=10\n' >"$SDD/state.conf"
+printf 'temp_mode=static\nshell_temp=25\nbattery_limit=200\nsentinel_limit=85\nwall=42\naggr=10\n' >"$SDD/state.conf"
 _sd_st_loaded=0; sd_state_load
 printf '49000\n' >/sys/class/thermal/thermal_zone1/temp
-sd_sentinel_guard; eq "$?" "1" "battery_limit=200 时 49℃ 仍应熔断"
-
-printf 'temp_mode=static\nshell_temp=30\nbattery_limit=48\nsentinel_limit=500\nwall=42\naggr=10\n' >"$SDD/state.conf"
-_sd_st_loaded=0; sd_state_load
-printf '90000\n' >/sys/class/thermal/thermal_zone3/temp
-sd_limit_for_type_v cpu-0-0
-eq "$_sd_rv" "85" "sentinel_limit=500 回落 85"
-
-printf 'temp_mode=static\nshell_temp=30\nbattery_limit=48\nsentinel_limit=85\nwall=5\naggr=10\n' >"$SDD/state.conf"
-_sd_st_loaded=0; sd_state_load
-eq "$(sd_state_int wall 42 35 80)" "42" "wall=5 回落默认 42"
+eq "$(sd_shell_target)" "25" "旧熔断配置留着也不再生效（49℃ 仍报 25℃）"
 
 mkdir -p /evil
 mount -t tmpfs tmpfs /evil 2>/dev/null
@@ -436,7 +422,7 @@ umount /evil 2>/dev/null
 echo "===== T7 决策循环耗时 ====="
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
 MODDIR=/opt/qc; . /opt/qc/lib/qc.sh
-printf 'temp_mode=static\nshell_temp=30\nbattery_limit=48\nsentinel_limit=85\nwall=42\naggr=10\n' >"$SDD/state.conf"
+printf 'temp_mode=static\nshell_temp=25\n' >"$SDD/state.conf"
 sd_state_load
 printf '38000\n' >/sys/class/thermal/thermal_zone1/temp
 i=0; t0=$(date +%s)
@@ -451,8 +437,9 @@ MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
 printf 'Discharging\n' >/sys/class/power_supply/battery/status
 J=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh json 2>/dev/null)
 echo "$J" | grep -q '^{.*}$' && ok "json 输出为单行对象" || ng "json 输出格式异常"
-echo "$J" | grep -q '"aggr":10' && ok "json aggr=10" || ng "json aggr 错误"
-echo "$J" | grep -q '"gap":12' && ok "json gap=12" || ng "json gap 错误"
+echo "$J" | grep -q '"aggr"' && ng "json 仍带已删除的 aggr" || ok "json 不再输出 aggr"
+echo "$J" | grep -q '"wall"' && ng "json 仍带已删除的 wall" || ok "json 不再输出 wall"
+echo "$J" | grep -q '"sentinel_limit"' && ng "json 仍带已删除的 sentinel_limit" || ok "json 不再输出熔断字段"
 echo "$J" | grep -q '"mode":"charge"' && ok "json mode=charge" || ng "json mode 错误"
 echo "$J" | grep -q '"charging":false' && ok "json charging=false" || ng "json charging 错误"
 echo "$J" | grep -q '"mounted":0' && ok "json mounted=0(未挂载)" || ng "json mounted 错误"
@@ -463,70 +450,49 @@ V=$(grep '^version=' /opt/qc/module.prop | cut -d= -f2)
 echo "$J" | grep -q "\"version\":\"$V\"" && ok "json 带版本号" || ng "json 缺版本号"
 # 仅充电档未插电：不算目标温度，target 保持 0
 echo "$J" | grep -q '"target":0' && ok "json 未插电 target=0" || ng "json target 异常"
-printf 'temp_mode=static\nshell_temp=30\nwall=42\naggr=10\n' >"$SDD/state.conf"
+printf 'temp_mode=static\nshell_temp=25\n' >"$SDD/state.conf"
 printf '41000\n' >/sys/class/thermal/thermal_zone1/temp
 J2=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh json 2>/dev/null)
-echo "$J2" | grep -q '"target":39' && ok "json 上报值按渐进让步算(41→39)" || ng "json target 未按决策计算: $J2"
+echo "$J2" | grep -q '"target":25' && ok "json 上报值恒定 25℃（真实 41℃ 不影响）" || ng "json target 未按恒定计算: $J2"
 
-SD_NO_DAEMON=1 sh /opt/qc/action.sh base 35 >/dev/null 2>&1
-eq "$?" "0" "base 35 执行成功"
-eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=35" "base 写入 35"
+SD_NO_DAEMON=1 sh /opt/qc/action.sh base 30 >/dev/null 2>&1
+eq "$?" "0" "base 30 执行成功"
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=30" "base 写入 30"
 SD_NO_DAEMON=1 sh /opt/qc/action.sh base 99 >/dev/null 2>&1
 eq "$?" "1" "base 99 被拒绝"
-eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=35" "拒绝后原值不变"
-
-SD_NO_DAEMON=1 sh /opt/qc/action.sh aggr 4 >/dev/null 2>&1
-eq "$(grep '^aggr=' "$SDD/state.conf")" "aggr=4" "WebUI 可改 aggr"
-SD_NO_DAEMON=1 sh /opt/qc/action.sh aggr 11 >/dev/null 2>&1
-eq "$?" "1" "aggr 11 被拒绝"
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=30" "拒绝后原值不变"
+SD_NO_DAEMON=1 sh /opt/qc/action.sh base 19 >/dev/null 2>&1
+eq "$?" "1" "base 19 被拒绝（低于下限）"
 
 echo "===== T9 参数即时生效 ====="
 SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/uninstall.sh >/dev/null 2>&1
 sleep 1
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
-printf 'temp_mode=static\nshell_temp=30\nsentinel_limit=110\nbattery_limit=48\nwall=42\naggr=10\ntick=300\ndefrev=2\n' >"$SDD/state.conf"
+printf 'temp_mode=static\nshell_temp=30\ntick=300\ndefrev=4\n' >"$SDD/state.conf"
 printf '46000\n' >/sys/class/thermal/thermal_zone1/temp
 printf '100000\n' >/sys/class/thermal/thermal_zone2/temp
 SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d9.log 2>&1 &
 D9=$!
 sleep 3
-eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=static" "soc=110 时主板 100℃ 不熔断"
-J9=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh json 2>/dev/null)
-echo "$J9" | grep -q '"sentinel_limit":110' && ok "json 回读 soc=110" || ng "json 未保存 soc=110"
-SD_MODDIR=/opt/qc sh /opt/qc/action.sh sentinel 85 >/dev/null 2>&1
-sleep 2
-# 熔断不改配置，改为检查"伪装确实被撤掉了"
-eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=static" "熔断不改 temp_mode（只暂停伪装）"
-grep -q '熔断' "$SD_LOG" 2>/dev/null && ok "熔断已写日志" || ng "熔断未写日志"
-kill -TERM "$D9" 2>/dev/null; wait_dead "$D9"
-
-# 对照：直接改文件、不发信号，300 秒 tick 未到就不该熔断
-printf 'temp_mode=static\nshell_temp=30\nsentinel_limit=110\nbattery_limit=48\nwall=42\naggr=10\ntick=300\ndefrev=2\n' >"$SDD/state.conf"
-SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d9b.log 2>&1 &
-D9B=$!
-sleep 3
-sed -i 's/^sentinel_limit=110/sentinel_limit=85/' "$SDD/state.conf"
-sleep 2
-eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=static" "未发信号时守护仍在睡（对照）"
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "30000" "守护按 30℃ 写入（真实 46℃ 不影响）"
+# 主板 100℃ 也不该让伪装停手：熔断这套已经删掉了
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "30000" "主板 100℃ 仍继续伪装"
 : >"$SD_LOG"
-kill -USR1 "$D9B" 2>/dev/null
+kill -USR1 "$D9" 2>/dev/null
 sleep 2
-grep -q '熔断' "$SD_LOG" && ok "USR1 唤醒后立即熔断" || ng "USR1 唤醒后未熔断"
-kill -TERM "$D9B" 2>/dev/null; wait_dead "$D9B"
+grep -q '收到重载信号' "$SD_LOG" && ok "USR1 立即重载参数" || ng "USR1 未重载"
+kill -TERM "$D9" 2>/dev/null; wait_dead "$D9"
 printf '46000\n' >/sys/class/thermal/thermal_zone2/temp
 
 echo "===== T10 升级保留配置 ====="
 printf 'temp_mode=static\nshell_temp=38\nsentinel_limit=95\nbattery_limit=52\nwall=45\naggr=3\ncurr_max=2500\nfast_cap=70\ncurve_offset=200\nlog_level=4\ntick=20\ndefrev=2\n' >"$SDD/state.conf"
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install5.log 2>&1
-eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=38" "升级保留 shell_temp"
-eq "$(grep '^aggr=' "$SDD/state.conf")" "aggr=3" "升级保留 aggr"
-eq "$(grep '^wall=' "$SDD/state.conf")" "wall=45" "升级保留 wall"
-eq "$(grep '^sentinel_limit=' "$SDD/state.conf")" "sentinel_limit=95" "升级保留 sentinel_limit"
-eq "$(grep '^battery_limit=' "$SDD/state.conf")" "battery_limit=52" "升级保留 battery_limit"
-eq "$(grep '^curr_max=' "$SDD/state.conf")" "curr_max=2500" "升级保留 curr_max"
-eq "$(grep '^fast_cap=' "$SDD/state.conf")" "fast_cap=70" "升级保留 fast_cap"
 eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=static" "升级保留 temp_mode"
 eq "$(grep '^curve_offset=' "$SDD/state.conf")" "curve_offset=200" "升级保留 curve_offset"
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=25" "旧的高基准收到 25℃"
+for _k in aggr wall fast_cap sentinel_limit battery_limit curr_max curr_edge cool_guard; do
+    grep -q "^$_k=" "$SDD/state.conf" && ng "升级后仍残留已删除的键 $_k" || ok "升级清掉废弃键 $_k"
+done
 eq "$(head -1 /opt/qc/files/vendor/etc/charging_0.txt)" "550,3000,4500" "覆盖层按用户 curve_offset 重建"
 
 # 手动关过（off_manual=1）：升级不能把用户重新打开
@@ -633,7 +599,7 @@ eq "$(grep '^id=' /opt/qc/module.prop)" "id=quickcharge" "id 行未被改写"
 fake_daemon_start
 MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_sync_desc' >/dev/null 2>&1
 D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
-case "$D" in "✅ 运行中 · 温控档位"*) ok "运行中描述：状态在前，档位紧接" ;; *) ng "运行中描述: $D" ;; esac
+case "$D" in "✅ 运行中 · 温度伪装"*) ok "运行中描述：状态在前，温度紧随" ;; *) ng "运行中描述: $D" ;; esac
 # 装机默认 temp_mode=charge，描述应如实写"仅充电"
 case "$D" in *"仅充电"*) ok "默认仅充电状态写进描述" ;; *) ng "默认状态不符: $D" ;; esac
 case "$D" in *"配置 8 项"*) ok "描述含挂载数" ;; *) ng "描述缺挂载数: $D" ;; esac
@@ -645,13 +611,13 @@ M2=$(md5sum /opt/qc/module.prop | awk '{print $1}')
 eq "$M2" "$M1" "状态未变时不重写 module.prop"
 
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp static >/dev/null 2>&1
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh base 28 >/dev/null 2>&1
+D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
+case "$D" in *"温度伪装 28℃"*) ok "base 28 同步到描述" ;; *) ng "伪装温度未同步: $D" ;; esac
+
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh gear 4 >/dev/null 2>&1
 D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
-case "$D" in *"温控档位 4/10"*) ok "gear 4 同步到描述" ;; *) ng "档位未同步: $D" ;; esac
-
-SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh aggr 9 >/dev/null 2>&1
-D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
-case "$D" in *"温控档位 9/10"*) ok "旧命令 aggr 仍可用且同步" ;; *) ng "aggr 别名失效: $D" ;; esac
+case "$D" in *"温度伪装 28℃"*) ok "已删的 gear 命令不影响描述" ;; *) ng "gear 改坏了描述: $D" ;; esac
 
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh hz 120 >/dev/null 2>&1
 D=$(sed -n 's/^description=//p' /opt/qc/module.prop)
@@ -682,12 +648,12 @@ eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "30000" "插电切仅充�
 
 # 越界命令不写盘：描述应保持上一条
 B1=$(md5sum /opt/qc/module.prop | awk '{print $1}')
-SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh gear 11 >/dev/null 2>&1
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh base 99 >/dev/null 2>&1
 B2=$(md5sum /opt/qc/module.prop | awk '{print $1}')
-eq "$B2" "$B1" "被拒绝的 gear 11 不改描述"
+eq "$B2" "$B1" "被拒绝的 base 99 不改描述"
 
 # 管理器列表会截断长描述：状态必须排最前，档位紧随其后
-case "$D" in "✅ 运行中 · 温控档位"*) ok "描述状态在前、档位紧随" ;; *) ng "描述格式异常: $D" ;; esac
+case "$D" in "✅ 运行中 · 温度伪装"*) ok "描述状态在前、温度紧随" ;; *) ng "描述格式异常: $D" ;; esac
 fake_daemon_stop
 
 echo "===== T14 功耗读取（bcc_parms 双电芯）====="
@@ -929,7 +895,7 @@ printf 'Charging\n' >/sys/class/power_supply/battery/status
 printf '50\n'       >/sys/class/power_supply/battery/capacity
 printf '38000\n'    >/sys/class/thermal/thermal_zone1/temp
 printf '40000\n'    >/sys/class/thermal/thermal_zone2/temp
-printf 'temp_mode=charge\nshell_temp=28\nfast_cap=55\nwall=off\naggr=10\ntick=5\nbattery_limit=48\nsentinel_limit=85\ndefrev=3\n' >"$SDD/state.conf"
+printf 'temp_mode=charge\nshell_temp=28\ntick=5\ndefrev=3\n' >"$SDD/state.conf"
 SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d16.log 2>&1 &
 D16=$!
 wait_eq "/sys/class/thermal/thermal_zone0/emul_temp" "28000" 4 "仅充电+插电：写入伪装"
@@ -945,14 +911,15 @@ wait_eq "/sys/class/thermal/thermal_zone0/emul_temp" "0" 14 "仅充电+拔电：
 printf 'Charging\n' >/sys/class/power_supply/battery/status
 wait_eq "/sys/class/thermal/thermal_zone0/emul_temp" "28000" 14 "仅充电+重新插电：恢复伪装"
 
-# 电量过 fast_cap：进恒压段，不再伪装
+# 电量过了老阈值也不再交还：3.1.0 起没有这根线
 printf '60\n' >/sys/class/power_supply/battery/capacity
-wait_eq "/sys/class/thermal/thermal_zone0/emul_temp" "0" 14 "仅充电+电量过阈值：停止伪装"
+sleep 6
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "28000" "仅充电+电量 60%：仍继续伪装"
 kill -TERM "$D16" 2>/dev/null; wait_dead "$D16"
 
 # 全局方案：拔电也继续伪装（与仅充电的差别就在这一条）
 : >/sys/class/thermal/thermal_zone0/emul_temp
-printf 'temp_mode=static\nshell_temp=28\nfast_cap=55\nwall=off\naggr=10\ntick=5\nbattery_limit=48\nsentinel_limit=85\ndefrev=3\n' >"$SDD/state.conf"
+printf 'temp_mode=static\nshell_temp=28\ntick=5\ndefrev=3\n' >"$SDD/state.conf"
 printf 'Discharging\n' >/sys/class/power_supply/battery/status
 SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d16b.log 2>&1 &
 D16B=$!
@@ -960,16 +927,16 @@ wait_eq "/sys/class/thermal/thermal_zone0/emul_temp" "28000" 4 "全局运行+拔
 kill -TERM "$D16B" 2>/dev/null; wait_dead "$D16B"
 
 # 关闭再开启不能丢壳温档位（原来 off 会把 shell_temp 清零，再开回落 30℃）
-SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp static 38 >/dev/null 2>&1
+SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp static 30 >/dev/null 2>&1
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp off >/dev/null 2>&1
-eq "$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_get shell_temp')" "38" "关闭后保留壳温档位"
+eq "$(SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_get shell_temp')" "30" "关闭后保留壳温档位"
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp static >/dev/null 2>&1
-eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "38000" "重新开启用回 38℃"
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "30000" "重新开启用回 30℃"
 
 # 开机恢复：charge 档在位时不能等第一个 tick（tick=30，3 秒内不可能轮到）。
 # 必须走无参启动：--daemon 会直接进循环，跳过 sd_apply_state。
 : >/sys/class/thermal/thermal_zone0/emul_temp
-printf 'temp_mode=charge\nshell_temp=28\nfast_cap=55\nwall=off\naggr=10\ntick=30\nbattery_limit=48\nsentinel_limit=85\ndefrev=3\n' >"$SDD/state.conf"
+printf 'temp_mode=charge\nshell_temp=28\ntick=30\ndefrev=3\n' >"$SDD/state.conf"
 printf 'Charging\n' >/sys/class/power_supply/battery/status
 printf '50\n'     >/sys/class/power_supply/battery/capacity
 SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh >/tmp/d16c.log 2>&1 &
@@ -979,7 +946,7 @@ sleep 1
 
 # tick 很大时，仅充电档也必须尽快感知拔电（内部周期固定 10 秒，不受 tick 拖累）
 : >/sys/class/thermal/thermal_zone0/emul_temp
-printf 'temp_mode=charge\nshell_temp=28\nfast_cap=55\nwall=off\naggr=10\ntick=60\nbattery_limit=48\nsentinel_limit=85\ndefrev=3\n' >"$SDD/state.conf"
+printf 'temp_mode=charge\nshell_temp=28\ntick=60\ndefrev=3\n' >"$SDD/state.conf"
 printf 'Charging\n' >/sys/class/power_supply/battery/status
 printf '50\n'       >/sys/class/power_supply/battery/capacity
 SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d16d.log 2>&1 &
@@ -989,14 +956,16 @@ printf 'Discharging\n' >/sys/class/power_supply/battery/status
 wait_eq "/sys/class/thermal/thermal_zone0/emul_temp" "0" 12 "tick=60 拔电 12 秒内还原"
 kill -TERM "$D16D" 2>/dev/null; wait_dead "$D16D"
 
-# ============================================================ T17 真实温度与限流
+# ============================================================ T17 传感器容错
 echo
-echo "===== T17 传感器容错 / 限流落盘 ====="
+echo "===== T17 传感器容错 / 读数来源 ====="
+# 上一组守护写的读数缓存还新鲜，不清掉这里会读到缓存而不是现场
+rm -f "$SDD/run/sensor"
 printf 'battery\n' >/sys/class/thermal/thermal_zone1/type
 printf '46000\n'   >/sys/class/thermal/thermal_zone1/temp
 printf 'xo-therm\n' >/sys/class/thermal/thermal_zone2/type
 printf '45000\n'   >/sys/class/thermal/thermal_zone2/temp
-printf 'temp_mode=charge\nwall=42\naggr=10\ncurr_max=0\ndefrev=3\n' >"$SDD/state.conf"
+printf 'temp_mode=charge\nshell_temp=25\ndefrev=3\n' >"$SDD/state.conf"
 
 # 小数温度：部分平台 temp 写成 45.000，按整数校验会整条读不到
 printf '47.000\n' >/sys/class/thermal/thermal_zone1/temp
@@ -1016,44 +985,6 @@ eq "$(printf '%s' "$J" | sed 's/.*"sentinel":"\([^"]*\)".*/\1/')" "thermal_zone2
 eq "$(printf '%s' "$J" | sed 's/.*"real":\([^,]*\).*/\1/')" "45" "备用温区读数 45℃"
 mv /tmp/batt.temp.bak /sys/class/power_supply/battery/temp
 printf '46000\n' >/sys/class/thermal/thermal_zone1/temp
-
-# 限流：µA 节点写 µA，mA 节点写 mA，不能差一个数量级
-mkdir -p /sys/class/power_supply/battery
-printf '30000\n'   >/sys/class/thermal/thermal_zone1/temp
-printf '6000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
-printf 'Charging\n' >/sys/class/power_supply/battery/status
-printf '50\n'       >/sys/class/power_supply/battery/capacity
-SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh curr 2000 >/tmp/t17a.log 2>&1
-eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "2000000" "µA 节点写入 µA"
-
-mkdir -p /sys/devices/virtual/oplus_chg/battery
-printf '6000\n' >/sys/devices/virtual/oplus_chg/battery/chg_current_max
-SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh curr 1500 >/tmp/t17b.log 2>&1
-eq "$(cat /sys/devices/virtual/oplus_chg/battery/chg_current_max)" "1500" "mA 节点写入 mA"
-
-# 43℃ 还没进 75% 档（墙 47，阈值 44），默认就是满功率
-SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh -c '. /opt/qc/lib/qc.sh; sd_state_set wall 60' >/dev/null 2>&1
-printf '43000\n'   >/sys/class/thermal/thermal_zone1/temp
-printf '6000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
-SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh curr 2000 >/tmp/t17d.log 2>&1
-eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "2000000" "43℃ 未到降档点：保持 100%"
-printf '30000\n' >/sys/class/thermal/thermal_zone1/temp
-
-# 未插电时只记录，不写节点
-printf 'Discharging\n' >/sys/class/power_supply/battery/status
-printf '6000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
-SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh curr 3000 >/tmp/t17c.log 2>&1
-eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "6000000" "未插电不动节点"
-grep -q "接上充电器后生效" /tmp/t17c.log && ok "未插电给出提示" || ng "未插电没有提示"
-
-# 守护复查：系统把上限抬回去时压回
-printf 'Charging\n' >/sys/class/power_supply/battery/status
-printf '6000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
-MODDIR=/opt/qc SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_state_set curr_max 2000; _sd_st_loaded=0; sd_state_load; sd_curr_keep'
-eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "2000000" "守护把抬高的上限压回"
-
-printf 'temp_mode=charge\ncurr_max=0\nwall=42\naggr=10\ndefrev=3\n' >"$SDD/state.conf"
-printf 'Discharging\n' >/sys/class/power_supply/battery/status
 
 # ============================================================ T18 NoMount 适配
 echo
@@ -1179,47 +1110,12 @@ printf '%s' "$J" | grep -q '"daemon":false' && ok "停止后状态同步" || ng 
 
 printf 'temp_mode=static\ncurr_max=0\nwall=off\naggr=10\ndefrev=3\n' >"$SDD/state.conf"
 
-# ============================================================ T21 电流墙跨模式
+# ============================================================ T22 高温继续伪装
 echo
-echo "===== T21 电流墙：static / off 模式下充电也要维持 ====="
+echo "===== T22 电池 49℃：仍继续伪装，不暂停 ====="
 
-# 电流墙原先只在 charge 模式的 tick 里被执行；static / off 下充电时
-# 没有任何进程压电流，面板却显示"已生效"。
-mkdir -p /sys/class/power_supply/battery
-printf 'battery\n' >/sys/class/thermal/thermal_zone1/type
-printf '30000\n'  >/sys/class/thermal/thermal_zone1/temp
-printf 'Charging\n' >/sys/class/power_supply/battery/status
-printf '50\n'       >/sys/class/power_supply/battery/capacity
-printf 'temp_mode=static\nshell_temp=30\nwall=42\naggr=10\ntick=5\ncurr_max=2000\ndefrev=3\nbattery_limit=48\nsentinel_limit=85\n' >"$SDD/state.conf"
-printf '6000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
-SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d21a.log 2>&1 &
-D21A=$!
-wait_eq "/sys/class/power_supply/battery/constant_charge_current_max" "2000000" 7 "static 模式充电：守护压回电流墙"
-kill -TERM "$D21A" 2>/dev/null; wait_dead "$D21A"
-
-printf 'temp_mode=off\nwall=42\naggr=10\ntick=5\ncurr_max=2000\ndefrev=3\nbattery_limit=48\nsentinel_limit=85\n' >"$SDD/state.conf"
-printf '6000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
-SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d21b.log 2>&1 &
-D21B=$!
-wait_eq "/sys/class/power_supply/battery/constant_charge_current_max" "2000000" 7 "off 模式充电：守护压回电流墙"
-kill -TERM "$D21B" 2>/dev/null; wait_dead "$D21B"
-
-# 未插电时不写节点（限流是天花板，不充电时没必要动）
-printf 'temp_mode=off\ntick=5\ncurr_max=3000\ndefrev=3\nbattery_limit=48\nsentinel_limit=85\n' >"$SDD/state.conf"
-printf 'Discharging\n' >/sys/class/power_supply/battery/status
-printf '6000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
-SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d21c.log 2>&1 &
-D21C=$!
-wait_eq "/sys/class/power_supply/battery/constant_charge_current_max" "6000000" 7 "off 模式未插电：不动节点"
-kill -TERM "$D21C" 2>/dev/null; wait_dead "$D21C"
-
-# ============================================================ T22 熔断暂停期可观测
-echo
-echo "===== T22 熔断暂停期：心跳与读数不能断 ====="
-
-# 暂停分支原先直接 continue，跳过了 hb / sensor 落盘。过热恰恰是最需要
-# 观察的几分钟，缓存过期后面板"真实"变 —、心跳年龄无限增长像守护死了。
-printf 'temp_mode=static\nshell_temp=30\nwall=off\naggr=10\ntick=5\ncurr_max=0\ndefrev=3\nbattery_limit=48\nsentinel_limit=85\n' >"$SDD/state.conf"
+# 3.1.0 起熔断整套删除：电池再热也不交还，由用户自己控制散热。
+printf 'temp_mode=static\nshell_temp=30\ntick=5\n' >"$SDD/state.conf"
 printf 'Charging\n' >/sys/class/power_supply/battery/status
 printf '30000\n'  >/sys/class/thermal/thermal_zone1/temp
 : >/sys/class/thermal/thermal_zone0/emul_temp
@@ -1227,43 +1123,17 @@ rm -f "$SDD/run/hb" "$SDD/run/sensor"
 SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/d22a.log 2>&1 &
 D22A=$!
 wait_eq "/sys/class/thermal/thermal_zone0/emul_temp" "30000" 6 "常温下正常伪装"
-# 推到电池熔断线以上 → 进入暂停分支（tick=5，等两轮确保已判定）
 printf '49000\n' >/sys/class/thermal/thermal_zone1/temp
-wait_grep "$SDD/log.txt" "熔断" 15 "过热触发熔断"
-# 暂停期第二个 tick：hb 与 sensor 必须仍在更新。
-# hb 内容是 "uptime pid"，部分容器的 /proc/uptime 不支持 read(2)（恒读 0），
-# 内容比对会失真，用 mtime 判定更可靠。
-HB1=$(stat -c %Y "$SDD/run/hb" 2>/dev/null)
-SN1=$(cat "$SDD/run/sensor" 2>/dev/null)
-# 等心跳真的翻过一次，而不是死等 6 秒：tick=5 时两者等价，tick 调大也不会假通过
-_i=0
-while [ "$_i" -lt 60 ]; do
-    HB2=$(stat -c %Y "$SDD/run/hb" 2>/dev/null)
-    [ -n "$HB2" ] && [ "$HB2" != "$HB1" ] && break
-    sleep 0.2; _i=$((_i + 1))
-done
-HB2=$(stat -c %Y "$SDD/run/hb" 2>/dev/null)
-[ -n "$HB1" ] && [ "$HB1" != "$HB2" ] && ok "暂停期心跳仍在更新" || ng "暂停期心跳停写"
-# 心跳与读数缓存是两次 write，不是原子操作：心跳 mtime 变了、sensor 还是
-# 上一轮的情况真实存在（本轮偶发读到 "… 30 static 1" 的旧行）。再等读数
-# 自己落盘，别把两个文件当成同一瞬间写完的。
 _i=0
 while [ "$_i" -lt 40 ]; do
-    SN2=$(cat "$SDD/run/sensor" 2>/dev/null)
-    case "$SN2" in *"49 48 thermal_zone1 0"*) break ;; esac
+    case "$(cat "$SDD/run/sensor" 2>/dev/null)" in *"49 "*) break ;; esac
     sleep 0.2; _i=$((_i + 1))
 done
-SN2=$(cat "$SDD/run/sensor" 2>/dev/null)
-case "$SN2" in
-  *"49 48 thermal_zone1 0"*) ok "暂停期读数照常落盘（真实49 上限48 上报0）" ;;
-  *) ng "暂停期读数异常: $SN2" ;;
-esac
+eq "$(cat /sys/class/thermal/thermal_zone0/emul_temp)" "30000" "电池 49℃ 仍写 30℃"
+grep -q '熔断' "$SDD/log.txt" 2>/dev/null && ng "仍出现熔断日志" || ok "不再有熔断日志"
+[ -s "$SDD/run/hb" ] && ok "高温期心跳照常" || ng "高温期心跳停写"
 J=$(SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/action.sh json)
-printf '%s' "$J" | grep -q '"real":49' && ok "暂停期面板仍能看到真实温度" || ng "暂停期面板读不到温度"
-printf '%s' "$J" | grep -q '"real_src":"cache"' && ok "暂停期读数走缓存" || ng "暂停期缓存未命中"
-# 回落 3℃ 后自动恢复（等两轮）
-printf '40000\n' >/sys/class/thermal/thermal_zone1/temp
-wait_eq "/sys/class/thermal/thermal_zone0/emul_temp" "30000" 7 "温度回落后自动恢复伪装"
+printf '%s' "$J" | grep -q '"real":49' && ok "面板仍能看到真实 49℃" || ng "面板读不到真实温度"
 kill -TERM "$D22A" 2>/dev/null; wait_dead "$D22A"
 
 # ============================================================ T23 卸载还原系统设置
@@ -1284,48 +1154,19 @@ eq "$(settings get system peak_refresh_rate)" "60" "卸载还原 peak_refresh_ra
 eq "$(settings get system min_refresh_rate)" "60" "卸载还原 min_refresh_rate"
 eq "$(settings get secure match_content_frame_rate)" "3" "卸载还原内容帧率匹配"
 [ -d "$SDD" ] && ng "数据目录残留(T23)" || ok "数据目录已删除(T23)"
-# ============================================================ T24 基准与墙打架
-echo
-echo "===== T24 基准 ≥ 温度墙：必须收敛，不能静默失效 ====="
-# T23 把数据目录删了，先建回来，否则下面的 state.conf 重定向会失败
-mkdir -p "$SDD"
-
-# 基准 45 + 墙 42 是很容易拖出来的组合：目标算成 45，又被"不伪造更高温度"
-# 钳回真实值，结果全程不改写，面板永远显示"未改写"。运行时要收敛。
-printf 'temp_mode=static\nshell_temp=45\nwall=42\naggr=10\nbattery_limit=48\nsentinel_limit=85\n' >"$SDD/state.conf"
-printf '41000\n' >/sys/class/thermal/thermal_zone1/temp
-J=$(SD_DATA=$SDD SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh json)
-printf '%s' "$J" | grep -q '"base_clamped":true' && ok "基准高于墙时标记 base_clamped" || ng "未标记 base_clamped: $J"
-printf '%s' "$J" | grep -q '"shell_temp":40' && ok "生效基准收敛到墙下 2℃" || ng "生效基准未收敛: $J"
-printf '%s' "$J" | grep -q '"shell_set":45' && ok "保留用户原值供面板解释" || ng "原值丢失: $J"
-
-# 设墙时顺手把基准压下来，state 保持自洽，不留矛盾配置
-printf 'temp_mode=static\nshell_temp=45\nwall=off\naggr=10\n' >"$SDD/state.conf"
-SD_DATA=$SDD SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh wall 42 >/dev/null 2>&1
-eq "$(SD_DATA=$SDD SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_state_int shell_temp 30 25 60')" "40" "设墙后基准自动降到 40"
-
-# 基准低于墙时才是正常改写区间
-printf 'temp_mode=static\nshell_temp=30\nwall=42\naggr=10\nbattery_limit=48\nsentinel_limit=85\n' >"$SDD/state.conf"
-printf '36000\n' >/sys/class/thermal/thermal_zone1/temp
-J=$(SD_DATA=$SDD SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh json)
-printf '%s' "$J" | grep -q '"target":30' && ok "基准 30 时正常压到 30" || ng "基准 30 未生效: $J"
-printf '%s' "$J" | grep -q '"base_clamped":false' && ok "正常配置不误报" || ng "正常配置被误报: $J"
-
-# T20 要往 state.conf 写，先补回目录
-mkdir -p "$SDD/run"
-
 # ============================================================ T20 简介同步
 echo
 echo "===== T20 覆盖安装后简介恢复 ====="
 
-printf 'temp_mode=charge\naggr=10\nhz=off\ncurr_max=0\ndefrev=3\n' >"$SDD/state.conf"
+# T23 的 uninstall.sh 已经把数据目录整个删了，先建回来再写配置
 mkdir -p "$SDD/run"
+printf 'temp_mode=charge\nhz=off\ndefrev=4\n' >"$SDD/state.conf"
 rm -f "$SDD/run/desc.last"
 fake_daemon_start
 # 出厂状态：module.prop 是安装包里的原始文案，从未同步过
 cp /mod/module.prop /opt/qc/module.prop
 MODDIR=/opt/qc SD_DATA=$SDD sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_sync_desc'
-grep -q '温控档位 10/10' /opt/qc/module.prop && ok "首次同步写入实际状态" || ng "首次同步没写"
+grep -q '温度伪装 25℃' /opt/qc/module.prop && ok "首次同步写入实际状态" || ng "首次同步没写"
 grep -q '欧加真温控' /opt/qc/module.prop && ng "简介仍是出厂文案" || ok "出厂文案已被替换"
 
 # 覆盖安装：新包的 module.prop 把 description 换回出厂文案，
@@ -1333,7 +1174,7 @@ grep -q '欧加真温控' /opt/qc/module.prop && ng "简介仍是出厂文案" |
 cp /mod/module.prop /opt/qc/module.prop
 [ -s "$SDD/run/desc.last" ] && ok "升级后 desc.last 仍保留" || ng "desc.last 缺失，用例无效"
 MODDIR=/opt/qc SD_DATA=$SDD sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_sync_desc'
-grep -q '温控档位 10/10' /opt/qc/module.prop && ok "覆盖安装后简介自动改回状态" || ng "升级后简介停在出厂文案"
+grep -q '温度伪装 25℃' /opt/qc/module.prop && ok "覆盖安装后简介自动改回状态" || ng "升级后简介停在出厂文案"
 
 # 已经一致时不该重写：闪存写入比一次字符串比较贵得多
 T1=$(stat -c '%y' /opt/qc/module.prop)
@@ -1347,7 +1188,8 @@ fake_daemon_stop
 echo
 echo "===== T25 温区读不到时：电池节点兜底 / 面板要说原因 ====="
 
-printf 'temp_mode=static\nshell_temp=30\nwall=42\naggr=10\nbattery_limit=48\ntick=15\n' >"$SDD/state.conf"
+printf 'temp_mode=static\nshell_temp=30\ntick=15\ndefrev=4\n' >"$SDD/state.conf"
+rm -f "$SDD/run/sensor"
 # 温区全部消失，只留 power_supply —— ColorOS 上 SELinux 挡住温区的典型现场
 mount -t tmpfs tmpfs /sys 2>/dev/null
 mkdir -p /sys/class/power_supply/battery
@@ -1362,7 +1204,8 @@ rm -f /sys/class/power_supply/battery/temp
 J=$(SD_DATA=$SDD SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh json)
 printf '%s' "$J" | grep -q '"real":null' && ok "全断时 real 为 null" || ng "全断时仍有温度: $J"
 printf '%s' "$J" | grep -q '"real_why":"' && ok "给出读取失败原因" || ng "没有失败原因: $J"
-printf '%s' "$J" | grep -q '"target":0' && ok "读不到温度时不乱报" || ng "读不到还给了目标: $J"
+# 极速模式：伪装值与真实温度无关，读不到温度也照常写 30℃，只是 real 为 null。
+printf '%s' "$J" | grep -q '"target":30' && ok "读不到温度也照常伪装 30℃" || ng "读不到就停写: $J"
 
 P=$(SD_DATA=$SDD SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh probe)
 case "$P" in *"== 温区 =="*) ok "probe 输出温区段" ;; *) ng "probe 缺温区段" ;; esac
@@ -1517,12 +1360,6 @@ case "$P" in *"== 平台 / 协议 =="*) ok "probe 输出平台段" ;; *) ng "pro
 case "$P" in *"mtk_battery_cmd: 存在"*) ok "probe 标注 MTK 开关接口" ;; *) ng "probe 缺 mtk 提示" ;; esac
 case "$P" in *"mtktsbattery"*"battery"*) ok "probe 标注温区语义类" ;; *) ng "probe 缺语义列: $P" ;; esac
 
-# 熔断阈值必须按电池算，不能落到 SoC 结温的 85℃
-R=$(mtk sh -c '. /opt/qc/lib/qc.sh; sd_zone_scan; sd_limit_for_type_v mtktsbattery; echo $_sd_rv')
-eq "$R" "48" "MTK 电池温区按 48℃ 熔断"
-R=$(mtk sh -c '. /opt/qc/lib/qc.sh; sd_zone_scan; sd_limit_for_type_v mtktscpu; echo $_sd_rv')
-eq "$R" "85" "MTK CPU 温区按 85℃ 熔断"
-
 # 三种温度编码并存
 R=$(mtk sh -c '. /opt/qc/lib/qc.sh; sd_sentinel_temp_v /sys/class/thermal/thermal_zone1; echo $_sd_rv')
 eq "$R" "26" "mC 编码 26000 → 26℃"
@@ -1558,15 +1395,6 @@ printf '7300000\n' >/sys/class/power_supply/usb/current_max
 C=$(mtk sh /opt/qc/action.sh check)
 case "$C" in *"私有快充"*) ok "协商 10V/7.3A 判为私有快充" ;; *) ng "协议误判: $C" ;; esac
 
-# 降档点：墙 42 → 阈值 39/41/42，MTK 与高通都按同一套四档走
-printf '40000\n' >/sys/class/thermal/thermal_zone1/temp
-T=$(mtk sh -c '. /opt/qc/lib/qc.sh; sd_state_set curr_max 3000; sd_state_set wall 42; sd_zone_scan; sd_curr_target_v; echo $_sd_rv')
-eq "$T" "2250" "MTK 40℃：进 75% 档"
-printf '42000\n' >/sys/class/thermal/thermal_zone1/temp
-T=$(env SD_DATA=$MTKD SD_MODDIR=/opt/qc SD_NO_DAEMON=1 FAKE_PLAT=sm8750 FAKE_SOCMFR=Qualcomm \
-    sh -c '. /opt/qc/lib/qc.sh; sd_state_set curr_max 3000; sd_state_set wall 42; sd_zone_scan; sd_curr_target_v; echo $_sd_rv')
-eq "$T" "750" "高通 42℃ 到墙：25%"
-printf '26000\n' >/sys/class/thermal/thermal_zone1/temp
 
 
 # ---------------------------------------------------------------- T30 天玑 8100
@@ -1627,7 +1455,7 @@ case "$P" in *"== oplus_chg =="*) ok "probe 输出 oplus_chg 现场" ;; *) ng "p
 case "$P" in *"batt_temp"*"400"*) ok "probe 读到 oplus_chg 的 batt_temp" ;; *) ng "oplus_chg 读数缺失" ;; esac
 
 # 守护：真实 40℃、基准 30℃、不设墙（屏障 = 熔断值 - 2 = 46）
-printf 'temp_mode=static\nshell_temp=30\nwall=off\naggr=10\ntick=5\nbattery_limit=48\nsentinel_limit=85\ncurr_max=0\ndefrev=3\n' >"$GT/state.conf"
+printf 'temp_mode=static\nshell_temp=30\ntick=5\ndefrev=4\n' >"$GT/state.conf"
 gt sh /opt/qc/service.sh --daemon >/tmp/gt.log 2>&1 &
 GTP=$!
 wait_eq "/sys/class/thermal/thermal_zone3/emul_temp" "30000" 7 "MTK 壳温伪装落到 shell-back"
@@ -1636,22 +1464,16 @@ eq "$(cat /sys/class/thermal/thermal_zone1/temp)" "40000" "PMIC 未被伪装改�
 eq "$(cat /sys/class/power_supply/battery/temp)" "400" "battery/temp 原样保留"
 eq "$(cat /sys/class/power_supply/battery/input_current_limit)" "7300000" "未设 curr_max 时不动 MTK 限流节点"
 
-# 设 3000mA：墙 42 → 40℃ 已进 75% 档，节点落到 2250
-gt sh -c '. /opt/qc/lib/qc.sh; sd_state_set wall 42; sd_state_set curr_max 3000' >/dev/null 2>&1
-wait_eq "/sys/class/power_supply/battery/input_current_limit" "2250000" 7 "40℃ 墙 42：75% → 2250mA"
-gt sh -c '. /opt/qc/lib/qc.sh; sd_state_set wall off' >/dev/null 2>&1
-wait_eq "/sys/class/power_supply/battery/input_current_limit" "3000000" 7 "无限制墙 40℃ 仍 3000mA"
-
-# 熔断：电池 50℃ ≥ 48℃，下一 tick 必须停伪装
+# 电池 50℃：3.1.0 起不再熔断，伪装必须继续
 printf '50000\n' >/sys/class/thermal/thermal_zone5/temp
-wait_eq "/sys/class/thermal/thermal_zone3/emul_temp" "0" 7 "电池 50℃ 触发熔断，伪装撤销"
-grep -q '熔断' "$GT/log.txt" && grep -q 'thermal_zone5' "$GT/log.txt" && ok "熔断日志指向电池温区" || ng "熔断未指向电池"
-eq "$(grep '^temp_mode=' "$GT/state.conf")" "temp_mode=static" "熔断不改用户配置"
-
-# 回落 40℃：40+3 ≤ 48，必须自动恢复
-printf '40000\n' >/sys/class/thermal/thermal_zone5/temp
-wait_eq "/sys/class/thermal/thermal_zone3/emul_temp" "30000" 13 "温度回落后自动恢复伪装"
+sleep 7
+eq "$(cat /sys/class/thermal/thermal_zone3/emul_temp)" "30000" "电池 50℃ 仍继续伪装"
+grep -q '熔断' "$GT/log.txt" 2>/dev/null && ng "仍出现熔断日志" || ok "无熔断日志"
+eq "$(grep '^temp_mode=' "$GT/state.conf")" "temp_mode=static" "温度不影响用户配置"
 kill -TERM "$GTP" 2>/dev/null; wait_dead "$GTP"
+# 上一段把电池温区手动改成 50℃ 验证「不熔断」，这里先还原，否则下面
+# "core 伪装跳过电池" 断言会拿到 50000 而误报。
+printf '40000\n' >/sys/class/thermal/thermal_zone5/temp
 
 # core / noncore 伪装都不能碰电池与 PMIC
 gt sh -c '. /opt/qc/lib/qc.sh; sd_zone_scan; sd_spoof_apply core 50' >/dev/null 2>&1
@@ -1712,29 +1534,7 @@ eq "$MN" "battery/input_current_limit|charger/current_max|${EQ_Q}" "MTK 名单�
 ON=$(nl "" Xiaomi hw-unknown)
 eq "$ON" "$EQ_Q" "other 平台不追加 MTK 节点"
 
-# 熔断候选：与 2.7.x 一致 —— 电池类 + xo-therm。
-# 充电 IC / PMIC 不算：100W 机型充电时充电 IC 本身就 85℃ 上下，算进去
-# 会让熔断在充电全程反复触发，伪装开关一次，功率就打一次锯齿。
-gs() {
-    env SD_DATA=$GT SD_MODDIR=/opt/qc SD_NO_DAEMON=1 \
-        FAKE_PLAT=sm8750 FAKE_SOCMFR=Qualcomm FAKE_HW=qcom \
-        sh -c '. /opt/qc/lib/qc.sh; sd_zone_is_guard_src "$1" && echo yes || echo no' _ "$1"
-}
-eq "$(gs xo-therm)"      "yes" "xo-therm 参与熔断"
-eq "$(gs pmic-therm)"    "no"  "PMIC 不参与熔断（正常就 60~80℃）"
-eq "$(gs charger-therm)" "no"  "充电 IC 不参与熔断（100W 时 85℃ 上下）"
-eq "$(gs battery)"       "yes" "电池温区参与熔断"
-eq "$(gs wlan)"        "no"  "WiFi 温区不参与熔断"
-eq "$(gs pa-therm0)"   "no"  "PA 温区不参与熔断"
-eq "$(gs cpu-0-0)"     "no"  "CPU 温区不参与熔断"
-
-# other 平台不吃 MTK 的提前降档
-printf '40000\n' >/sys/class/thermal/thermal_zone5/temp
-T=$(env SD_DATA=$GT SD_MODDIR=/opt/qc SD_NO_DAEMON=1 FAKE_PLAT= FAKE_SOCMFR=Xiaomi FAKE_HW=hw-unknown \
-    sh -c '. /opt/qc/lib/qc.sh; sd_state_set curr_max 3000; sd_state_set wall 42; sd_zone_scan; sd_curr_target_v; echo $_sd_rv')
-eq "$T" "2250" "other 平台 40℃：进 75% 档"
-
-# 骁龙侧熔断不变：battery 温区 50℃ 照样熔断
+# 骁龙侧：电池 50℃ 也继续伪装
 rm -rf /sys/class/thermal/thermal_zone*
 mkzone thermal_zone0 shell-back 30000
 mkzone thermal_zone1 battery    50000
@@ -1743,12 +1543,11 @@ mkzone thermal_zone3 cpu-0-0    50000
 printf '500\n' >/sys/class/power_supply/battery/temp
 Q=/data/adb/qc-q
 rm -rf "$Q"; mkdir -p "$Q"
-printf 'temp_mode=static\nshell_temp=30\nwall=off\naggr=10\ntick=5\nbattery_limit=48\nsentinel_limit=85\ncurr_max=0\ndefrev=3\n' >"$Q/state.conf"
+printf 'temp_mode=static\nshell_temp=30\ntick=5\ndefrev=4\n' >"$Q/state.conf"
 env SD_DATA=$Q SD_MODDIR=/opt/qc FAKE_PLAT=sm8750 FAKE_SOCMFR=Qualcomm FAKE_HW=qcom \
     sh /opt/qc/service.sh --daemon >/tmp/q.log 2>&1 &
 QP=$!
-wait_eq "/sys/class/thermal/thermal_zone0/emul_temp" "0" 7 "骁龙：电池 50℃ 同样熔断"
-grep -q 'thermal_zone1' "$Q/log.txt" && ok "骁龙熔断仍指向 battery 温区" || ng "骁龙熔断节点变了"
+wait_eq "/sys/class/thermal/thermal_zone0/emul_temp" "30000" 7 "骁龙：电池 50℃ 仍写 30℃"
 kill -TERM "$QP" 2>/dev/null; wait_dead "$QP"
 rm -f /sys/class/power_supply/battery/input_current_limit
 
@@ -1784,7 +1583,7 @@ printf '7300000\n'  >/sys/class/power_supply/usb/current_max
 G2=/data/adb/qc-gt2
 rm -rf "$G2"; mkdir -p "$G2"
 # 真机跑一遍 check/probe 需要的数据目录
-printf 'temp_mode=static\nshell_temp=30\nwall=off\naggr=10\ntick=5\nbattery_limit=48\nsentinel_limit=85\ncurr_max=0\ndefrev=3\n' >"$G2/state.conf"
+printf 'temp_mode=static\nshell_temp=30\ntick=5\ndefrev=4\n' >"$G2/state.conf"
 g2() {
     env SD_DATA=$G2 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 \
         FAKE_MFR=realme FAKE_PLAT=mt6895 FAKE_SOCMFR=MediaTek FAKE_HW=mt6895 "$@"
@@ -1810,10 +1609,6 @@ eq "$N" "1" "主充电 IC 的 current_max 进入限流表"
 printf '300\n' >/sys/class/power_supply/battery/temp
 printf '300\n' >/sys/class/power_supply/mtk-battery/temp
 printf '300\n' >/sys/class/power_supply/mtk-gauge/temp
-g2 sh -c '. /opt/qc/lib/qc.sh; sd_state_set curr_max 2000; sd_curr_keep' >/dev/null 2>&1
-eq "$(cat /sys/class/power_supply/mtk-master-charger/current_max)" "2000000" "主充电 IC 被压到 2000mA"
-eq "$(cat /sys/class/power_supply/mtk-slave-charger/current_max)" "2000000" "从充电 IC 同步压到 2000mA"
-g2 sh -c '. /opt/qc/lib/qc.sh; sd_state_set curr_max 0' >/dev/null 2>&1
 printf '350\n' >/sys/class/power_supply/battery/temp
 printf '350\n' >/sys/class/power_supply/mtk-battery/temp
 printf '350\n' >/sys/class/power_supply/mtk-gauge/temp
@@ -1829,16 +1624,16 @@ eq "$(cat /sys/class/thermal/thermal_zone4/temp)" "2000" "mtk-battery 温区不�
 eq "$(cat /sys/class/thermal/thermal_zone2/temp)" "-40000" "div-charger 不被改写"
 eq "$(cat /sys/class/thermal/thermal_zone0/temp)" "43786" "cpu_big1 不被壳温伪装碰到"
 
-# 温区一直是 2000（未初始化），电量计 50℃：熔断必须靠电量计兜住，
-# 否则这块屏上永远不会因为电池过热而停手。
+# 电量计 50℃：3.1.0 起不再熔断，伪装必须保持
 printf '500\n' >/sys/class/power_supply/battery/temp
 printf '500\n' >/sys/class/power_supply/mtk-battery/temp
 printf '500\n' >/sys/class/power_supply/mtk-gauge/temp
-wait_eq "/sys/class/thermal/thermal_zone7/emul_temp" "0" 8 "温区失准时靠电量计熔断"
-grep -q 'thermal_zone4' "$G2/log.txt" && ok "熔断日志指向 mtk-battery" || ng "熔断日志没指向电池温区"
+sleep 7
+eq "$(cat /sys/class/thermal/thermal_zone7/emul_temp)" "30000" "电量计 50℃ 仍继续伪装"
+grep -q '熔断' "$G2/log.txt" 2>/dev/null && ng "仍出现熔断日志" || ok "无熔断日志"
 kill -TERM "$G2P" 2>/dev/null; wait_dead "$G2P"
 
-# 真的冷（电量计 18℃）：没有伪造的必要，关模拟而不是往写入层塞 18℃
+# 真实 18℃：伪装照样写 30℃，不因为"本来就很凉"就放手
 printf '2000\n' >/sys/class/thermal/thermal_zone4/temp
 printf '180\n'  >/sys/class/power_supply/battery/temp
 printf '180\n'  >/sys/class/power_supply/mtk-battery/temp
@@ -1846,8 +1641,7 @@ printf '180\n'  >/sys/class/power_supply/mtk-gauge/temp
 : >"$G2/log.txt"
 g2 sh /opt/qc/service.sh --daemon >/tmp/gt2b.log 2>&1 &
 G2B=$!
-wait_eq "/sys/class/thermal/thermal_zone7/emul_temp" "0" 7 "低温时不写入伪装"
-grep -q '超出合理范围' "$G2/log.txt" && ng "低温值被送进写入层刷错误日志" || ok "低温不走写入层"
+wait_eq "/sys/class/thermal/thermal_zone7/emul_temp" "30000" 7 "真实 18℃ 也照常写 30℃"
 kill -TERM "$G2B" 2>/dev/null; wait_dead "$G2B"
 
 echo
@@ -1915,38 +1709,6 @@ p3 sh -c '. /opt/qc/lib/qc.sh; sd_state_set cells_mode 2' >/dev/null 2>&1
 eq "$(cellof)" "2" "手动 cells 2 压过驱动推断"
 p3 sh -c '. /opt/qc/lib/qc.sh; sd_state_set cells_mode auto' >/dev/null 2>&1
 
-# ============================================================ T34 温度墙滞回
-echo
-echo "===== T34 温度墙滞回：真实温度在墙附近不能来回切 ====="
-# 前面的 MTK 用例把 zone 表换成了天玑布局，这里重建高通夹具
-rm -rf /sys/class/thermal/thermal_zone*
-mkzone thermal_zone0 shell-back 30000
-mkzone thermal_zone1 battery    42000
-mkzone thermal_zone2 xo-therm   45000
-mkzone thermal_zone3 cpu-0-0    50000
-printf 'temp_mode=static\nshell_temp=30\nwall=42\naggr=10\nbattery_limit=48\nsentinel_limit=85\n' >"$G3/state.conf"
-printf '30000\n' >/sys/class/thermal/thermal_zone0/temp
-
-# 同一次进程里连调三次：只有保住状态，滞回才成立
-TV=$(p3 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_zone_scan;
-    printf "42000\n" >/sys/class/thermal/thermal_zone1/temp; sd_shell_target; printf ",";
-    printf "41000\n" >/sys/class/thermal/thermal_zone1/temp; sd_shell_target; printf ",";
-    printf "39500\n" >/sys/class/thermal/thermal_zone1/temp; sd_shell_target')
-eq "$(printf '%s' "$TV" | cut -d, -f1)" "0" "真实 42℃ 到墙：关模拟"
-eq "$(printf '%s' "$TV" | cut -d, -f2)" "0" "回落到 41℃（墙下 1℃）：滞回期内不恢复"
-case "$(printf '%s' "$TV" | cut -d, -f3)" in
-    ''|0) ng "回落到 39℃（墙下 3℃）应恢复伪装，实际 $TV" ;;
-    *)    ok "回落到 39℃ 后恢复伪装 ($TV)" ;;
-esac
-
-# 未到墙时行为不变，别把滞回做成"必须降 2℃ 才干活"
-printf '36000\n' >/sys/class/thermal/thermal_zone1/temp
-eq "$(p3 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_zone_scan; sd_shell_target')" "30" \
-   "真实 36℃：照常压到基准 30℃"
-printf '46000\n' >/sys/class/thermal/thermal_zone1/temp
-
-# ============================================================ T35 开机清日志
-echo
 echo "===== T35 每次开机清理上一轮日志 ====="
 D5=/data/adb/qc-g5
 rm -rf "$D5"; mkdir -p "$D5/run"
@@ -1978,41 +1740,10 @@ SD_DATA=$D5 SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_log_reset'
 pkill -f 'service[.]sh --daemon' 2>/dev/null
 sleep 1
 
-# ============================================================ T36 充电 IC 高温
-echo
-echo "===== T36 充电 IC 85℃+ 不能触发熔断 ====="
-rm -rf /sys/class/thermal/thermal_zone*
-mkzone thermal_zone0 shell_back    40000
-mkzone thermal_zone1 battery       42000
-mkzone thermal_zone2 charger-therm 88000
-mkzone thermal_zone3 xo-therm      50000
-mkzone thermal_zone4 pmic-therm    70000
-D6=/data/adb/qc-g6
-rm -rf "$D6"; mkdir -p "$D6"
-printf 'temp_mode=static\nshell_temp=30\nwall=48\naggr=9\nbattery_limit=48\nsentinel_limit=85\n' >"$D6/state.conf"
-g6() {
-    SD_DATA=$D6 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 \
-        FAKE_PLAT=sm8850 FAKE_SOCMFR=Qualcomm FAKE_HW=qcom "$@"
-}
-
-# 100W 机型充电时充电 IC 到 85℃ 是常态。它一旦进熔断候选，整个充电过程
-# 就是"熔断→降档→凉下来→恢复→满功率"的循环，用户看到的就是功率锯齿。
-eq "$(g6 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_zone_scan; sd_sentinel_guard; echo $?')" "0" \
-   "充电 IC 88℃：不熔断，伪装继续"
-eq "$(g6 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_zone_scan; sd_shell_target')" "31" \
-   "充电 IC 88℃：目标温度照常 31℃"
-printf '49000\n' >/sys/class/thermal/thermal_zone1/temp
-eq "$(g6 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_zone_scan; sd_sentinel_guard; echo $?')" "1" \
-   "电池 49℃：照样熔断"
-
-# ============================================================ T37 隐性缺陷
-# 这一组针对"不报错、但行为是错的"的路径：限流只压不抬、关闭后不还原、
-# 状态写入内存不同步、熔断复查把"读不到"当成"已降温"、兜底候选选中 WiFi。
-echo
 echo "===== T37 限流恢复 / 状态同步 / 熔断复查 ====="
 D7=/data/adb/qc-g7
 rm -rf "$D7"; mkdir -p "$D7"
-printf 'temp_mode=static\nshell_temp=30\nwall=42\naggr=10\ncurr_max=4000\nbattery_limit=48\n' >"$D7/state.conf"
+printf 'temp_mode=static\nshell_temp=30\n' >"$D7/state.conf"
 g7() {
     SD_DATA=$D7 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 \
         FAKE_PLAT=sm8750 FAKE_SOCMFR=Qualcomm FAKE_HW=qcom "$@"
@@ -2033,32 +1764,6 @@ printf 'Charging\n' >/sys/class/power_supply/battery/status
 printf '50\n'      >/sys/class/power_supply/battery/capacity
 printf '400\n'     >/sys/class/power_supply/battery/temp
 CCM=/sys/class/power_supply/battery/constant_charge_current_max
-
-g7 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_zone_scan; sd_curr_keep' >/dev/null 2>&1
-eq "$(cat $CCM)" "3000000" "40℃ 墙 42：75% → 3000mA"
-
-# 温度回落必须抬回去。旧实现"只压不抬"，节点会永远停在低档，
-# 用户看到的是"温度降了，功率却没恢复"。
-printf '30000\n' >/sys/class/thermal/thermal_zone1/temp
-g7 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_zone_scan; sd_curr_keep' >/dev/null 2>&1
-eq "$(cat $CCM)" "4000000" "降到 30℃：限流抬回 4000mA"
-
-g7 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_state_set curr_max 0; sd_curr_keep' >/dev/null 2>&1
-eq "$(cat $CCM)" "8000000" "关闭限流：节点还原为原值"
-
-# 熔断复查：读不到温度不能当"凉了"，否则一次 EIO 就解开熔断、下一轮又熔断
-rm -f /sys/class/thermal/thermal_zone1/temp /sys/class/power_supply/battery/temp
-eq "$(g7 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_zone_scan; sd_guard_cooled; echo $?')" "1" \
-   "熔断复查读不到温度：维持熔断"
-printf '38000\n' >/sys/class/thermal/thermal_zone1/temp
-eq "$(g7 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_zone_scan; sd_guard_cooled; echo $?')" "0" \
-   "熔断复查 38℃：正常解除"
-
-# 没有电池节点时，兜底候选不能选 WiFi / PA —— 它们正常就 90℃+
-rm -rf /sys/class/thermal/thermal_zone*
-mkzone thermal_zone0 mtktswmt 95000
-eq "$(g7 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_zone_scan; sd_sentinel_guard; echo $?')" "0" \
-   "无电池节点：WiFi 95℃ 不触发熔断"
 
 # 单芯时电芯数不能被 sd_ps_attr_v 留在 _sd_rv 里的微伏值污染
 # 前面把 cells_mode 设成 2 了，这里先恢复 auto
@@ -2092,66 +1797,15 @@ eq "$(g7 sh -c '. /opt/qc/lib/qc.sh; sd_batt_status')" "Charging" "天玑节点�
 printf 'temp_mode=static\n' >"$D7/state.conf"
 i=0
 while [ "$i" -lt 8 ]; do
-    g7 sh -c '. /opt/qc/lib/qc.sh; sd_state_set aggr 7' &
-    g7 sh -c '. /opt/qc/lib/qc.sh; sd_state_set wall 45' &
+    g7 sh -c '. /opt/qc/lib/qc.sh; sd_state_set shell_temp 27' &
+    g7 sh -c '. /opt/qc/lib/qc.sh; sd_state_set tick 21' &
     wait
     i=$((i + 1))
 done
-eq "$(grep -cE '^(aggr=7|wall=45)$' "$D7/state.conf")" "2" "并发写两个键不丢更新"
+eq "$(grep -cE '^(shell_temp=27|tick=21)$' "$D7/state.conf")" "2" "并发写两个键不丢更新"
 
 
-# ---------------------------------------------------------------- T38 限流档位
-# 四档 100/75/50/25，全部贴着墙：wall-3 起 75%，wall-1 起 50%，到墙 25%。
-# 不设提前量，离墙 4℃ 以上必须还是满功率。
-echo
-echo "===== T38 限流档位贴着墙 ====="
-for _m in /sys/class/thermal/*/temp; do umount -l "$_m" 2>/dev/null; done
-rm -rf /sys/class/thermal/thermal_zone*
-mkzone thermal_zone0 battery 34000
-D8=/data/adb/qc-t38
-rm -rf "$D8"; mkdir -p "$D8"
-printf 'temp_mode=off\nwall=42\ncurr_max=4000\nbattery_limit=48\nsentinel_limit=85\naggr=10\ndefrev=3\n' >"$D8/state.conf"
-q8() {
-    env SD_DATA=$D8 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 FAKE_PLAT=sm8750 FAKE_SOCMFR=Qualcomm FAKE_HW=qcom \
-        sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_zone_scan; sd_curr_target_v; echo $_sd_rv'
-}
-printf '34000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "4000" "34℃：满功率"
-printf '38000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "4000" "38℃（墙前 4℃）：仍满功率"
-printf '39000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "3000" "39℃（墙-3）：75%"
-printf '41000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "2000" "41℃（墙-1）：50%"
-printf '42000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "1000" "42℃ 到墙：25%"
-# 无限制：墙 60 → 熔断前 1℃（47），四档落在 44/46/47
-printf 'wall=60\n' >>"$D8/state.conf"
-printf '40000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "4000" "无限制墙：40℃ 满功率"
-printf '44000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "3000" "无限制墙：44℃（47-3）：75%"
-printf '46000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "2000" "无限制墙：46℃：50%"
-printf '47000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "1000" "无限制墙：47℃（熔断前 1℃）：25%"
-# 自定义墙仍按墙生效，不会越过熔断线
-printf 'wall=44\n' >>"$D8/state.conf"
-printf '40000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "4000" "自定义墙 44℃：40℃ 满功率"
-printf '41000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "3000" "自定义墙 44℃：41℃（墙-3）：75%"
-printf '43000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "2000" "自定义墙 44℃：43℃（墙-1）：50%"
-printf '44000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "1000" "自定义墙 44℃：到墙 25%"
-printf '47000\n' >/sys/class/thermal/thermal_zone0/temp
-eq "$(q8)" "1000" "自定义墙 44℃：47℃ 仍 25%（不回升）"
-
-# ============================================================ T39 暴力模式 / CPU 伪装
-# 两者都是 WebUI 直接调用的组合命令，最容易在改按钮时断掉却没人发现：
-# 页面上点得到，命令行却没有对应分支。
-echo "===== T39 暴力模式与 CPU 伪装 ====="
+echo "===== T39 CPU 伪装 ====="
 for _m in /sys/class/thermal/*/temp; do umount -l "$_m" 2>/dev/null; done
 rm -rf /sys/class/thermal/*
 mkzone thermal_zone0 cpu-0-0   50000
@@ -2160,20 +1814,11 @@ mkzone thermal_zone2 shell-back 30000
 
 D9=/data/adb/qc-t39
 rm -rf "$D9"; mkdir -p "$D9"
-printf 'temp_mode=off\nshell_temp=30\nwall=42\naggr=3\ncurr_max=0\ncurr_edge=4\nfast_cap=55\n' >"$D9/state.conf"
+printf 'temp_mode=off\nshell_temp=30\n' >"$D9/state.conf"
 q9() {
     env SD_DATA=$D9 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 FAKE_PLAT=sm8750 FAKE_SOCMFR=Qualcomm FAKE_HW=qcom \
         sh /opt/qc/action.sh "$@"
 }
-
-eq "$(q9 boost on)" "暴力模式 -> 开启（四档降流 · 档位 10 · 快充阈值 85%）" "boost on 回执"
-eq "$(sed -n 's/^curr_edge=//p' "$D9/state.conf")" "0"  "boost on：限流提前量归零"
-eq "$(sed -n 's/^aggr=//p'      "$D9/state.conf")" "10" "boost on：档位回满 10"
-eq "$(sed -n 's/^fast_cap=//p'  "$D9/state.conf")" "85" "boost on：快充阈值 85%"
-eq "$(q9 boost off)" "暴力模式 -> 关闭（四档降流 · 档位 10 · 快充阈值 55%）" "boost off 回执"
-eq "$(sed -n 's/^curr_edge=//p' "$D9/state.conf")" "4"  "boost off：限流提前量回到 4"
-eq "$(sed -n 's/^fast_cap=//p'  "$D9/state.conf")" "55" "boost off：快充阈值回到 55%"
-case "$(q9 boost xx)" in *用法*) ok "boost 非法参数被拒" ;; *) ng "boost 非法参数被拒" ;; esac
 
 # 守护没跑时 $SD_RUN 可能还不存在。旧版所有节点在"写临时文件"这一步失败，
 # 最后报的却是"没有节点被伪装"，被误判成机型不支持。
@@ -2352,10 +1997,10 @@ mkdir -p /sys/class/power_supply/battery
 printf 'Charging\n' >/sys/class/power_supply/battery/status
 printf '80\n'       >/sys/class/power_supply/battery/capacity
 
-eq "$(t41 sh -c '. /opt/qc/lib/qc.sh
-sd_state_set curr_max 3000; sd_state_set wall 40; sd_state_set curr_edge 0
-sd_curr_target_v; echo "$_sd_wall_eff/$_sd_screen_on"')" \
-   "40/1" "亮屏：墙不动"
+eq "$(t41 sh -c ". /opt/qc/lib/qc.sh
+sd_screen_tick
+echo \"\$_sd_screen_on\"")" \
+   "1" "亮屏：判定为屏幕亮"
 
 eq "$(t41 sh -c ". /opt/qc/lib/qc.sh
 printf '0\n' >'$B41F'
@@ -2366,26 +2011,16 @@ echo \"\$_sd_screen_on\"")" \
 eq "$(t41 sh -c ". /opt/qc/lib/qc.sh
 printf '0\n' >'$B41F'
 sd_screen_tick; sd_screen_tick
-sd_state_set curr_max 3000; sd_state_set wall 40; sd_state_set curr_edge 0
-sd_curr_target_v; echo \"\$_sd_wall_eff/\$_sd_screen_on\"")" \
-   "40/0" "息屏不再 +2℃：墙保持 40"
+echo \"\$_sd_screen_on\"")" \
+   "0" "连续两次读到 0：判定息屏"
 
 eq "$(t41 sh -c ". /opt/qc/lib/qc.sh
 printf '0\n' >'$B41F'
 sd_screen_tick; sd_screen_tick
 printf '200\n' >'$B41F'
 sd_screen_tick
-sd_state_set curr_max 3000; sd_state_set wall 40; sd_state_set curr_edge 0
-sd_curr_target_v; echo \"\$_sd_wall_eff/\$_sd_screen_on\"")" \
-   "40/1" "亮屏立即恢复，不等下一轮"
-
-# 关墙 = 不设墙，息屏亮屏都按熔断前 1℃（47）
-eq "$(t41 sh -c ". /opt/qc/lib/qc.sh
-printf '0\n' >'$B41F'
-sd_screen_tick; sd_screen_tick
-sd_state_set curr_max 3000; sd_state_set wall off; sd_state_set curr_edge 0
-sd_curr_target_v; echo \"\$_sd_wall_eff\"")" \
-   "47" "关墙+息屏：熔断前 1℃"
+echo \"\$_sd_screen_on\"")" \
+   "1" "重新亮屏立即恢复"
 
 eq "$(env SD_DATA=$D41 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 SD_BL=/nonexistent SD_FB=/nonexistent \
        sh -c '. /opt/qc/lib/qc.sh; sd_screen_tick; echo $_sd_screen_on')" \
@@ -2426,16 +2061,16 @@ sd_sentinel_best_v /sys/class/thermal/thermal_zone0 battery; echo $_sd_rv')" \
    "38" "熔断读真实值，不读被伪装的 30"
 
 printf '470\n' >/sys/class/power_supply/battery/temp
-eq "$(t42 sh /opt/qc/action.sh batt 35 2>&1 | grep -c '已 ≥ 46')" \
-   "1" "真实 47℃：拒绝开启"
+eq "$(t42 sh /opt/qc/action.sh batt 35 2>&1 | grep -c '电池 NTC 伪装')" \
+   "1" "真实 47℃：仍然允许开启（不再按温度撤销）"
 
 eq "$(t42 sh -c '. /opt/qc/lib/qc.sh
 sd_state_set temp_mode static
 sd_batt_sp_guard >/dev/null 2>&1; echo "$?"')" \
-   "1" "真实 47℃：守护自动撤销"
+   "0" "守护不因真实 47℃ 撤销电池伪装"
 
 eq "$(t42 cat /sys/class/thermal/thermal_zone0/temp)" \
-   "38000" "撤销后温区恢复真实读数"
+   "35000" "47℃ 下伪装保持 35℃"
 
 printf '380\n' >/sys/class/power_supply/battery/temp
 eq "$(t42 sh /opt/qc/action.sh batt off 2>&1 | grep -c '关闭')" \
@@ -2631,7 +2266,7 @@ eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "6000000
 eq "$(t47 sh /opt/qc/action.sh json | grep -o '"screen_mode":"[^"]*"')" \
    '"screen_mode":"fcc"' "json 报 fcc 模式"
 
-# C. 43℃ 仍接管（老闸写死 42℃，现在抬到熔断前 1℃）；47℃ 才停
+# C. 47℃ 也接管：3.1.0 起亮屏快充不看温度
 printf '430\n' >/sys/class/power_supply/battery/temp
 printf '2000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
 rm -f "$D47/run/scr.orig" "$D47/run/scr.way"
@@ -2641,15 +2276,11 @@ printf '470\n' >/sys/class/power_supply/battery/temp
 printf '2000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
 rm -f "$D47/run/scr.orig" "$D47/run/scr.way"
 t47 sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode charge; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
-eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "2000000" "47℃ 不接管"
-
-# D. 用户自己开了限流：两边都写同一节点，让限流优先
-printf '380\n' >/sys/class/power_supply/battery/temp
-t47 sh -c '. /opt/qc/lib/qc.sh; sd_state_set curr_max 3000; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
-eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "2000000" "开了限流就不接管"
+eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "6000000" "47℃ 也接管"
 
 # E. 拔线：立即还原
-t47 sh -c '. /opt/qc/lib/qc.sh; sd_state_set curr_max 0; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
+printf '380\n' >/sys/class/power_supply/battery/temp
+t47 sh -c '. /opt/qc/lib/qc.sh; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
 eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "6000000" "接管后恢复原值 6A"
 printf 'Discharging\n' >/sys/class/power_supply/battery/status
 printf '2000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
@@ -2731,20 +2362,19 @@ t47c sh -c '. /opt/qc/lib/qc.sh; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
 eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "6000000" \
    "亮屏：仍按 6A 基准顶回"
 
-# 47℃：两条路径都不接管，且不能写成「本机不支持」
+# 47℃：照样接管（3.1.0 起亮屏快充不看电池温度）
 printf '470\n' >/sys/class/power_supply/battery/temp
 printf '2000000\n' >/sys/class/power_supply/battery/constant_charge_current_max
 rm -f "$D47c/run/scr.orig" "$D47c/run/scr.way" "$D47c/run/scr.fail"
 t47c sh -c '. /opt/qc/lib/qc.sh; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
-eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "2000000" "默认开启：47℃ 不接管"
-hasnt "$(cat "$D47c/run/scr.fail" 2>/dev/null)" "1" "高温只暂停，不标记本机不支持"
+eq "$(cat /sys/class/power_supply/battery/constant_charge_current_max)" "6000000" "默认开启：47℃ 仍接管"
 eq "$(t47c sh /opt/qc/action.sh json 2>/dev/null | grep -o '"screen_mode":"[a-z]*"')" \
-   '"screen_mode":"idle"' "高温时面板不报不支持"
+   '"screen_mode":"fcc"' "高温时面板报 fcc 接管"
 
 mkdir -p /sys/module/oplus_chg/parameters
 printf '0\n' >/sys/module/oplus_chg/parameters/ignore_screen_state
 t47c sh -c '. /opt/qc/lib/qc.sh; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
-eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "0" "内核参数路径：47℃ 也不写 1"
+eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "1" "内核参数路径：47℃ 照样写 1"
 
 # 温度降回来要能重新接管
 printf '380\n' >/sys/class/power_supply/battery/temp
@@ -2773,56 +2403,6 @@ printf '1000000\n' >/sys/class/power_supply/battery/current_now
 t47d sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_cool_tick' >/dev/null 2>&1
 eq "$(cat /sys/class/oplus_chg/battery/cool_down)" "0" "电流 1A 被降流：写 0 解除"
 rm -rf /sys/class/oplus_chg
-
-# ---------------------------------------------------------------- T47b 默认极限
-# 3.0 起默认就是原来的极限：墙 60 = 无限制 → 熔断前 1℃，FCC 无 38/41℃ 折损，
-# cool_down 到熔断前 1℃ 才交还。这里锁住默认值，防止以后又被调回 42/4。
-D47b=/tmp/qc47b-max; rm -rf "$D47b"; mkdir -p "$D47b/run" "$D47b/zone0"
-printf 'battery\n' >"$D47b/zone0/type"
-printf '38000\n'  >"$D47b/zone0/temp"
-t47b() { env SD_DATA=$D47b SD_MODDIR=/opt/qc SD_NO_DAEMON=1 SD_BL=/nonexistent SD_FB=/nonexistent \
-         SD_ZONE_GLOB="$D47b/zone*" "$@" ; }
-t47b sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode static; sd_state_set curr_max 6000;
-  sd_state_set battery_limit 48' >/dev/null 2>&1
-eq "$(t47b sh -c '. /opt/qc/lib/qc.sh; sd_state_get wall 60')" "60" "默认墙 = 60（无限制）"
-eq "$(t47b sh -c '. /opt/qc/lib/qc.sh; sd_state_get curr_edge 0')" "0" "默认提前量 = 0（顶墙）"
-
-w=$(t47b sh -c '. /opt/qc/lib/qc.sh; _sd_st_loaded=0; sd_state_load; _sd_screen_on=1;
-  _sd_screen_ticks=1; sd_curr_target_v; printf "%s" "$_sd_wall_eff"')
-eq "$w" "47" "无限制墙 → 熔断前 1℃（47）"
-i45=$(t47b sh -c '. /opt/qc/lib/qc.sh; _sd_st_loaded=0; sd_state_load; _sd_screen_on=1;
-  _sd_screen_ticks=1; sd_curr_target')
-eq "$i45" "6000" "亮屏 45℃ 仍全额"
-printf '47000\n' >"$D47b/zone0/temp"
-i47=$(t47b sh -c '. /opt/qc/lib/qc.sh; _sd_st_loaded=0; sd_state_load; _sd_screen_on=1;
-  _sd_screen_ticks=1; sd_curr_target')
-eq "$i47" "1500" "47℃ 到墙：降到 25%"
-printf '38000\n' >"$D47b/zone0/temp"
-
-# 自定义墙仍生效，但不超过熔断前 1℃
-t47b sh -c '. /opt/qc/lib/qc.sh; sd_state_set wall 45' >/dev/null 2>&1
-w2=$(t47b sh -c '. /opt/qc/lib/qc.sh; _sd_st_loaded=0; sd_state_load; _sd_screen_on=1;
-  _sd_screen_ticks=1; sd_curr_target_v; printf "%s" "$_sd_wall_eff"')
-eq "$w2" "45" "自定义墙 45 生效"
-t47b sh -c '. /opt/qc/lib/qc.sh; sd_state_set wall 60' >/dev/null 2>&1
-
-eq "$(t47b sh /opt/qc/action.sh json 2>/dev/null | grep -o '"wall":"60"')" '"wall":"60"' "json 报墙 60（无限制）"
-eq "$(t47b sh /opt/qc/action.sh json 2>/dev/null | grep -c '"max"')" "0" "json 不再有 max 字段"
-
-# FCC 目标：41/45℃ 不再打折，47℃ 放手
-t47b sh -c '. /opt/qc/lib/qc.sh; printf "6000\n" >"$SD_FCC_NORM"' >/dev/null 2>&1
-printf '41000\n' >"$D47b/zone0/temp"
-printf '410\n' >/sys/class/power_supply/battery/temp
-f41=$(t47b sh -c '. /opt/qc/lib/qc.sh; _sd_st_loaded=0; sd_state_load;
-  _sd_screen_on=1; sd_scr_target; printf "%s" "$_sd_rv"')
-eq "$f41" "6000" "FCC 41℃ 仍是 6000mA"
-printf '47000\n' >"$D47b/zone0/temp"
-printf '470\n' >/sys/class/power_supply/battery/temp
-f47=$(t47b sh -c '. /opt/qc/lib/qc.sh; _sd_st_loaded=0; sd_state_load;
-  _sd_screen_on=1; sd_scr_target; printf "%s" "$_sd_rv"')
-eq "$f47" "0" "FCC 47℃ 放手"
-printf '38000\n' >"$D47b/zone0/temp"
-printf '380\n' >/sys/class/power_supply/battery/temp
 
 # ---------------------------------------------------------------- T48 节点读取
 # sd_read1 从 $(tr ...) 改为 read 内建，省掉每轮几十次 fork。
@@ -2944,20 +2524,17 @@ u52 unlock off >/dev/null 2>&1
 eq "$(cat "$B52/thermal_charging")" "1" "unlock off：还原原值 1"
 [ -f "$D52/run/unlock.orig" ] && ng "unlock off：备份文件没删" || ok "unlock off：备份文件已清"
 
-# 超温拒绝：先写 46℃ 再开，节点不应被写
+# 3.1.0 起不按温度撤销：46℃ 也允许开，开着就一直压 0
 printf '46\n' >"$B52/temp"
 u52 unlock on >/dev/null 2>&1
-eq "$(cat "$B52/thermal_charging")" "1" "unlock on：46℃ 拒绝开启，不写节点"
-eq "$(grep -c '^chg_unlock=1' "$D52/state.conf" 2>/dev/null)" "0" "unlock on：46℃ 不置状态位"
+eq "$(cat "$B52/thermal_charging")" "0" "unlock on：46℃ 同样生效"
+eq "$(grep -c '^chg_unlock=1' "$D52/state.conf" 2>/dev/null)" "1" "unlock on：46℃ 也置状态位"
 
-# 开启后升温：守护下一轮撤销并还原
-printf '38\n' >"$B52/temp"
-u52 unlock on >/dev/null 2>&1
-eq "$(cat "$B52/thermal_charging")" "0" "降到 38℃ 后可开启"
-printf '46\n' >"$B52/temp"
+# HAL 写回来时，下一轮再压 0
+printf '1\n' >"$B52/thermal_charging"
 env SD_DATA=$D52 SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_unlock_tick' 2>/dev/null
-eq "$(cat "$B52/thermal_charging")" "1" "升到 46℃：守护撤销并还原"
-eq "$(grep -c '^chg_unlock=1' "$D52/state.conf" 2>/dev/null)" "0" "升到 46℃：状态位清回 0"
+eq "$(cat "$B52/thermal_charging")" "0" "HAL 写回 1：下一轮再压 0"
+eq "$(grep -c '^chg_unlock=1' "$D52/state.conf" 2>/dev/null)" "1" "状态位仍是 1"
 rm -rf "$D52"
 
 # 失败清单放在最后统一列一遍：滚动日志里翻不到的那几条，这里能一次看全

@@ -87,17 +87,11 @@ elif sd_mm_active; then
 fi
 
 SD_DEFAULTS="temp_mode=charge
-shell_temp=30
+shell_temp=25
 core_temp=off
 noncore_temp=off
 chg_unlock=0
-sentinel_limit=85
-battery_limit=48
-fast_cap=55
 curve_offset=120
-wall=42
-aggr=10
-curr_max=0
 hz=off
 power_scale=100
 cells_mode=auto
@@ -141,6 +135,20 @@ if [ "$defrev" -lt 3 ]; then
         ui_print "- 默认改为「仅充电」自动生效，插电即改写、拔电即还原"
     fi
     sd_state_set defrev 3
+fi
+if [ "$defrev" -lt 4 ]; then
+    # 3.1.0 起不再有温度墙/熔断/限流这组参数：常量伪装代替了整套退让逻辑。
+    # 旧 state.conf 里的键留着只会让人误以为还能调，升级时直接清掉。
+    for _k in aggr wall fast_cap sentinel_limit battery_limit curr_max curr_edge cool_guard; do
+        grep -q "^$_k=" "$SD_STATE" 2>/dev/null && sed -i "/^$_k=/d" "$SD_STATE"
+    done
+    # 旧的 30~60℃ 基准在新模型里太高，统一收到 25℃（用户手动改过的 20~33 保留）
+    _sh=$(sd_state_get shell_temp 25)
+    case "$_sh" in
+        ''|*[!0-9]*) sd_state_set shell_temp 25 ;;
+        *) [ "$_sh" -gt 33 ] && sd_state_set shell_temp 25 ;;
+    esac
+    sd_state_set defrev 4
 fi
 
 [ "$(sd_state_get temp_mode off)" = "dyn" ] && {

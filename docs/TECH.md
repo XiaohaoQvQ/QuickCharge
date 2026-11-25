@@ -39,7 +39,7 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 ```
 
 安装后**默认就是「仅充电」自动生效**（`temp_mode=charge`），不需要任何手动操作：
-重启完成后守护自己接管，插电且电量低于 `fast_cap` 时改写，拔电 10 秒内还原真实读数。
+重启完成后守护自己接管，插电就改写（不看电量），拔电一轮内还原真实读数。
 
 只有充电这一个场景会动温控，日常使用（打游戏、待机）不碰。想更激进选「全局运行」，
 想完全不改写在面板点「关闭」——手动关过之后，升级不会再把它重新打开。
@@ -65,19 +65,17 @@ C 版把 `bin/qcmon` 放进包里，`service.sh` 检测到它就 `exec`，不再
 想临时验证 shell 版行为，不用重刷：
 
 ```sh
-su -c 'SD_SHELL_DAEMON=1 sh /data/adb/modules/quickcharge/service.sh'
+su 0 sh -c 'SD_SHELL_DAEMON=1 sh /data/adb/modules/quickcharge/service.sh'
 ```
 
 **两个版本覆盖同一套热路径**，可以随时互换（`state.conf`、`run/` 下的状态文件、
 日志格式都通用）：
 
 - 温区扫描与分类，作用域（core / noncore / batt）判定与兜底
-- 壳温动态上报：屏障、gap、余量爬升、`emul_temp` 与 `/proc/shell-temp` 双落点
+- 壳温恒定额上报：`emul_temp` 与 `/proc/shell-temp` 双落点，与真实读数无关
 - 核心 / 非核心温度伪装（bind mount），稳态下不重复挂载
-- 电流四档：墙-3 / 墙-1 / 墙 → 75 / 50 / 25%，滞回 2℃
 - 屏幕快充：内核 `ignore_screen_state` 优先，退回 FCC 回写，亮屏/息屏都保持，含基准学习与温度闸
-- 熔断 → 暂停伪装 → 冷却（回差 3℃）→ 自动恢复
-- 电池 NTC 伪装（`batt_spoof`），真实温度 46℃ 硬上限 + 120s 冷却
+- 电池 NTC 伪装（`batt_spoof`），不按真实温度撤销
 - 遥测（`run/sensor`）与心跳（`run/hb`，`uptime pid` 格式）
 - 高刷补写（`hz_hard`）、描述同步（`module.prop`）
 - `SIGUSR1` 立即重载、`spoof.pending` 补齐、退出全量还原
@@ -85,10 +83,10 @@ su -c 'SD_SHELL_DAEMON=1 sh /data/adb/modules/quickcharge/service.sh'
 C 版另有几个只读子命令，排障时不必进守护：
 
 ```sh
-su -c '/data/adb/modules/quickcharge/bin/qcmon zones'    # 温区分类表
-su -c '/data/adb/modules/quickcharge/bin/qcmon once'     # 单轮目标值（不落盘）
-su -c '/data/adb/modules/quickcharge/bin/qcmon sensor'   # 跑一轮热路径并打印遥测
-su -c '/data/adb/modules/quickcharge/bin/qcmon bench 200' # 热路径耗时
+su 0 sh -c '/data/adb/modules/quickcharge/bin/qcmon zones'    # 温区分类表
+su 0 sh -c '/data/adb/modules/quickcharge/bin/qcmon once'     # 单轮目标值（不落盘）
+su 0 sh -c '/data/adb/modules/quickcharge/bin/qcmon sensor'   # 跑一轮热路径并打印遥测
+su 0 sh -c '/data/adb/modules/quickcharge/bin/qcmon bench 200' # 热路径耗时
 ```
 
 差异只在这些地方，都不影响充电行为：C 版没有 `action.sh` 的命令行子集——面板和
@@ -110,26 +108,22 @@ su -c '/data/adb/modules/quickcharge/bin/qcmon bench 200' # 热路径耗时
 
 | 参数 | 默认 | 范围 | 作用 |
 |---|---|---|---|
-| `temp_mode` | `charge` | `off` / `static` / `charge` | `static` 全程伪装；`charge` 只在充电且电量低于阈值时伪装（默认） |
-| `shell_temp` | 30 | 25～60 | 伪装基准温度（℃），必须低于 `wall`；真实温度低于它时不会改写 |
-| `aggr` | 10 | 0～10 | **温控档位**，越高越激进，可拉开温差 = 2 + 档位 |
-| `wall` | 42 | 35～80 / `off` | 温度墙，真实温度到此即停止伪装 |
-| `battery_limit` | 48 | 30～70 / `off` | 电池哨兵熔断阈值 |
-| `sentinel_limit` | 85 | 60～110 / `off` | SoC/主板哨兵熔断阈值 |
-| `curr_max` | 0 | 0～8000 | 充电限流（mA），0 = 不限；面板不再给滑块，改这里生效 |
-| `curr_edge` | 4 | 0～6 | 限流提前量：0 = 顶到墙才降流，4 = 离墙 4℃ 开始降 |
-| `core_temp` | `off` | `off` / 20～100 | CPU/GPU/DDR 固定伪装温度，不受 `wall` 约束；`off` = 不伪装 |
+| `temp_mode` | `charge` | `off` / `static` / `charge` | `static` 全程伪装；`charge` 只在充电时伪装（默认），不看电量 |
+| `shell_temp` | 25 | 20～33 | 伪装温度（℃），恒定上报这个值，与真实读数无关 |
+| `core_temp` | `off` | `off` / 20～100 | CPU/GPU/DDR 固定伪装温度；`off` = 不伪装 |
 | `noncore_temp` | `off` | `off` / 20～100 | 其它温区固定伪装；电池 NTC 需用 `batt_spoof` 单独开 |
-| `batt_spoof` | `off` | `off` / 20～45 | **电池 NTC 伪装**（危险）：电池温区按此值上报；真实 ≥46℃ 自动撤销并冷却 120s，读不到真实值则拒绝开启 |
+| `batt_spoof` | `off` | `off` / 20～45 | **电池 NTC 伪装**：电池温区按此值上报；读不到真实温度也照开，不按温度撤销 |
 | `curve_offset` | 120 | 0～300 | 充电曲线温度轴右移量，0.1℃ 单位（120 = +12℃） |
-| `fast_cap` | 55 | 20～90 | `charge` 模式生效的电量上限（%） |
 | `power_scale` | 100 | 50～200 | 电流校准百分比，读数偏低/偏高时微调 |
 | `cells_mode` | auto | `auto` / 1 / 2 | 电芯数：自动判断，或强制单芯/双芯（个别机型第二槽位有残值时用） |
-| `tick` | 15 | 5～300 | 守护周期（秒）；`charge` 档固定 10 秒，不受此项影响 |
+| `tick` | 15 | 5～300 | 守护周期（秒） |
 | `log_level` | 1 | 0～4 | 0 只留 `E` / 1 事件（默认）/ 2 事件+快照 / 3 逐轮 / 4 调试 |
 
-熔断判定对电池类温区**取温区与电量计两者较高的一侧**：`batt-therm` 这类连接器侧温区平时比电芯高 8-12℃，
-展示时会以电量计为准；但保护不能赌——只信偏低的一侧，单点传感器滞后或异常就是漏熔断。
+3.1.0 删掉的键：`wall`、`aggr`、`curr_max`、`curr_edge`、`fast_cap`、`battery_limit`、
+`sentinel_limit`、`cool_guard`。升级时 `customize.sh` 会把它们从 `state.conf` 里清掉，
+真机残留也无害——守护不再读。
+
+`shell_temp` 的下限是硬性的：再低不少平台会把 NTC 判成开路，直接锁 5V/500mA，反而更慢。
 
 任一参数越界都会被拒绝，当前值保持不变，不会写进系统。
 
@@ -139,10 +133,9 @@ su -c '/data/adb/modules/quickcharge/bin/qcmon bench 200' # 热路径耗时
 
 ```sh
 sh action.sh status                 # 状态
-sh action.sh temp static 32         # 开启伪装，基准 32℃
+sh action.sh temp static 25         # 开启伪装，恒定报 25℃
 sh action.sh temp off               # 关闭伪装
-sh action.sh gear 6                 # 温控档位降到 6（aggr 是旧名，仍可用）
-sh action.sh wall 45                # 改成 45℃ 收手
+sh action.sh base 22                # 只改伪装温度，不切模式（20～33）
 sh action.sh hz 120                 # 写 120Hz（系统仍可按内容降频）
 sh action.sh hz 165 hard            # 强制锁定 165Hz（不接受内容帧率切换）
 sh action.sh hz 185                 # 185Hz 机型（2025 年新机）
@@ -151,11 +144,9 @@ sh action.sh hz off                 # 完全还原系统刷新率
 sh action.sh pscale 110             # 电流读数偏低一成时校准
 sh action.sh cells 1                # 强制按单电芯算功率（自动判断误判时）
 sh action.sh check                  # 适配检查：一次采样，直接说能用哪些功能
-sh action.sh curr 3000              # 限流 3A
 sh action.sh core 55                # CPU/GPU/DDR 固定报 55℃（独立于 temp 模式）
-sh action.sh boost on               # 暴力模式：四档降流 + 快充阈值 85%
-sh action.sh boost off              # 关掉，回到距墙 4℃ 降流 / 55%
-sh action.sh sentinel 90            # SoC 熔断改 90℃
+sh action.sh batt 30                # 电池 NTC 按 30℃ 上报（不按真实温度撤销）
+sh action.sh unlock on              # 解除 HAL 阶梯限流（写 0，原值备份）
 sh action.sh level 2               # 详细日志（开启时先写环境头）
 sh action.sh logs e 100             # 最近 100 条错误
 sh action.sh logs boot              # 本次开机全过程
@@ -170,7 +161,7 @@ sh action.sh reset                  # 恢复初始状态
 
 `logs` 的来源标记：`boot` / `mount` / `override` / `thermal` / `guard` / `charge` / `daemon` / `cmd` / `env` / `proto` / `screen` / `chg`。
 
-**日志级别（2.9.60 起）**：`0` 只留 `E` / `1` 事件（默认）/ `2` 事件+完整快照 / `3` 逐轮 / `4` 调试。默认落在 1：安装、熔断、守护启停、挂载交付都留痕，又不至于每轮刷屏。
+**日志级别（2.9.60 起）**：`0` 只留 `E` / `1` 事件（默认）/ `2` 事件+完整快照 / `3` 逐轮 / `4` 调试。默认落在 1：安装、守护启停、挂载交付都留痕，又不至于每轮刷屏。
 面板仍是「关闭 / 详细」两态，点「详细」走级别 2，并且**开启时先写环境头**：
 机型、ROM、内核、模块与守护版本、`usb/type`、`real_type`、`voocchg_ing`、`charge_technology`、
 屏幕亮度节点数与 FCC 节点，最后补一条当前现场（`首帧`）。
@@ -195,18 +186,17 @@ type=USB_DCP scr=1 proto=vooc cells=2 status=Charging
 
 模块带 `webroot/index.html`，在 **KernelSU / KsuWebUI / MMRL** 里点模块的「打开」即可看到控制面板：
 
-- 实时状态四格：**真实**（传感器实际温度，下方小字直接写用的温度点，如 `batt`）、**系统看到**（模块写进 `emul_temp` 的数，充电策略和温控服务读到的就是它）、**配置**（生效条数）、**守护**（是否在跑 + 心跳）。下面一行结论只留数字关系：`真实 41℃ → 系统看到 28℃`、`真实 41℃ < 基准 43℃`、`真实 43℃ ≥ 墙 42℃ · 交回系统`、`待机中 · 插电后接管`、`写入失败 · 系统仍读真实温度`
+- 实时状态四格：**真实**（传感器实际温度，下方小字直接写用的温度点，如 `batt`）、**系统看到**（模块写进 `emul_temp` 的数，充电策略和温控服务读到的就是它）、**配置**（生效条数）、**守护**（是否在跑 + 心跳）。下面一行结论只留数字关系：`真实 41℃ → 系统看到 25℃`、`恒定 25℃ · 不看真实温度`、`待机中 · 插电后接管`、`写入失败 · 系统仍读真实温度`
 - 读不到温度时只留横线，小字写原因：`守护没跑` 或 `通道被挡`（管理器的执行通道与终端 `su` 不是同一个 SELinux 域）。守护在跑时优先用它的读数，不依赖这条通道
 - **实时功耗**卡：电流 / 功率 / 电池温度三格，附一条只在页面打开时采样的曲线；标题旁只标电芯数与平台（`双电芯 · 高通`），协议不上屏
 - **温控改写范围**三个按钮：全局运行 / 仅充电 / 关闭，点一下立即生效
-- **核心参数**：档位 0 到 10（拖动即生效，显示对应温差）、温度墙 35 到 80℃ 可单独关闭、基准温度 25 到 60℃、限流提前量 0 到 6
-- **熔断阈值**：电池 30 到 70℃、主板 60 到 110℃
+- **核心参数**：只留一个「伪装温度」滑块，20 到 33℃（拖动即生效），下面一行小字写「恒定上报这个值：不设温度墙、不设熔断线、不按电量退出」
 - **极限功率**：电池 NTC 伪装、取消阶梯限流、CPU 伪装三个危险开关，默认不动，标题行写「安全边界未动」。CPU 伪装是 20 到 70℃ 滑块直接指定系统读到的核心温度，不给系统任何"变热了"的信号；勾上「关闭伪装」即交回真实温度。设得越低，调度越不会降频，真实发热不会跟着降。WebUI 的执行通道常常读不到 `/sys/class/thermal`，这种情况命令只落状态、由守护在自己的域里补挂。分类表认不出温区名字时，core 会按「排除法」兜底：电池、主板、壳温默认不碰，其余节点照常伪装，回执里标注「分类未命中，按节点兜底 N 个」
 - **刷新率**：6 格滑块，关 / 90 / 120 / 144 / 165 / 185Hz，本机没有的档位变灰、拖不过去；外加「强制锁定」开关
 - **诊断日志**：只有「关闭 / 详细」两个按钮，点详细才开日志并先写环境头；面板里不再显示日志正文，要看内容用 `action.sh logs`
 - 底部操作区三个按钮一行：刷新 / 重挂 / 重启守护
 
-面板上已经删除的东西，别再找：充电限流滑块（2.9.61 去掉，功能仍在 `curr_max` 与 `action.sh curr`）、暴力模式开关（2.9.60 去掉，命令 `action.sh boost` 仍可用）、环境自检卡（2.9.65 去掉，改用 `action.sh check` 与日志）、协议标签（2.9.67 去掉，判定与日志在 2.9.72 一并移除）、顶部状态牌（2.9.69 加过一版，2.9.70 撤销，状态改由 `module.prop` 简介承担）。
+面板上已经删除的东西，别再找：充电限流滑块、暴力模式开关、温控档位与温度墙滑块、熔断阈值两个滑块（均在 3.1.0 随功能一起删除）、环境自检卡（2.9.65 去掉，改用 `action.sh check` 与日志）、协议标签（2.9.67 去掉，判定与日志在 2.9.72 一并移除）、顶部状态牌（2.9.69 加过一版，2.9.70 撤销，状态改由 `module.prop` 简介承担）。
 
 滑块松手才下发命令，避免拖动过程刷屏；参数走的是 `action.sh`，与命令行完全一致，改完立即生效，不需要重启。
 
@@ -468,16 +458,19 @@ MTK 机上，差别集中在四件事：温区叫什么、温度用什么单位�
 伪装还会把 `mtktsbattery` 一起钉死，充电 IC 失去 NTC 反馈。
 
 现在统一归一成五类：`core` / `shell` / `battery` / `board` / `other`。哨兵按
-`battery > board > other` 选，`battery` 与 `board` 永不参与伪装。
+`battery > board > other` 选，`battery` 与 `board` 永不参与伪装——3.1.0 删掉熔断之后，
+这条排除规则仍然有效，它决定的是"哪些温区绝不能被 core/noncore 伪装误伤"。
+
+下面两段是熔断还在时（2.8.0 到 3.0.x）踩过的坑，保留下来是因为分类逻辑没变：
 熔断扫描也得走同一套分类。2.8.0 之前这里还留着一份写死的名字表
 （`battery|Battery|batt*|xo-therm|xtherm`），哨兵选了 `mtktsbattery`，熔断却按名字找
 不到它，于是退到"第一个非 core/shell 温区"——GT Neo3 上那个是 `mtktspmic`，拿 85℃ 的
 阈值去盯 PMIC，电池 50℃ 也不会熔断。恢复条件的问题相反：它把 PA、WiFi 也算进"是否
 降温"，而这两颗芯片正常工作时就 90℃ 以上，一旦熔断就永远解不开。
 
-现在熔断与恢复都只认 `sd_zone_is_guard_src`：电池类 + `xo-therm` / `xtherm*` / `*pmic*` /
+当时的熔断与恢复都只认 `sd_zone_is_guard_src`：电池类 + `xo-therm` / `xtherm*` / `*pmic*` /
 `*charger*`。PA（`mtktsbtsmdpa`）、WiFi（`mtktswmt`）明确排除——它们不是"机身有多热"
-的度量，拿来熔断只会天天误触发。
+的度量，拿来熔断只会天天误触发。3.1.0 把这个函数连同整套熔断一起删了。
 
 ### 读数不可信时：-40000 / 2000 / 0
 
@@ -490,15 +483,15 @@ MTK 机上，差别集中在四件事：温区叫什么、温度用什么单位�
 | `0` | `shell_front` / `shell_frame` / `shell_back` | 壳温还没上报 | 只当伪装目标，绝不当哨兵 |
 
 `2000` 这条最坑：按 mC 归一得到 2℃，目标温度被压到 2℃、低于写入下限被拒，
-表现就是「模式开着、全程未改写」。现在伪装目标、限流目标、熔断、熔断恢复四个
-决策点统一走 `sd_sentinel_best_v`：电池类温区读数落在 8-90℃ 之外时改用
+表现就是「模式开着、全程未改写」。当时伪装目标、限流目标、熔断、熔断恢复四个
+决策点统一走 `sd_sentinel_best_v`（3.1.0 起只剩遥测显示这一条）：电池类温区读数落在 8-90℃ 之外时改用
 `battery` / `mtk-battery` / `mtk-gauge` 的电量计读数。`probe` 会把这种情况直接标出来：
 
 ```
 !! 温区 thermal_zone4 报 2℃（不在 8-90℃）→ 判定未初始化，改用电量计 35℃
 ```
 
-刻意不做"谁高听谁"：那会让一路偏冷的陈旧读数盖过真实的过热读数，熔断反而失灵。
+刻意不做"谁高听谁"：那会让一路偏冷的陈旧读数盖过真实的过热读数。
 
 ### 温度编码：三种并存
 
@@ -576,33 +569,40 @@ sh action.sh check
 
 ## 安全设计
 
+> **3.1.0 起这套"安全"只剩边界校验和退出还原。**熔断、温度墙、渐进让步、到墙滞回
+> 全部删除，模块只追求充电速度。下面几条是仍然生效的部分；被删掉的那些写在本节末尾，
+> 留作记录。
+
 **哨兵隔离。** `battery` / `batt*` / `mtktsbattery` / `xo-therm` / `xtherm*` 这类电池与主板
-传感器默认不参与伪装，是整个系统里唯一可信的一路读数。判断按语义分类而不是按名字，
-MTK 的 `mtktsbattery`、`mtktspmic` 一样会被挡住。把它们一起钉死会让充电 IC 失去温度
-反馈——这是"充着电死机"的主要来源。
+传感器默认不参与伪装。判断按语义分类而不是按名字，MTK 的 `mtktsbattery`、`mtktspmic`
+一样会被挡住。把它们一起钉死会让充电 IC 失去温度反馈——这是"充着电死机"的主要来源。
 
 唯一例外是 `batt_spoof`（默认关，需显式开启，详见「极限功率」）。它只改电池**温区**，
-不改 `power_supply/battery/temp`：后者是充电 IC 的 ADC 真实读数，也是伪装期间熔断与
-46℃ 硬上限唯一采信的值。所以"电池可以被伪装"和"熔断不瞎"这两件事同时成立。
+不改 `power_supply/battery/temp`：后者是充电 IC 的 ADC 真实读数，面板上「真实」那一格
+读的就是它。
 
-**熔断。** 电池 48℃ / 其他传感器 85℃ 触发时，撤销全部伪装并暂停，温度回落到上限 3℃ 以下自动恢复。
-候选只有**电池类和 `xo-therm` / `xtherm`**。充电 IC、PMIC、PA、WiFi 都不算：前两者在 100W
-充电时本身就 85℃ 上下，后两者正常就 90℃+，一旦进候选，熔断会在充电全程反复触发，
-伪装开关一次、功率就掉一次（详见「已知限制」里的锯齿条目）。
-阈值、档位、模式一个都不改——旧实现会把 `temp_mode` 落盘成 `off`，一次过热就永久关闭，
-重启后还是 off，用户看到的就是「模式始终 off、怎么都开不起来」。两个阈值可分别关闭。
+**范围校验。** 伪装温度必须落在 20～33℃，越界不截断到边界而是拒绝：命令行入口直接报错、
+当前值不变（`temp` 命令例外，越界退到 25℃）。`state.conf` 里的损坏值在读取时回落默认，
+不会带着坏值去写节点。下限 20℃ 是硬性的——再低不少平台把 NTC 判成开路，直接锁 5V/500mA。
 
-**渐进让步。** 上报值随真实温度抬高，距墙 4℃ 开始等步长爬升，到墙完全交还。任何分支下上报值都不超过真实温度——超过就成了伪造高温，系统会提前降频。
+**写入门槛。** 非 0 的目标温度必须落在 20～100℃，否则整次写入丢弃并记 `E` 日志。
+0 是合法值，语义为关闭模拟、交还真实读数，不是"上报 0℃"。
 
-**到墙有 2℃ 滞回。** 温度在墙上下抖 0.1℃ 时，若按「到墙即关、离墙即开」逐 tick 切，系统看到的电池温度就在压过值和真实值之间来回跳，充电功率跟着满功率↔降档打成锯齿。进入关断态后要回落到墙下 2℃ 才重新接管，与熔断回落 3℃ 是同一套思路。
+**降流解除带电流闸。** `cool_down` 非 0 且实测 `|ibat| < 2.5A` 才写 0。已经满速时
+不碰这个节点：写入本身会让 OPlus 重选档，实测 4.3A 时写一下就从 32W 掉到 6W，
+PKB110 上还会一路抖到 6W。
 
-**参数校验。** 越界不截断到边界，而是拒绝：命令行入口直接报错、当前值不变（`temp` 命令例外，越界退到 30℃）。`state.conf` 里的损坏值在读取时回落默认，不会带着坏值去写节点。
+**退出还原。** 三条退出路径（正常退出、`uninstall.sh`、`restart`）都会：`emul_temp` 归零、
+`umount` 覆盖层、删除临时文件、把阶梯解锁的原值写回。
 
-**写入门槛。** 非 0 的目标温度必须落在 20～100℃，否则整次写入丢弃并记 `E` 日志。0 是合法值，语义为关闭模拟、交还真实读数，不是"上报 0℃"。
+### 3.0.x 及更早版本有、3.1.0 删掉的部分
 
-**开机自救。** 连续 3 次没走到 `service` 阶段就跳过挂载并清空清单。这是不依赖 recovery 的翻车出口。恢复：`sh action.sh reboot-safe` 或重启一次。
-
-**回滚。** `mounts.list` 精确记录每个挂载点；清单丢失时按覆盖层目录反推，只卸确实出现在 `/proc/mounts` 里的路径。卸载后原文件逐字节恢复，`emul_temp` 归零，数据目录删除。
+- **熔断**：电池 48℃ / 其他传感器 85℃ 触发时撤销全部伪装并暂停，回落到阈值下 3℃ 自动恢复。
+  删掉的原因见 [README 第 9 节](../README.md#9-极速模式没有兜底)。
+- **渐进让步与 2℃ 滞回**：上报值随真实温度抬高、距墙 4℃ 开始爬升、到墙交还；到墙后
+  回落 2℃ 才重新接管。现在上报值是恒定的，不存在"墙"这个概念。
+- **温差档位（`aggr`）**：按档位拉开上报值与真实值的差距，0 到 10 档。
+- **绝对电流墙（`curr_max`）与四档降流**：按温度把电流压到 100/75/50/25%。
 
 ## 配置改写范围
 
@@ -669,14 +669,14 @@ NoMount 类元模块（NoMount-Suite、`maxsteeel/nomount`）用 VFS 路径重�
 **换元模块时清一下 `skip_mount`。** Magic Mount 与 Hybrid Mount 都会跳过目录里带 `skip_mount` 的模块，而 Mountify 在非元模块模式下会留下这个文件。从 Mountify 换到另外两家后，如果 `status` 显示「托管 N 个文件」但 `/vendor/etc` 下还是原版配置，先看这条：
 
 ```sh
-su -c 'rm -f /data/adb/modules/quickcharge/skip_mount'
+su 0 sh -c 'rm -f /data/adb/modules/quickcharge/skip_mount'
 ```
 
 托管模式下本模块只交付、不做内容校验，所以这类「交付了但没挂上」的情况在面板上不会报错，只能靠比对文件内容确认：
 
 ```sh
-su -c 'head -c 200 /vendor/etc/sys_thermal_config.xml'
-su -c 'head -c 200 /data/adb/modules/quickcharge/system/vendor/etc/sys_thermal_config.xml'
+su 0 sh -c 'head -c 200 /vendor/etc/sys_thermal_config.xml'
+su 0 sh -c 'head -c 200 /data/adb/modules/quickcharge/system/vendor/etc/sys_thermal_config.xml'
 ```
 
 ## 已知限制
@@ -762,7 +762,7 @@ case FB_BLANK_UNBLANK:
 屏幕快充也一并不接管。面板上不显示这项，接管状态用命令看：
 
 ```sh
-su -c 'sh /data/adb/modules/quickcharge/action.sh status | grep 亮屏快充'
+su 0 sh -c 'sh /data/adb/modules/quickcharge/action.sh status | grep 亮屏快充'
 ```
 
 状态行仍叫「亮屏快充」，方便和旧日志对照；FCC 路径息屏显示"息屏交还驱动（下次亮屏
@@ -849,7 +849,7 @@ su -c 'sh /data/adb/modules/quickcharge/action.sh status | grep 亮屏快充'
 自定义温度墙仍然有效，但会被夹在熔断前 1℃：
 
 ```sh
-su -c 'sh /data/adb/modules/quickcharge/action.sh wall 45'
+su 0 sh -c 'sh /data/adb/modules/quickcharge/action.sh wall 45'
 ```
 
 `wall 60` 或 `wall off` 回到无限制。`curr_max` 是唯一还会主动降功率的用户设置：
@@ -863,9 +863,9 @@ su -c 'sh /data/adb/modules/quickcharge/action.sh wall 45'
 开启时弹确认。它们解决的是"系统因为怕热而提前收手"，不是"让充电器多给电"。
 
 ```sh
-su -c 'sh /data/adb/modules/quickcharge/action.sh batt 30'   # 电池温区按 30℃ 上报
-su -c 'sh /data/adb/modules/quickcharge/action.sh batt off'  # 交回真实
-su -c 'sh /data/adb/modules/quickcharge/action.sh unlock on'  # 解除阶梯限流
+su 0 sh -c 'sh /data/adb/modules/quickcharge/action.sh batt 30'   # 电池温区按 30℃ 上报
+su 0 sh -c 'sh /data/adb/modules/quickcharge/action.sh batt off'  # 交回真实
+su 0 sh -c 'sh /data/adb/modules/quickcharge/action.sh unlock on'  # 解除阶梯限流
 ```
 
 ### `batt_spoof`：为什么可以开，又为什么有硬上限
@@ -959,7 +959,7 @@ ADC，不是 thermal zone。所以：
 ### 排查：`diag`
 
 ```sh
-su -c 'sh /data/adb/modules/quickcharge/action.sh diag 180'
+su 0 sh -c 'sh /data/adb/modules/quickcharge/action.sh diag 180'
 ```
 
 插着电跑 3 分钟，输出在 `/sdcard/Download/qc-diag-*.txt`。每 2 秒一行：

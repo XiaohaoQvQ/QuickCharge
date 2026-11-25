@@ -65,20 +65,12 @@ typedef struct {
     int core_temp;
     int noncore_temp;
     int batt_spoof;      /* 0=off */
-    char wall[8];        /* "off" 或 35..80 */
-    int aggr;
-    int curr_max;
-    int curr_edge;
-    int battery_limit;   /* 0=off */
-    int sentinel_limit;  /* 0=off */
     int tick;
-    int fast_cap;
-    int horae;
+    int chg_unlock;       /* 1=压 0 解除 HAL 阶梯限流 */
     int log_level;
     char hz[8];          /* "off" 或数值 */
     int hz_hard;
     char hz_prev_mcfr[16];
-    int cool_guard;      /* 1=亮屏解除 oplus cool_down 降流 */
 } conf_t;
 
 static conf_t g_c;
@@ -102,6 +94,7 @@ static char g_shellproc[MAXPATH];
 
 /* 运行时状态文件，命名与 shell 版一致 */
 static char g_scr_orig[320], g_scr_way[320], g_scr_fail[320], g_fcc_norm[320];
+static char g_unlock_orig[320];
 static char g_curr_orig[320], g_curr_want[320];
 static char g_spoof_flag[320];
 static char g_sensor[320];
@@ -116,8 +109,6 @@ static char g_bl_list[16][MAXPATH];
 static int g_bl_cnt = -1;
 static int g_fb_blank = -1;
 
-static int g_last_pct = 100;
-static int g_wall_eff = 0;
 static char g_plat[8] = "";
 static int g_tick_n = 0;
 
@@ -129,8 +120,6 @@ static char g_tl_out[16] = "";
 static int g_emul_ok = -1;
 
 /* 熔断 */
-static int g_guard_paused = 0;
-static int g_cool_blind = 0;
 
 /* 上次成功应用的 core / noncore 目标，-1 表示未应用 */
 static int g_core_last = -1, g_nc_last = -1;
@@ -143,7 +132,6 @@ static int g_spoof_force = 0;
 /* 电池伪装 */
 static int g_batt_sp_on = 0;
 static int g_batt_sp_last = 0;
-static long g_batt_sp_hold = 0;
 
 /* 亮屏快充 */
 static int g_scr_on = 0;
@@ -166,6 +154,8 @@ static void on_usr1(int s) { (void)s; g_reload = 1; }
 static void sync_desc(void);
 /* 壳温写入带缓存，模式切换时要能重置 */
 static void shell_emul_reset(void);
+/* 降流解除要读电池电流，定义在快照段 */
+static long chg_current(void);
 
 /* 静态二进制拿不到 Android 的时区库（没有 /usr/share/zoneinfo），
  * localtime_r 会直接落到 UTC，日志比本地时间早 8 小时，和脚本打的行对不上。
@@ -302,8 +292,6 @@ static void mkdir_p(const char *p)
     mkdir(tmp, 0755);
 }
 
-static long now_sec(void) { return (long)time(NULL); }
-
 static int up_ticks(void)
 {
     char p[MAXPATH], b[64];
@@ -317,20 +305,12 @@ static void conf_defaults(void)
 {
     memset(&g_c, 0, sizeof g_c);
     snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "off");
-    snprintf(g_c.wall, sizeof g_c.wall, "60");
     snprintf(g_c.hz, sizeof g_c.hz, "off");
-    g_c.shell_temp = 30;
-    g_c.aggr = 10;
-    g_c.curr_max = 0;
-    g_c.curr_edge = 0;
-    g_c.battery_limit = 48;
-    g_c.sentinel_limit = 85;
+    g_c.shell_temp = 25;   /* 与 shell 侧 sd_shell_target 的缺省一致 */
     g_c.tick = 15;
-    g_c.fast_cap = 55;
-    g_c.horae = 1;
+    g_c.chg_unlock = 0;
     /* 默认事件级：0 只留 E，日志面板会空得没法排查 */
     g_c.log_level = 1;
-    g_c.cool_guard = 1;
 }
 
 static int parse_i(const char *v, int def)
@@ -343,19 +323,7 @@ static int parse_i(const char *v, int def)
     return (int)n;
 }
 
-/* wall: 35-59 是真实墙；60 与 off 都表示不设墙，由调用方按熔断前 1℃ 处理 */
-static int wall_of(const char *v)
-{
-    if (!v || !*v) return 60;
-    if (!strcmp(v, "off")) return 0;
-    char *e = NULL;
-    long n = strtol(v, &e, 10);
-    if (e == v) return 60;
-    if (n < 35) return 60;
-    if (n > 60) return 60;
-    return (int)n;
-}
-
+/* 只读 state.conf 里仍在用的键，删掉的键（wall/aggr/curr_max 等）出现也不认 */
 static void conf_load(void)
 {
     FILE *f = fopen(g_state, "r");
@@ -378,32 +346,17 @@ static void conf_load(void)
         else if (!strcmp(k, "core_temp")) g_c.core_temp = parse_i(v, 0);
         else if (!strcmp(k, "noncore_temp")) g_c.noncore_temp = parse_i(v, 0);
         else if (!strcmp(k, "batt_spoof")) g_c.batt_spoof = parse_i(v, 0);
-        else if (!strcmp(k, "wall")) snprintf(g_c.wall, sizeof g_c.wall, "%s", v);
-        else if (!strcmp(k, "aggr")) g_c.aggr = parse_i(v, 10);
-        else if (!strcmp(k, "curr_max")) g_c.curr_max = parse_i(v, 0);
-        else if (!strcmp(k, "curr_edge")) g_c.curr_edge = parse_i(v, 0);
-        else if (!strcmp(k, "battery_limit")) g_c.battery_limit = parse_i(v, 48);
-        else if (!strcmp(k, "sentinel_limit")) g_c.sentinel_limit = parse_i(v, 85);
         else if (!strcmp(k, "tick")) g_c.tick = parse_i(v, 15);
-        else if (!strcmp(k, "fast_cap")) g_c.fast_cap = parse_i(v, 55);
-        else if (!strcmp(k, "horae")) g_c.horae = parse_i(v, 1);
+        else if (!strcmp(k, "chg_unlock")) g_c.chg_unlock = parse_i(v, 0);
         else if (!strcmp(k, "log_level")) g_c.log_level = parse_i(v, 1);
         else if (!strcmp(k, "hz")) snprintf(g_c.hz, sizeof g_c.hz, "%s", v);
         else if (!strcmp(k, "hz_hard")) g_c.hz_hard = parse_i(v, 0);
         else if (!strcmp(k, "hz_prev_mcfr")) snprintf(g_c.hz_prev_mcfr, sizeof g_c.hz_prev_mcfr, "%s", v);
-        else if (!strcmp(k, "cool_guard")) g_c.cool_guard = parse_i(v, 1);
     }
     fclose(f);
 
     /* 与 shell 版 _sd_clamp 的兜底值保持一致 */
     if (g_c.tick < 5 || g_c.tick > 300) g_c.tick = 15;
-    if (g_c.curr_max < 0) g_c.curr_max = 0;
-    if (g_c.curr_max > 8000) g_c.curr_max = 8000;
-    if (g_c.curr_edge < 0 || g_c.curr_edge > 6) g_c.curr_edge = 0;
-    if (g_c.battery_limit < 30 || g_c.battery_limit > 70) g_c.battery_limit = 48;
-    if (g_c.sentinel_limit < 60 || g_c.sentinel_limit > 110) g_c.sentinel_limit = 85;
-    if (g_c.aggr < 0 || g_c.aggr > 10) g_c.aggr = 10;
-    if (g_c.fast_cap < 20 || g_c.fast_cap > 90) g_c.fast_cap = 55;
     if (g_c.shell_temp < 25 || g_c.shell_temp > 60) g_c.shell_temp = 30;
     if (g_c.log_level < 0 || g_c.log_level > 4) g_c.log_level = 1;
     if (g_c.temp_mode[0] == 0) snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "off");
@@ -643,19 +596,7 @@ static int batt_temp_ps(void)
         fclose(f);
     }
     return -1000;
-}
-
-static int batt_capacity(void)
-{
-    char b[32];
-    if (ps_attr("capacity", b, sizeof b) < 0) return -1;
-    char *e = NULL;
-    long v = strtol(b, &e, 10);
-    if (e == b) return -1;
-    return (int)v;
-}
-
-/* ------------------------------------------------------------------ 哨兵 */
+}/* ------------------------------------------------------------------ 哨兵 */
 
 /* 电池类温区分三档：0 = 电芯本体，1 = 其它 batt*，2 = 连接器/充电侧。
  * 一加/OPPO 上 batt-therm 挂在电池连接器旁，比电芯 NTC 高 8~12℃，
@@ -734,23 +675,6 @@ static int pick_sentinel(int *zi, int *cls_out)
     return -1;
 }
 
-/* 熔断专用：温区与电量计都读，取较高的一侧。
- * 展示用 batt_best 会偏向较低的电量计（连接器侧偏高），但保护逻辑不能赌，
- * 单点传感器异常或读数滞后就会变成漏熔断。 */
-static int batt_max(int zi, int *out)
-{
-    int zv = -1000, pv = -1000;
-    if (zi >= 0) {
-        zv = zone_temp(&g_z[zi]);
-        if (zv < 8 || zv > 90) zv = -1000;
-    }
-    pv = batt_temp_ps();
-    if (pv < 5 || pv > 80) pv = -1000;
-    if (pv > -100 && (zv < -100 || pv > zv)) { g_batt_ps = 1; *out = pv; return 0; }
-    if (zv > -100) { g_batt_ps = 0; *out = zv; return 0; }
-    return -1;
-}
-
 static int batt_spoof_on(void)
 {
     return g_c.batt_spoof >= 20 && g_c.batt_spoof <= 45;
@@ -773,27 +697,7 @@ static int sentinel_temp(int zi, int *out)
     return 0;
 }
 
-/* 熔断读数入口：电池类取两源较高值，其余温区只有一个源 */
-static int guard_temp(int zi, int *out)
-{
-    if (zi < 0) return -1;
-    if (g_z[zi].cls == C_BATTERY) {
-        if (batt_spoof_on()) {
-            int v = batt_temp_ps();
-            if (v > -100) { *out = v; return 0; }
-        }
-        return batt_max(zi, out);
-    }
-    return sentinel_temp(zi, out);
-}
-
-/* 与 sd_limit_for_type_v 一致：-1 表示关闭 */
-static int limit_for_type(int cls)
-{
-    if (cls == C_BATTERY) return g_c.battery_limit > 0 ? g_c.battery_limit : -1;
-    return g_c.sentinel_limit > 0 ? g_c.sentinel_limit : -1;
-}
-
+/* 熔断读数入口：电池类取两源较高值，其余温区只有一个源 *//* 与 sd_limit_for_type_v 一致：-1 表示关闭 */
 /* ------------------------------------------------------------------ 伪装 */
 
 static char g_spoof_dir[MAXPATH] = "/dev/qc";
@@ -1046,72 +950,8 @@ static void curr_prepare(void)
     }
 }
 
-/* 单位：读出值 >100000 视为 µA；路径特征兜底 */
-static int curr_is_ua(const char *path, int cur)
-{
-    if (cur > 100000) return 1;
-    if (strstr(path, "oplus_chg") || strstr(path, "input_current_limit") ||
-        strstr(path, "charger/current_max")) return 0;
-    return 1;
-}
-
-static int curr_read(const char *path, int *ma)
-{
-    int v;
-    if (read_int(path, &v) < 0) return -1;
-    if (v < 0) return -1;
-    *ma = v > 100000 ? v / 1000 : v;
-    return 0;
-}
-
-/* 目标电流：curr_max 按温度阶梯打折，逻辑同 sd_curr_target_v */
-static int curr_target(int *out_wall)
-{
-    int ma = g_c.curr_max;
-    if (ma <= 0) return 0;
-
-    int si = -1, si_cls = 0, cur = -1000;
-    if (pick_sentinel(&si, &si_cls) < 0) return ma;
-    if (sentinel_temp(si, &cur) < 0) return ma;
-
-    int wall = wall_of(g_c.wall);
-    int lim = limit_for_type(si_cls);
-    int l2 = lim > 0 ? lim : 48;
-    /* 默认顶墙：60/off 表示不设墙，直接用熔断前 1℃；自定义墙也不会超过它 */
-    if (wall <= 0 || wall >= 60) wall = l2 - 1;
-    if (wall > l2 - 1) wall = l2 - 1;
-    if (out_wall) *out_wall = wall;
-    g_wall_eff = wall;
-
-    /* 只留最后一级：到墙才 100%→75%。curr_edge 保留兼容旧配置，不再参与分档 */
-    int pct = 100;
-    if (cur >= wall) pct = 75;
-    g_last_pct = pct;
-    return ma * pct / 100;
-}
-
-/* curr.orig 里已经记过这个节点就不重复记 */
-static void curr_orig_save(const char *path, const char *raw)
-{
-    FILE *f = fopen(g_curr_orig, "r");
-    if (f) {
-        char line[400];
-        while (fgets(line, sizeof line, f)) {
-            char *bar = strchr(line, '|');
-            if (bar) *bar = 0;
-            if (!strcmp(line, path)) { fclose(f); return; }
-        }
-        fclose(f);
-    }
-    int fd = open(g_curr_orig, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-    if (fd < 0) return;
-    char line[400];
-    int n = snprintf(line, sizeof line, "%s|%s\n", path, raw);
-    if (write(fd, line, n) < 0) { /* 记录失败不影响限流 */ }
-    close(fd);
-}
-
-static void curr_restore(void)
+/* 单位：读出值 >100000 视为 µA；路径特征兜底 *//* 目标电流：curr_max 按温度阶梯打折，逻辑同 sd_curr_target_v */
+/* curr.orig 里已经记过这个节点就不重复记 */static void curr_restore(void)
 {
     FILE *f = fopen(g_curr_orig, "r");
     int n = 0;
@@ -1132,48 +972,6 @@ static void curr_restore(void)
     }
     unlink(g_curr_want);
     if (n) log_msg("I", "charge", "限流已关闭，还原 %d 个节点", n);
-}
-
-static void curr_keep(void)
-{
-    int wall = 0;
-    int want = curr_target(&wall);
-
-    if (want <= 0) {
-        if (access(g_curr_orig, F_OK) == 0) curr_restore();
-        else unlink(g_curr_want);
-        return;
-    }
-
-    char lastb[32] = "";
-    read_line(g_curr_want, lastb, sizeof lastb);
-    int has_last = lastb[0] != 0;
-    int last = has_last ? atoi(lastb) : 0;
-
-    curr_prepare();
-    int ok = 0;
-    for (int i = 0; i < g_curr_n; i++) {
-        const char *path = g_curr_nodes[i];
-        if (access(path, F_OK) != 0) continue;
-        int cur = 0;
-        if (curr_read(path, &cur) < 0) continue;
-        int v = curr_is_ua(path, cur) ? want * 1000 : want;
-        if (!has_last || want != last || cur > v * 11 / 10) {
-            if (cur == v) continue;
-            char raw[32];
-            read_line(path, raw, sizeof raw);
-            if (raw[0]) curr_orig_save(path, raw);
-            char b[32];
-            snprintf(b, sizeof b, "%d\n", v);
-            if (write_str(path, b) == 0) ok++;
-        }
-    }
-    if (!has_last || want != last) {
-        char b[32];
-        snprintf(b, sizeof b, "%d\n", want);
-        write_str(g_curr_want, b);
-    }
-    if (ok) log_msg("I", "charge", "电流墙 → %dmA（%d 节点，墙 %d℃）", want, ok, wall);
 }
 
 /* ------------------------------------------------------------------ 亮屏快充 */
@@ -1257,16 +1055,9 @@ static int scr_target(int *tgt)
     int n = atoi(b);
     if (n <= 0) return 2;
     if (n > 8000) n = 8000;
-
-    int bt = batt_temp_ps();
-    /* 默认满速：38/41℃ 两档折损已取消，只在熔断前 1℃ 放手 */
-    int lim = g_c.battery_limit > 0 ? g_c.battery_limit : 48;
-    if (bt > -100 && bt >= lim - 1) return 3;
+    /* 不看电池温度：亮屏就按息屏学到的峰值顶回去 */
     *tgt = n;
     return *tgt >= 500 ? 0 : 2;
-
-    if (*tgt < 500) return 2;
-    return 0;
 }
 
 static void scr_release(void)
@@ -1365,8 +1156,7 @@ static int scr_apply(void)
     }
 
     if (access(g_scr_orig, F_OK) != 0) {
-        char raw[32] = "";
-        read_line(fcc, raw, sizeof raw);
+        /* 复用上面为判断单位读过的同一份原文，不再重读节点 */
         if (!raw[0]) snprintf(raw, sizeof raw, "%d", cur);
         scr_save_orig(fcc, raw);
     }
@@ -1404,12 +1194,6 @@ static void scr_tick(void)
         return;
     }
 
-    /* 限流或熔断期间不抢 FCC，避免两个策略互相覆盖 */
-    if (g_guard_paused || g_c.curr_max > 0) {
-        if (scr_active()) { scr_release(); logged[0] = 0; }
-        return;
-    }
-
     if (!g_screen_on) {
         scr_learn();
         /* 内核参数那条一写就是「永久忽略屏幕」，息屏还原给驱动按正常 FCC 走；
@@ -1421,17 +1205,7 @@ static void scr_tick(void)
         }
     }
 
-    int bt = batt_temp_ps();
-    int hot = g_c.battery_limit > 0 ? g_c.battery_limit - 1 : 47;
-    if (bt > -100 && bt >= hot) {
-        if (scr_active()) scr_release();
-        if (strcmp(logged, "hot")) {
-            log_msg("W", "charge", "亮屏快充：电池 %d℃ 达到 %d℃，暂停接管", bt, hot);
-            snprintf(logged, sizeof logged, "hot");
-        }
-        return;
-    }
-    if (!strcmp(logged, "hot")) logged[0] = 0;
+    /* 不设温度闸：亮屏就接管，直到没在充电为止 */
 
     switch (scr_apply()) {
         case 0: {
@@ -1521,8 +1295,6 @@ static void cool_tick(void)
 {
     char node[MAXPATH];
 
-    if (!g_c.cool_guard) return;
-
     if (cool_node(node, sizeof node) < 0) {
         if (g_cool_logged != -1) {
             log_msg("W", "charge", "降流解除：本机没有 cool_down 节点，跳过");
@@ -1535,46 +1307,122 @@ static void cool_tick(void)
     batt_status(st, sizeof st);
     if (strcmp(st, "Charging") && strcmp(st, "Full")) return;
 
-    /* 不再看屏幕状态：有的机型亮度节点恒读 0，判定成灭屏后这里直接 return，
-     * cool_down 就永远停在 7~13，亮屏游戏只剩 5~10W。灭屏时驱动本来给 0，
-     * 写 0 对它是空操作，没有副作用。 */
-
-    int bt = batt_temp_ps();
-    /* 默认极限：45℃ 不再留「轻度降流」，到熔断前 1℃ 才交还驱动 */
-    int stop = g_c.battery_limit > 0 ? g_c.battery_limit - 1 : 47;
-    int soft = stop;
-    if (bt > -100 && bt >= stop) {        /* 过热：彻底放手 */
-        if (g_cool_logged != -2) {
-            log_msg("W", "charge", "降流解除：电池 %d℃ 过热，交还驱动控制", bt);
-            g_cool_logged = -2;
-        }
-        return;
-    }
-
-    int cap = batt_capacity();
-    int want;
-    /* 电量 ≥85% 曾经写 1（"恒压段只轻放"）。实测这条会掉协议：
-     * PKX110 上 cool_down 0→1 之后 charge_technology 从 7 变成 14、
-     * 电流从 3.6A 掉到 1.0A，功率 32W → 9W。恒压段电流本来就由驱动
-     * 收，不需要再加一档降流，所以只在真过热（≥45℃）时才留 2。 */
-    if (bt > -100 && bt >= soft) want = 2;  /* 偏热：留轻度降流（极限模式 soft=熔断前1℃） */
-    else want = 0;
-
+    /* 不看温度、不看电量：节点只要被抬起来就压回 0 */
     int cur = 0;
     if (read_int(node, &cur) < 0) return;
-    if (cur == want) return;
+    if (cur == 0) return;
 
-    char b[16];
-    snprintf(b, sizeof b, "%d\n", want);
-    if (write_str(node, b) == 0) {
-        if (g_cool_logged != want) {
-            log_msg("I", "charge", "降流解除：cool_down %d → %d（电池 %d℃ 电量 %d%%）",
-                    cur, want, bt, cap);
-            g_cool_logged = want;
+    /* 电流已经正常就别碰这个节点：写入本身会让 OPlus 重选档。
+     * 实测 PKB110：ibat 4.3A 时被写 2→0，三秒后掉到 9.7W 并一路抖到 6W。
+     * 只有确实被降流（<2.5A）时，写 0 才是"解降流"。 */
+    long iab = chg_current();
+    if (iab < 0) iab = -iab;
+    if (iab >= 2500000) return;
+
+    int bt = batt_temp_ps();
+    if (write_str(node, "0\n") == 0) {
+        if (g_cool_logged != 0) {
+            log_msg("I", "charge", "降流解除：cool_down %d → 0（电池 %d℃ 电流 %ldmA）",
+                    cur, bt > -100 ? bt : 0, iab / 1000);
+            g_cool_logged = 0;
         }
     } else if (g_cool_logged != -3) {
         log_msg("W", "charge", "降流解除失败：%s 写不进去", node);
         g_cool_logged = -3;
+    }
+}
+
+/* ---------------------------------------------------------------- 阶梯解锁 */
+/* 系统 thermal HAL 会按温度写 charge_control_limit / thermal_charging /
+ * step_charging。这里压 0 表示不限流；原值备份到 run/unlock.orig，关闭时还原。
+ * 刻意不碰 usb/current_max（写它会打断 PD/VOOC 协商）与 cool_down（见 cool_tick）。 */
+static void unlock_restore(void)
+{
+    FILE *f = fopen(g_unlock_orig, "r");
+    int n = 0;
+    if (f) {
+        char line[400];
+        while (fgets(line, sizeof line, f)) {
+            char *bar = strchr(line, '|');
+            if (!bar) continue;
+            *bar = 0;
+            char *val = bar + 1;
+            char *e = val + strlen(val);
+            while (e > val && (e[-1] == '\n' || e[-1] == '\r')) *--e = 0;
+            if (!line[0] || !val[0]) continue;
+            if (access(line, F_OK) == 0 && write_str(line, val) == 0) n++;
+        }
+        fclose(f);
+        unlink(g_unlock_orig);
+    }
+    if (n) log_msg("D", "charge", "阶梯解锁：还原 %d 个节点", n);
+}
+
+static void unlock_note(const char *path, int cur)
+{
+    FILE *f = fopen(g_unlock_orig, "r");
+    if (f) {
+        char line[400];
+        int dup = 0;
+        while (fgets(line, sizeof line, f)) {
+            char *bar = strchr(line, '|');
+            if (bar) *bar = 0;
+            if (!strcmp(line, path)) { dup = 1; break; }
+        }
+        fclose(f);
+        if (dup) return;
+    }
+    int fd = open(g_unlock_orig, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    char line[400];
+    int m = snprintf(line, sizeof line, "%s|%d\n", path, cur);
+    if (write(fd, line, m) < 0) { /* 记录失败不影响限流 */ }
+    close(fd);
+}
+
+static void unlock_tick(void)
+{
+    static const char *rel[] = {
+        "battery/charge_control_limit",
+        "battery/thermal_charging",
+        "battery/step_charging",
+        NULL
+    };
+    static const char *oplus[] = {
+        "battery/thermal_charging",
+        "battery/step_charging",
+        NULL
+    };
+
+    if (g_c.chg_unlock != 1) { unlock_restore(); return; }
+
+    int n = 0;
+    char p[MAXPATH + 64];
+    for (int i = 0; rel[i]; i++) {
+        snprintf(p, sizeof p, "%s/%s", g_ps, rel[i]);
+        if (access(p, F_OK) != 0 || access(p, W_OK) != 0) continue;
+        int cur = 0;
+        if (read_int(p, &cur) < 0) continue;
+        if (cur == 0) continue;
+        unlock_note(p, cur);
+        if (write_str(p, "0\n") == 0) n++;
+    }
+    for (int i = 0; oplus[i]; i++) {
+        snprintf(p, sizeof p, "%s/%s", g_oplus, oplus[i]);
+        if (access(p, F_OK) != 0 || access(p, W_OK) != 0) continue;
+        int cur = 0;
+        if (read_int(p, &cur) < 0) continue;
+        if (cur == 0) continue;
+        unlock_note(p, cur);
+        if (write_str(p, "0\n") == 0) n++;
+    }
+
+    /* HAL 可能过一轮又写回去，这里会再压 0；日志按分钟节流 */
+    static long last = 0;
+    long now = (long)time(NULL);
+    if (n > 0 && now - last >= 60) {
+        log_msg("I", "charge", "阶梯解锁：%d 个节点写 0（原值备份在 run/unlock.orig）", n);
+        last = now;
     }
 }
 
@@ -1671,6 +1519,19 @@ static long bcc_current(void)
 
 /* 电池电流，统一 µA：bcc 优先，再回退 current_now / bms / current_avg。
  * bcc 绝对值小于 50mA 视为噪声（有的机型第 9 段不是总电流），继续往下找更大的值。 */
+/* 有的机型 current_now 报 mA、有的报 µA，判据与 shell 侧 sd_uv_norm 一致：
+ * 0 < |v| < 20000 一定是 mA。不归一的话 cool_tick 的 2.5A 闸在报 mA 的机型上
+ * 永远放行（3000 < 2500000），4A 正常充电也会被当成"已降流"去写 0。 */
+static long ua_norm(long v)
+{
+    long a = v < 0 ? -v : v;
+    if (a > 0 && a < 20000) {
+        long t = a * 1000;
+        if (t >= 100000 && t <= 30000000) return v < 0 ? -t : t;
+    }
+    return v;
+}
+
 static long chg_current(void)
 {
     long best = 0, babs = 0;
@@ -1682,17 +1543,20 @@ static long chg_current(void)
     }
     long c;
     if (ps_num("current_now", &c) == 0 && c != 0) {
+        c = ua_norm(c);
         long a = c < 0 ? -c : c;
         if (a > babs) { best = c; babs = a; }
     }
     char p[MAXPATH + 32];
     snprintf(p, sizeof p, "%s/bms/current_now", g_ps);
     if (path_num(p, &c) == 0 && c != 0) {
+        c = ua_norm(c);
         long a = c < 0 ? -c : c;
         if (a > babs) { best = c; babs = a; }
     }
     snprintf(p, sizeof p, "%s/battery/current_avg", g_ps);
     if (path_num(p, &c) == 0 && c != 0) {
+        c = ua_norm(c);
         long a = c < 0 ? -c : c;
         if (a > babs) { best = c; babs = a; }
     }
@@ -1933,9 +1797,9 @@ static int screen_sample(void)
             NULL
         };
         char q[MAXPATH];
-        for (int i = 0; fb_rel[i]; i++) {
-            if (i == 0 && g_fb[0]) snprintf(q, sizeof q, "%s", g_fb);
-            else snprintf(q, sizeof q, "%s%s", g_sys, fb_rel[i]);
+        for (int k = 0; fb_rel[k]; k++) {
+            if (k == 0 && g_fb[0]) snprintf(q, sizeof q, "%s", g_fb);
+            else snprintf(q, sizeof q, "%s%s", g_sys, fb_rel[k]);
             if (read_int(q, &v) == 0) { g_fb_blank = v == 0 ? 1 : 0; return g_fb_blank; }
         }
     }
@@ -1961,112 +1825,7 @@ static void screen_tick(void)
 /* ------------------------------------------------------------------ 熔断 */
 
 /* xo-therm 或电池类才算熔断来源，与 sd_zone_is_guard_src 一致 */
-static int is_guard_src(const char *t)
-{
-    if (!t) return 0;
-    if (!strncmp(t, "xo-therm", 8) || !strncmp(t, "xtherm", 6)) return 1;
-    return cls_of(t) == C_BATTERY;
-}
-
-static int guard_one(int zi, const char *type)
-{
-    int lim = limit_for_type(cls_of(type));
-    if (lim <= 0) return 0;
-    int cur = 0;
-    if (guard_temp(zi, &cur) < 0) return 0;
-    if (cur < lim) return 0;
-
-    log_msg("W", "guard", "熔断：哨兵 %s 实测 %d℃ ≥ 上限 %d℃", g_z[zi].path + strlen(g_therm) + 1, cur, lim);
-    spoof_clear();
-    shell_emul(0);
-    g_guard_paused = 1;
-    log_msg("W", "guard", "已暂停伪装，温度回落后自动恢复（配置未改动）");
-    return 1;
-}
-
 /* 回差 3℃ 才恢复，且读不到温度时保持熔断（不猜安全） */
-static int guard_cooled(void)
-{
-    int checked = 0, ok = 1, blind = 0;
-    for (int i = 0; i < g_zn; i++) {
-        if (!is_guard_src(g_z[i].type)) continue;
-        if (zone_temp(&g_z[i]) < -100) continue;
-        int lim = limit_for_type(g_z[i].cls);
-        if (lim <= 0) continue;
-        checked++;
-        int cur = 0;
-        if (guard_temp(i, &cur) < 0) { ok = 0; blind = 1; continue; }
-        if (cur + 3 > lim) ok = 0;
-    }
-    if (!checked) {
-        int lim = limit_for_type(C_BATTERY);
-        if (lim > 0) {
-            int v = batt_temp_ps();
-            if (v > -100) { checked = 1; if (v + 3 > lim) ok = 0; }
-            else { ok = 0; blind = 1; }
-        }
-    }
-    if (blind && !ok) {
-        if (!g_cool_blind) { g_cool_blind = 1; log_msg("W", "guard", "熔断复查读不到温度，暂时保持熔断"); }
-    } else g_cool_blind = 0;
-    return checked > 0 && ok;
-}
-
-static int sentinel_guard(void)
-{
-    if (g_guard_paused) {
-        if (guard_cooled()) {
-            g_guard_paused = 0;
-            log_msg("I", "guard", "温度已回落，恢复伪装");
-            g_core_last = g_nc_last = -1;
-            if (g_c.core_temp >= 20) spoof_apply(SC_CORE, g_c.core_temp, 0);
-            if (g_c.noncore_temp >= 20) spoof_apply(SC_NONCORE, g_c.noncore_temp, 0);
-            if (batt_spoof_on()) {
-                g_spoof_ok[SC_BATT] = 0;
-                spoof_apply(SC_BATT, g_c.batt_spoof, 0);
-                g_batt_sp_on = 1;
-                g_batt_sp_last = g_c.batt_spoof;
-            }
-            sync_desc();
-        } else return 0;
-    }
-
-    if (!strcmp(g_c.temp_mode, "off") && g_c.core_temp < 20 && g_c.noncore_temp < 20)
-        return 1;
-
-    int checked = 0, fb = -1;
-    char fb_t[64] = "";
-    for (int i = 0; i < g_zn; i++) {
-        zone_t *z = &g_z[i];
-        if (zone_temp(z) < -100) continue;
-        if (is_guard_src(z->type)) {
-            checked = 1;
-            if (guard_one(i, z->type)) return 0;
-            continue;
-        }
-        if (z->cls == C_CORE || z->cls == C_SHELL) continue;
-        if (fb < 0 && !is_hot_load(z->type)) { fb = i; snprintf(fb_t, sizeof fb_t, "%s", z->type); }
-    }
-    if (!checked) {
-        int v = batt_temp_ps();
-        if (v > -100) {
-            checked = 1;
-            int lim = limit_for_type(C_BATTERY);
-            if (lim > 0 && v >= lim) {
-                log_msg("W", "guard", "熔断：电量计 %d℃ ≥ 上限 %d℃", v, lim);
-                spoof_clear();
-                shell_emul(0);
-                g_guard_paused = 1;
-                return 0;
-            }
-        }
-    }
-    if (!checked && fb >= 0) {
-        if (guard_one(fb, fb_t)) return 0;
-    }
-    return 1;
-}
-
 /* ------------------------------------------------------------------ 电池伪装 */
 
 static void batt_sp_off(void)
@@ -2086,23 +1845,7 @@ static void batt_sp_guard(void)
     if (want < 20 || want > 45) { batt_sp_off(); return; }
     if (!strcmp(g_c.temp_mode, "off")) { batt_sp_off(); return; }
 
-    int real = batt_temp_ps();
-    if (real < -100) {
-        batt_sp_off();
-        g_c.batt_spoof = 0;
-        state_set("batt_spoof", "off");
-        log_msg("W", "guard", "读不到真实电池温度（power_supply），已关闭电池伪装");
-        return;
-    }
-    long now = now_sec();
-    if (real >= 46) {
-        batt_sp_off();
-        g_batt_sp_hold = now + 120;
-        log_msg("W", "guard", "真实电池 %d℃ ≥ 硬上限 46℃，撤销电池伪装并冷却 120s", real);
-        return;
-    }
-    if (g_batt_sp_hold > now) { batt_sp_off(); return; }
-
+    /* 不看真实温度：开着就一直伪装，满速优先 */
     if (want == g_batt_sp_last && g_batt_sp_on) return;
     if (spoof_apply(SC_BATT, want, 1) == 0) {
         g_batt_sp_last = want;
@@ -2140,83 +1883,48 @@ static void hb_write(void)
 static int shell_target(void)
 {
     int base = g_c.shell_temp;
-    int gap = 2 + g_c.aggr;
-    int wall = wall_of(g_c.wall);
 
     g_tl_out[0] = 0;
     g_tl_real[0] = 0;
     g_tl_lim[0] = 0;
     g_tl_zone[0] = 0;
 
-    int cur = -1000, lim = -1;
+    /* 真实读数只用于遥测与日志，不再参与决策 */
+    int cur = -1000;
     int bz = -1;
     if (pick_batt_zone(&bz) == 0) {
         const char *nm = strrchr(g_z[bz].path, '/');
         snprintf(g_tl_zone, sizeof g_tl_zone, "%s", nm ? nm + 1 : g_z[bz].path);
-        /* 必须走 sentinel_temp：电池伪装开着时要读电量计，否则拿到的是自己写的假值 */
+        /* 电池伪装开着时要读电量计，否则拿到的是自己写的假值 */
         if (sentinel_temp(bz, &cur) < 0) cur = -1000;
         if (g_batt_ps || batt_spoof_on()) snprintf(g_tl_zone, sizeof g_tl_zone, "battery(ps)");
-        lim = limit_for_type(C_BATTERY);
     } else {
         int v = batt_temp_ps();
         if (v > -100) {
             cur = v;
             snprintf(g_tl_zone, sizeof g_tl_zone, "battery(ps)");
-            lim = limit_for_type(C_BATTERY);
         } else {
             int si = -1, sc = 0;
             if (pick_sentinel(&si, &sc) == 0) {
                 const char *nm = strrchr(g_z[si].path, '/');
                 snprintf(g_tl_zone, sizeof g_tl_zone, "%s", nm ? nm + 1 : g_z[si].path);
                 if (sentinel_temp(si, &cur) < 0) cur = -1000;
-                lim = limit_for_type(sc);
             }
         }
     }
-
-    if (cur < -100) {
+    if (cur > -100) {
+        g_temp_fail = 0;
+        snprintf(g_tl_real, sizeof g_tl_real, "%d", cur);
+    } else {
         g_temp_fail++;
-        snprintf(g_tl_out, sizeof g_tl_out, "0");
-        return 0;
-    }
-    g_temp_fail = 0;
-    snprintf(g_tl_real, sizeof g_tl_real, "%d", cur);
-    if (lim > 0) snprintf(g_tl_lim, sizeof g_tl_lim, "%d", lim);
-
-    /* 熔断关闭时不设屏障，只做 gap 压制 */
-    if (lim <= 0) {
-        if (base > cur) base = cur;
-        snprintf(g_tl_out, sizeof g_tl_out, "%d", base);
-        return base;
     }
 
-    if (wall >= 60) wall = 0;      /* 60 = 不设墙 */
-    int barrier = wall > 0 ? wall : lim - 1;
-    if (barrier > lim - 1) barrier = lim - 1;
-    if (base >= barrier) {
-        base = barrier - 2;
-        if (base < 25) base = 25;
-    }
-
-    if (cur >= barrier) {
-        snprintf(g_tl_out, sizeof g_tl_out, "0");
-        return 0;
-    }
-
-    int room = barrier - cur;
-    int v = base;
-    if (cur - gap > v) v = cur - gap;
-    if (room < 4 && barrier > base) {
-        int climb = base + (barrier - base) * (4 - room) / 4;
-        if (climb > v) v = climb;
-    }
-    if (v > cur) v = cur;
-    if (v < 20) {
-        snprintf(g_tl_out, sizeof g_tl_out, "0");
-        return 0;
-    }
-    snprintf(g_tl_out, sizeof g_tl_out, "%d", v);
-    return v;
+    /* 极速模式：恒定伪装，不看真实温度、不设温度墙、不设熔断线。
+     * 下限 20℃：再低不少平台判 NTC 开路，反而锁 5V/500mA，比不伪装更慢。 */
+    if (base < 20) base = 20;
+    if (base > 33) base = 33;
+    snprintf(g_tl_out, sizeof g_tl_out, "%d", base);
+    return base;
 }
 
 /* 与 sd_charge_tick 一致：只有电芯没到 fast_cap 才接管壳温 */
@@ -2229,14 +1937,8 @@ static void charge_tick(void)
         g_tl_real[0] = g_tl_out[0] = g_tl_lim[0] = g_tl_zone[0] = 0;
         return;
     }
-    int cap = batt_capacity();
-    if (cap >= 0 && cap < g_c.fast_cap) shell_emul(shell_target());
-    else {
-        shell_emul(0);
-        /* 已到 fast_cap，壳温交给系统；遥测里只保留真实温度，out 记 0 */
-        shell_target();
-        g_tl_out[0] = 0;
-    }
+    /* 不设电量阈值：插着电就一直伪装，充到 100% 也不再交还 */
+    shell_emul(shell_target());
 }
 
 /* ------------------------------------------------------------------ 高刷 */
@@ -2439,8 +2141,7 @@ static void desc_build(char *out, size_t n)
     int mode_static = !strcmp(g_c.temp_mode, "static");
     int mode_charge = !strcmp(g_c.temp_mode, "charge");
 
-    if (mode_static) snprintf(gear, sizeof gear, "温控档位 %d/10", g_c.aggr);
-    else if (mode_charge) snprintf(gear, sizeof gear, "温控档位 %d/10（仅充电）", g_c.aggr);
+    if (mode_static || mode_charge) snprintf(gear, sizeof gear, "温度伪装 %d℃", g_c.shell_temp);
     else snprintf(gear, sizeof gear, "温度伪装关闭");
 
     int hv = hz_want();
@@ -2569,8 +2270,9 @@ static void restore_all(void)
     shell_emul(0);
     scr_release();
     curr_restore();
+    unlock_restore();
     g_batt_sp_on = 0;
-    log_msg("I", "daemon", "收到退出信号，伪装/限流/屏幕状态已还原");
+    log_msg("I", "daemon", "收到退出信号，伪装/限流/屏幕/阶梯状态已还原");
 }
 
 /* ------------------------------------------------------------------ 主循环 */
@@ -2616,6 +2318,7 @@ static void paths_init(void)
     snprintf(g_scr_way, sizeof g_scr_way, "%s/scr.way", g_run);
     snprintf(g_scr_fail, sizeof g_scr_fail, "%s/scr.fail", g_run);
     snprintf(g_fcc_norm, sizeof g_fcc_norm, "%s/fcc.norm", g_run);
+    snprintf(g_unlock_orig, sizeof g_unlock_orig, "%s/unlock.orig", g_run);
     snprintf(g_curr_orig, sizeof g_curr_orig, "%s/curr.orig", g_run);
     snprintf(g_curr_want, sizeof g_curr_want, "%s/curr.want", g_run);
     snprintf(g_spoof_flag, sizeof g_spoof_flag, "%s/spoof.pending", g_run);
@@ -2655,7 +2358,7 @@ static void apply_core_nc(int force)
  * 以前只在亮屏时压，但屏幕判定靠不住，改成充电即压。 */
 static int next_tick(int charging)
 {
-    if (charging && g_c.cool_guard) return 3;
+    if (charging) return 3;
     return charging ? 10 : g_c.tick;
 }
 
@@ -2685,19 +2388,13 @@ static int loop_once(int *mode_changed)
     char st[32];
     batt_status(st, sizeof st);
     int charging = !strcmp(st, "Charging") || !strcmp(st, "Full");
-    if (charging) curr_keep();
 
     scr_tick();
     cool_tick();
+    unlock_tick();
     chg_snapshot(charging);
     spoof_pending();
     batt_sp_guard();
-
-    if (!sentinel_guard()) {
-        hb_write();
-        telemetry();
-        return next_tick(charging);
-    }
 
     if (strcmp(g_c.temp_mode, last_mode)) {
         log_msg("I", "daemon", "温度模式: %s → %s",
@@ -2705,7 +2402,6 @@ static int loop_once(int *mode_changed)
         snprintf(last_mode, sizeof last_mode, "%s", g_c.temp_mode);
         /* 换模式后壳温缓存必须作废，否则新值恰好等于旧值时不写 */
         shell_emul_reset();
-        g_last_pct = 100;
         if (mode_changed) *mode_changed = 1;
     }
 
@@ -2886,9 +2582,6 @@ int main(int argc, char **argv)
                    g_tl_lim[0] ? g_tl_lim : "-",
                    g_tl_zone[0] ? g_tl_zone : "-", g_tl_out);
             (void)out;
-            int wall = 0;
-            int tgt = curr_target(&wall);
-            printf("wall=%d curr_target=%d\n", wall, tgt);
             return 0;
         }
         if (!strcmp(argv[1], "chg")) {
@@ -2909,14 +2602,11 @@ int main(int argc, char **argv)
             char st[32];
             batt_status(st, sizeof st);
             int charging = !strcmp(st, "Charging") || !strcmp(st, "Full");
-            if (charging) curr_keep();
-            scr_tick();
+                    scr_tick();
             cool_tick();
             batt_sp_guard();
-            if (sentinel_guard()) {
-                if (!strcmp(g_c.temp_mode, "static")) shell_emul(shell_target());
-                else if (!strcmp(g_c.temp_mode, "charge")) charge_tick();
-            }
+            if (!strcmp(g_c.temp_mode, "static")) shell_emul(shell_target());
+            else if (!strcmp(g_c.temp_mode, "charge")) charge_tick();
             hb_write();
             telemetry();
             sync_desc();

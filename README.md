@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`3.0.12`（`versionCode 300025`），C 版为 `3.0.12-c`
+- 当前版本：`3.1.0`（`versionCode 301001`），C 版为 `3.1.0-c`
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -25,7 +25,8 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 | 温度伪装 | 守护进程周期性写 `thermal_zone*/emul_temp` 与 `/proc/shell-temp`；没有 `emul_temp` 的温区改用假温度文件 bind 覆盖 `temp` | `boot_completed` 之后 | 卸载、`emul_temp` 归零、解除 bind |
 
 配置改写管的是"系统以为自己在什么条件下该降频"，温度伪装管的是"系统以为现在多少度"。
-前者是静态的、开机定死；后者是动态的、每 15 秒跟着真实温度走。
+前者是静态的、开机定死；后者是动态的，3.1.0 起**恒定**上报同一个值——不看真实读数，
+插着电就一直让系统以为电池很凉。
 
 原始文件一律备份，从不直接改。`uninstall.sh` 会逐项还原。
 
@@ -36,7 +37,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 这个守护进程每 15 秒读几十个 sysfs 小文件、算一遍目标、偶尔写几个节点。
 用 shell 写它有实打实的代价（每轮 4 次 fork、1.3 ms），但换来三件事：
 
-**能读。** 全部逻辑在 `lib/qc.sh` 一个文件里，4147 行，没有编译产物。想知道"为什么
+**能读。** 全部逻辑在 `lib/qc.sh` 一个文件里，3921 行，没有编译产物。想知道"为什么
 我的手机没效果"，`grep` 一下就能找到判定分支。
 
 **能改。** 现场发现某个机型的温区名字不一样，改一行正则、`action.sh restart` 就生效。
@@ -119,21 +120,21 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 | 实时状态 | 真实 / 系统看到 / 配置 / 守护 四格，下面一行结论文案 |
 | 实时功耗 | 电流、功率、电池温度，附一条只在页面打开时采样的曲线 |
 | 温控改写范围 | 全局运行 / 仅充电 / 关闭 三个按钮 |
-| 核心参数 | 档位、温度墙（60 = 无限制）、基准温度、熔断阈值（电池 / 主板） |
-| 极限功率 | 电池 NTC 伪装、取消阶梯限流、CPU 伪装，默认「安全边界未动」 |
+| 核心参数 | 只留一个「伪装温度」滑块（20 到 33℃），恒定上报 |
+| 极限功率 | 电池 NTC 伪装、取消阶梯限流、CPU 伪装 |
 | 刷新率 | 6 格滑块 + 强制锁定 |
 | 诊断日志 | 关闭 / 详细 两个按钮，点详细才开日志 |
 | 操作 | 刷新 / 重挂 / 重启守护 三个按钮一行 |
 
-状态卡那行结论只给数字关系，不给形容词：`真实 41℃ → 系统看到 28℃`、
-`真实 41℃ < 基准 43℃`、`真实 46℃ ≥ 墙 45℃ · 交回系统`、`待机中 · 插电后接管`、
-`写入失败 · 系统仍读真实温度`。两个数不一样就是在骗系统，一样就是没改写。
+状态卡那行结论只给数字关系，不给形容词：`真实 41℃ → 系统看到 25℃`、
+`恒定 25℃ · 不看真实温度`、`待机中 · 插电后接管`、`写入失败 · 系统仍读真实温度`。
+两个数不一样就是在骗系统，一样就是没改写。
 
 **模块描述页也会显示状态**。管理器模块列表里那一行 `description` 由守护同步，三种写法：
 
 | 场景 | 显示 |
 |---|---|
-| 正常运行 | `✅ 运行中 · 温控档位 8/10 · 高刷 120Hz · 配置 9 项` |
+| 正常运行 | `✅ 运行中 · 温度伪装 25℃ · 高刷 120Hz · 配置 9 项` |
 | 刚装完 / 刚更新 | `❌ 请重启 · 重启后开始工作` |
 | 没运行 / 卡死 | `❌ 未运行 · 把 /data/adb/quickcharge/ 的日志发给作者` |
 
@@ -147,10 +148,14 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 |---|---|---|
 | `off` | 完全不伪装，只保留配置改写 | 想验证配置改写本身是否生效 |
 | `charge` | **仅插电时**伪装，拔电还原真实读数 | 默认，日常使用 |
-| `static` | 一直伪装到 `shell_temp`（默认 30℃） | 游戏、长时间高负载 |
+| `static` | 一直伪装到 `shell_temp`（默认 25℃） | 游戏、长时间高负载 |
 
 `charge` 是默认值，也是最"无感"的：温度只在充电时被改写，平时系统看到的是真实值，
 不会影响调度和风扇策略。
+
+两种模式伪装时都写**同一个恒定值**：不跟真实温度走、不设温度墙、不设熔断线、
+不按电量退出。想让系统以为电池更凉，就把 `shell_temp` 往下调（最低 20℃——再低
+不少平台会把 NTC 判成开路，反而锁 5V/500mA）。
 
 ---
 
@@ -162,27 +167,22 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 | 参数 | 默认 | 范围 | 说明 |
 |---|---|---|---|
 | `temp_mode` | `charge` | off / charge / static | 温度模式 |
-| `shell_temp` | `30` | 25 到 60 | `static` 模式的目标壳温 |
+| `shell_temp` | `25` | 20 到 33 | 伪装温度（恒定上报这个值） |
 | `core_temp` | `off` | off / 20 到 100 | CPU / GPU / DDR 固定伪装 |
 | `noncore_temp` | `off` | off / 20 到 100 | 其它温区固定伪装 |
-| `wall` | `60` | 35 到 60 | 温度墙：真实温度到此停止伪装；60 = 无限制（熔断前 1℃） |
-| `aggr` | `10` | 0 到 10 | 温控档位，越高越激进（CLI 里叫 `gear`） |
-| `curr_max` | `0` | 0 / 300 到 8000 | 充电限流 mA，0 = 不限（面板没有滑块，改这里） |
-| `curr_edge` | `0` | 0 到 6 | 兼容保留：默认 0。电流分四档（墙-3 / 墙-1 / 墙），不读这个值 |
-| `fast_cap` | `55` | 20 到 90 | 快充生效的电量阈值 % |
-| `battery_limit` | `48` | 30 到 70 | 电池哨兵熔断阈值 ℃ |
-| `sentinel_limit` | `85` | 60 到 110 | SoC / 主板哨兵熔断阈值 ℃ |
 | `hz` | `off` | 60 到 185 / off | 刷新率 |
-| `tick` | `15` | 5 到 300 | 守护轮询间隔（秒），`charge` 模式固定 10s 不受它影响 |
+| `tick` | `15` | 5 到 300 | 守护轮询间隔（秒） |
 | `log_level` | `1` | 0 到 4 | 0 只留 E / 1 事件（默认）/ 2 事件+快照 / 3 逐轮 / 4 调试 |
-| `chg_unlock` | `0` | 0 / 1 | 充电阶梯解锁：写 0 解除 HAL 限流，电池 ≥45℃ 自动撤销 |
+| `chg_unlock` | `0` | 0 / 1 | 充电阶梯解锁：HAL 节点写 0，不按温度撤销 |
 | `curve_offset` | `120` | 0 到 300 | 充电曲线偏移，0.1℃ 单位（120 = +12℃） |
 | `power_scale` | `100` | 50 到 200 | 电流读数校准 % |
 | `cells_mode` | `auto` | auto / 1 / 2 | 电芯数 |
 
-`curr_edge` 不在初始文件里，代码里兜底为 4，写进去才生效。
+`wall`、`aggr`、`curr_max`、`curr_edge`、`fast_cap`、`battery_limit`、`sentinel_limit`、
+`cool_guard` 这八个键在 3.1.0 全部删除，升级时由 `customize.sh` 从 `state.conf` 里清掉；
+真机残留也无害，守护不再读它们。
 
-`log_level` 从 2.9.68 起默认 1：0 只留错误，安装、熔断、守护启停这些关键事件全是 `I`，
+`log_level` 从 2.9.68 起默认 1：0 只留错误，安装、守护启停这些关键事件全是 `I`，
 设成 0 会让日志面板看起来是空的。
 
 ---
@@ -213,21 +213,13 @@ ACTION=/data/adb/modules/quickcharge/action.sh
 | `shell <℃\|off>` | 等同 `temp static` |
 | `core <off\|20-100>` | CPU / GPU / DDR 固定伪装 |
 | `noncore <off\|20-100>` | 其它温区固定伪装 |
-| `batt <off\|20-45>` | 电池 NTC 伪装（真实 ≥46℃ 自动撤销并冷却 120s） |
-| `gear <0-10>` | 温控档位，`aggr` 为旧名 |
-| `base <25-60>` | 只改基准温度，不切模式 |
-| `wall <35-60\|off>` | 温度墙，60 或 off = 无限制 |
+| `batt <off\|20-45>` | 电池 NTC 伪装（不按真实温度撤销） |
+| `base <20-33>` | 只改伪装温度，不切模式 |
 
 **充电**
 
 | 命令 | 作用 |
 |---|---|
-| `curr <300-8000\|off>` | 充电限流 mA，按温度联动降流 |
-| `curredge <0-6>` | 兼容保留，默认 0；不再参与分档 |
-| `fast <20-90>` | 快充生效电量阈值 % |
-| `sentinel <60-110\|off>` | SoC / 主板熔断阈值 |
-| `battery <30-70\|off>` | 电池熔断阈值 |
-| `boost <on\|off>` | 暴力模式：四档降流 + 档位 10 + 快充阈值 85%（面板已移除，命令保留） |
 | `pscale <50-200>` | 电流读数校准 % |
 | `cells <auto\|1\|2>` | 电芯数 |
 | `chg` / `snap` | 打印 / 记录一条充电现场 |
@@ -238,7 +230,7 @@ ACTION=/data/adb/modules/quickcharge/action.sh
 |---|---|
 | `hz <60-185\|off> [soft\|hard]` | 刷新率，`hard` 额外锁定内容帧率匹配 |
 | `hzguard <on\|off>` | 强制锁定开关（档位不变，只切力度） |
-| `unlock <on\|off>` | 取消充电阶梯限流（`charge_control_limit` / `thermal_charging` 写 0，原值备份，≥45℃ 自动撤销） |
+| `unlock <on\|off>` | 取消充电阶梯限流（`charge_control_limit` / `thermal_charging` 写 0，原值备份，不按温度撤销） |
 | `tiers` | 充电阶梯诊断：列出 `charge_control_limit`、`thermal_charging`、`cool_down` 等节点与当前值 |
 | `power` | 电流 / 电压 / 功率读数（JSON） |
 | `level <0-4>` | 日志级别 |
@@ -284,19 +276,28 @@ sh /data/adb/modules/quickcharge/action.sh check
 
 ---
 
-## 9. 安全设计
+## 9. 极速模式：没有兜底
 
-这个模块会改温度读数，做错会伤硬件，所以有几层兜底：
+3.1.0 起这个模块**只追求充电速度**，不再做任何安全让步：
 
-**熔断。** 守护每轮读一个"哨兵"温区（默认 SoC / 主板，阈值 85℃；电池单独阈值 48℃）。
-电池类温区取"温区读数"与"电量计读数"中较高的一侧判定——连接器侧传感器平时比电芯高几度，
-只信偏低的一侧会漏熔断。一旦实测超过阈值，立刻暂停所有伪装、撤销已写入的值，并记日志。
-温度回落到阈值下 3℃ 并持续一轮后自动恢复。熔断期间不会反复写入，也不会改写配置——只是停手。
+- 没有熔断。电池 50℃、主板 90℃ 都照常伪装，不会自动停手、不会自动还原。
+- 没有温度墙。真实温度多高都不影响上报值。
+- 没有电量阈值。充到 100% 也继续伪装，不交还系统。
+- 没有绝对电流墙，没有温差档位。电流怎么走由系统和驱动决定。
 
-**范围校验。** 所有伪装值必须落在 20 到 100℃ 之间，电池伪装上限 45℃，超出直接拒绝。
+**这意味着热失控的最后一道防线只剩系统和电芯自己的保护板。** 充电时请自己摸一下
+机身温度；发烫就拔线，或者 `action.sh temp off` 停掉伪装。这不是免责声明，是使用方式。
+
+剩下的只有这些"不牺牲速度的前提下顺手做对"的事：
+
+**范围校验。** 伪装温度必须落在 20 到 33℃ 之间。下限是硬性的：再低不少平台会把
+NTC 判成开路，直接锁 5V/500mA，反而更慢。
+
+**降流解除带电流闸。** `cool_down` 非 0 且实测电流 < 2.5A 时才写 0。已经满速时
+不碰这个节点——写入本身会让 OPlus 重选档，实测 4.3A 时写一下就从 32W 掉到 6W。
 
 **退出还原。** 三种退出路径（正常退出、`uninstall.sh`、`restart`）都会：`emul_temp` 归零、
-`umount` 覆盖层、删除临时文件。
+`umount` 覆盖层、删除临时文件、阶梯解锁的原值写回。
 
 **临时文件不落 `/data/adb`。** 伪装用的假温度文件放在 `/dev/qc`（tmpfs）。原因是
 `/data/adb` 下的 bind 源路径会出现在 mountinfo 里，普通 App 也能读到挂载表；
@@ -316,7 +317,7 @@ sh /data/adb/modules/quickcharge/action.sh check
    哪些温区没被识别。
 3. **配置改写依赖具体路径**。ColorOS 大版本升级可能换目录结构。OTA 后 `post-fs-data.sh`
    会自动重建覆盖层，但路径全变了就得改代码。
-4. **`charge` 模式轮询固定 10 秒**（不受 `tick` 影响），所以拔电后最长要等一轮才还原真实读数。
+4. **`charge` 模式拔电后最长要等一轮 `tick` 才还原真实读数**。
 5. **屏幕快充只能改写节点**。厂商驱动在 `fb_notifier` 里压 FCC（亮屏压到 1500 到 2000mA，
    约 7 到 9W）时，模块靠 `ignore_screen_state` 或回写 FCC 顶回去；回写只在亮屏做，
    息屏完全交还驱动（息屏是驱动放开 FCC 的窗口，这时写反而会压住功率）；
@@ -334,9 +335,9 @@ quickcharge/
 ├── customize.sh          安装：设备检测、生成覆盖层、初始化参数、写 need_reboot
 ├── post-fs-data.sh       开机早期：备份原文件、挂载覆盖层，OTA 后自动重建
 ├── service.sh            开机后期启动守护；检测到 bin/qcmon 则交给 C 版
-├── action.sh             控制入口：CLI 与交互菜单，745 行
+├── action.sh             控制入口：CLI 与交互菜单，575 行
 ├── uninstall.sh          卸载：停守护、卸挂载、归零、清数据
-├── lib/qc.sh             核心库，4147 行，全部逻辑在这里
+├── lib/qc.sh             核心库，3921 行，全部逻辑在这里
 ├── webroot/index.html    WebUI（纯静态，KernelSU / MMRL / KsuWebUI 加载）
 ├── src/qcmon.c           C 版源码（2982 行，仅仓库内、不打包，已拆到 QuickCharge-C）
 ├── bin/qcmon             C 版二进制（仅 C 版包携带）
@@ -355,7 +356,7 @@ quickcharge/
 在管理器里卸载模块即可，或者：
 
 ```sh
-su -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
+su 0 sh -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 ```
 
 会依次停守护、卸挂载、`emul_temp` 归零、还原备份文件、删除 `/dev/qc` 与数据目录。
@@ -378,19 +379,19 @@ su -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 | 仓库 | 当前版本 | 包名 | versionCode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.0.12` | `QuickCharge-v3.0.12.zip` | 300025 |
-| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.0.12-c` | `QuickCharge-v3.0.12-c.zip` | 300024 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.1.0` | `QuickCharge-v3.1.0.zip` | 301001 |
+| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.1.0-c` | `QuickCharge-v3.1.0-c.zip` | 301000 |
 
 每个仓库的 Release 只附自己那一份模块包，装哪个版本就去哪个仓库下载，不会混。
 
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v3.0.12
-Quick Charge v3.0.12-c
+Quick Charge v3.1.0
+Quick Charge v3.1.0-c
 ```
 
-tag 与标题一致：shell 仓 `v3.0.12`，C 仓 `3.0.12-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v3.1.0`，C 仓 `3.1.0-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
 
 ### 版本号规则（3.0 起）
@@ -398,6 +399,7 @@ tag 与标题一致：shell 仓 `v3.0.12`，C 仓 `3.0.12-c`。历史发行版�
 版本固定三段 `主.次.修订`：
 
 - 修 bug / 小改动：修订 +1（`3.0.1`、`3.0.12` …）；
+- 删功能 / 改语义：次版本 +1（`3.1.0`：安全保护整套删除）；
 - **修订到 100 进一位**：`3.0.100` 的下一个版本是 `3.1.0`；
 - 功能线变更：次版本 +1，修订归零。
 
@@ -422,9 +424,9 @@ updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/up
 
 ```json
 {
-  "version": "3.0.12",
-  "versionCode": 300025,
-  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.0.12/QuickCharge-v3.0.12.zip",
+  "version": "3.1.0",
+  "versionCode": 301001,
+  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/3.1.0/QuickCharge-v3.1.0.zip",
   "changelog": "https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/RELEASE.md"
 }
 ```
@@ -448,5 +450,5 @@ updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/up
 ## 附录：设计细节
 
 本文只讲怎么用。想看每条策略为什么这么定——配置改写的具体范围、温区分类规则、
-熔断与冷却的回差计算、平台差异（高通 / MTK / 欧加真）、各版本踩过的坑，
+温度伪装的取值边界、平台差异（高通 / MTK / 欧加真）、各版本踩过的坑，
 见 [docs/TECH.md](docs/TECH.md)。

@@ -193,7 +193,7 @@ sd_dump_env() {
     sd_plat_resolve
     _sd_emit I env "soc=${_sd_plat}（${_sd_plat_why}） emul=$_emul_n${_emul_head} shell-temp=$_sh charge-nodes=$(sd_curr_nodes 2>/dev/null | wc -l | tr -d ' ')"
     if [ -n "$sentinel" ]; then
-        _sd_emit I env "sentinel=$(basename "$sentinel") type=${stype:-?} temp=${stemp:-?}℃ limit=${slim:-?}℃"
+        _sd_emit I env "sentinel=$(basename "$sentinel") type=${stype:-?} temp=${stemp:-?}℃"
     else
         _sd_emit I env "sentinel=none（未找到电池/主板温度节点，伪装无法工作）"
     fi
@@ -486,14 +486,7 @@ _st_off_manual=""
 _st_shell_temp=""
 _st_core_temp=""
 _st_noncore_temp=""
-_st_sentinel_limit=""
-_st_battery_limit=""
-_st_fast_cap=""
 _st_curve_offset=""
-_st_wall=""
-_st_aggr=""
-_st_curr_max=""
-_st_curr_edge=""
 _st_log_level=""
 _st_tick=""
 _st_defrev=""
@@ -504,17 +497,14 @@ _st_hz_hard=""
 _st_hz_prev_mcfr=""
 _st_power_scale=""
 _st_batt_spoof=""
-_st_cool_guard=""
 
 sd_state_load() {
     _sd_st_loaded=1
     _st_temp_mode=""; _st_off_manual=""; _st_shell_temp=""; _st_core_temp=""; _st_noncore_temp=""
-    _st_sentinel_limit=""; _st_battery_limit=""; _st_fast_cap=""
-    _st_curve_offset=""; _st_wall=""; _st_aggr=""; _st_curr_max=""
-    _st_curr_edge=""
+    _st_curve_offset=""
     _st_log_level=""; _st_tick=""; _st_defrev=""
     _st_hz=""; _st_hz_prev_peak=""; _st_hz_prev_min=""; _st_hz_hard=""; _st_hz_prev_mcfr=""; _st_power_scale=""
-    _st_cells_mode=""; _st_batt_spoof=""; _st_cool_guard=""
+    _st_cells_mode=""; _st_batt_spoof=""
     [ -f "$SD_STATE" ] || { _st_log_level=1; _sd_lv=1; return 0; }
     local k v
     while IFS='=' read -r k v; do
@@ -533,17 +523,10 @@ sd_state_get() {
     case "$1" in
         temp_mode)      printf '%s' "${_st_temp_mode:-${2:-off}}" ;;
         off_manual)     printf '%s' "${_st_off_manual:-${2:-0}}" ;;
-        shell_temp)     printf '%s' "${_st_shell_temp:-${2:-30}}" ;;
+        shell_temp)     printf '%s' "${_st_shell_temp:-${2:-25}}" ;;
         core_temp)      printf '%s' "${_st_core_temp:-${2:-off}}" ;;
         noncore_temp)   printf '%s' "${_st_noncore_temp:-${2:-off}}" ;;
-        sentinel_limit) printf '%s' "${_st_sentinel_limit:-${2:-85}}" ;;
-        battery_limit)  printf '%s' "${_st_battery_limit:-${2:-48}}" ;;
-        fast_cap)       printf '%s' "${_st_fast_cap:-${2:-55}}" ;;
         curve_offset)   printf '%s' "${_st_curve_offset:-${2:-120}}" ;;
-        wall)           printf '%s' "${_st_wall:-${2:-60}}" ;;
-        aggr)           printf '%s' "${_st_aggr:-${2:-10}}" ;;
-        curr_max)       printf '%s' "${_st_curr_max:-${2:-0}}" ;;
-        curr_edge)      printf '%s' "${_st_curr_edge:-${2:-0}}" ;;
         defrev)         printf '%s' "${_st_defrev:-${2:-2}}" ;;
         log_level)      printf '%s' "${_st_log_level:-${2:-1}}" ;;
         tick)           printf '%s' "${_st_tick:-${2:-15}}" ;;
@@ -555,7 +538,6 @@ sd_state_get() {
         power_scale)    printf '%s' "${_st_power_scale:-${2:-100}}" ;;
         cells_mode)     printf '%s' "${_st_cells_mode:-${2:-auto}}" ;;
         batt_spoof)     printf '%s' "${_st_batt_spoof:-${2:-off}}" ;;
-        cool_guard)     printf '%s' "${_st_cool_guard:-${2:-1}}" ;;
         chg_unlock)     printf '%s' "${_st_chg_unlock:-${2:-0}}" ;;
         *)              printf '%s' "${2:-}" ;;
     esac
@@ -728,6 +710,19 @@ sd_telemetry_write() {
         "${_sd_last_zone:--}" "${_sd_last_out:--}" "${_st_temp_mode:-off}" \
         "${_sd_emul_ok:--1}" \
         >"$SD_RUN/sensor" 2>/dev/null
+}
+
+# 真实温度只用于面板显示（用户要看"现在到底多热"），不参与任何判断。
+# 极速模式下 sd_shell_target 完全不读真实值，缓存里的真实温度就空了，
+# 面板会一直显示"—"；这里单独补一次采样。
+sd_telemetry_sample() {
+    _sd_last_cur=""
+    _sd_last_zone=""
+    _sd_last_lim=""
+    sd_pick_sentinel_v || return 0
+    _sd_last_zone=${_sd_rv##*/}
+    sd_sentinel_temp_v "$_sd_rv" && _sd_last_cur=$_sd_rv
+    return 0
 }
 
 sd_telemetry_read() {
@@ -1163,14 +1158,6 @@ sd_zone_is_guarded() {
     [ "$_sd_zc" = battery ] || [ "$_sd_zc" = board ]
 }
 
-sd_zone_is_guard_src() {
-    case "$1" in
-        xo-therm*|xtherm*) return 0 ;;
-    esac
-    sd_zone_class "$1"
-    [ "$_sd_zc" = battery ]
-}
-
 sd_zone_is_hot_load() {
     case "$1" in
         *pa|*_pa|*wifi*|*wlan*|*mtktswmt*|*mtktsbtsmdpa*) return 0 ;;
@@ -1269,7 +1256,6 @@ sd_temp_any() {
 sd_read_real() {
     local z v
     _sd_rr_real=""
-    _sd_rr_lim=""
     _sd_rr_zone=""
     _sd_rr_src=""
     _sd_rr_why=""
@@ -1280,7 +1266,6 @@ sd_read_real() {
             ''|-) ;;
             *)
                 _sd_rr_real=$_sd_tl_real
-                _sd_rr_lim=$_sd_tl_lim
                 _sd_rr_zone=$_sd_tl_zone
                 _sd_rr_src="cache"
                 _sd_rr_emul=${_sd_tl_emul:--1}
@@ -1291,18 +1276,15 @@ sd_read_real() {
         z=$_sd_rv
         _sd_rr_zone=${z##*/}
         sd_sentinel_temp_v "$z" && v=$_sd_rv
-        sd_limit_for_type_v "$_sd_sent_type"; _sd_rr_lim=$_sd_rv
     elif sd_batt_temp_v; then
         _sd_rr_zone="battery(ps)"
         _sd_rr_real=$_sd_rv
-        sd_limit_for_type_v battery; _sd_rr_lim=$_sd_rv
         _sd_rr_src="live"
         return 0
     elif sd_pick_sentinel_v; then
         z=$_sd_rv
         _sd_rr_zone=${z##*/}
         sd_sentinel_temp_v "$z" && v=$_sd_rv
-        sd_limit_for_type_v "$_sd_sent_type"; _sd_rr_lim=$_sd_rv
     fi
     _sd_rr_src="live"
     if [ -n "$v" ]; then
@@ -1319,8 +1301,6 @@ sd_read_real() {
         _sd_rr_real=$_sd_rv
         _sd_rr_zone="battery(ps)"
         _sd_rr_src="live/电池节点"
-        sd_limit_for_type_v battery
-        _sd_rr_lim=$_sd_rv
         return 0
     fi
     if [ -z "$_sd_zones" ]; then
@@ -1497,25 +1477,8 @@ sd_pick_sentinel_v() {
     return 1
 }
 
-sd_limit_for_type_v() {
-    sd_zone_class "$1"
-    case "$_sd_zc" in
-        battery)
-            case "${_st_battery_limit:-48}" in
-                off) _sd_rv=off; return 0 ;;
-            esac
-            _sd_clamp "${_st_battery_limit:-48}" 30 70 48 ;;
-        *)
-            case "${_st_sentinel_limit:-85}" in
-                off) _sd_rv=off; return 0 ;;
-            esac
-            _sd_clamp "${_st_sentinel_limit:-85}" 60 110 85 ;;
-    esac
-    return 0
-}
-
 sd_shell_target() {
-    local base gap wall z cur limit barrier room climb v
+    local v
     _sd_last_cur=""
     _sd_last_out=0
     _sd_last_base=""
@@ -1523,103 +1486,18 @@ sd_shell_target() {
     _sd_base_clamped=0
     _sd_last_lim=""
     _sd_last_zone=""
+    _sd_wall_hold=0
     [ "$_sd_st_loaded" = 1 ] || sd_state_load
 
-    _sd_clamp "${_st_shell_temp:-30}" 25 60 30
-    base=$_sd_rv
-    _sd_clamp "${_st_aggr:-10}" 0 10 10
-    gap=$((2 + _sd_rv))
-    # 35-59 是真实墙；60 与 off 都表示「不设墙」，直接顶到熔断前 1℃
-    case "${_st_wall:-60}" in
-        off|'') wall=0 ;;
-        *)
-            _sd_clamp "${_st_wall:-60}" 35 80 60
-            if [ "$_sd_rv" -ge 60 ]; then wall=0; else wall=$_sd_rv; fi ;;
-    esac
-
-    cur=""
-    limit=""
-    if sd_pick_batt_zone_v; then
-        z=$_sd_rv
-        _sd_last_zone=${z##*/}
-        sd_sentinel_best_v "$z" "$_sd_sent_type" && cur=$_sd_rv
-        sd_limit_for_type_v "$_sd_sent_type"
-        limit=$_sd_rv
-    elif sd_batt_temp_v; then
-        cur=$_sd_rv
-        _sd_last_zone="battery(ps)"
-        _sd_sent_type=battery
-        sd_limit_for_type_v battery
-        limit=$_sd_rv
-    elif sd_pick_sentinel_v; then
-        z=$_sd_rv
-        _sd_last_zone=${z##*/}
-        sd_sentinel_best_v "$z" "$_sd_sent_type" && cur=$_sd_rv
-        sd_limit_for_type_v "$_sd_sent_type"
-        limit=$_sd_rv
-    fi
-
-    if [ -z "$cur" ]; then
-        _sd_temp_fail=$((_sd_temp_fail + 1))
-        printf '0'
-        return 0
-    fi
-    _sd_temp_fail=0
-    case "$limit" in ''|0|off) _sd_last_lim="" ;; *) _sd_last_lim=$limit ;; esac
-
-    case "$limit" in
-        ''|0|off)
-            [ "$base" -gt "$cur" ] && base=$cur
-            _sd_last_cur=$cur
-            _sd_last_out=$base
-            _sd_wall_hold=0
-            printf '%s' "$base"
-            return 0
-            ;;
-    esac
-
-    if [ "$wall" -gt 0 ]; then
-        barrier=$wall
-    else
-        barrier=$((limit - 1))
-    fi
-    _sd_last_barrier=$barrier
-
-    if [ "$base" -ge "$barrier" ]; then
-        base=$((barrier - 2))
-        [ "$base" -lt 25 ] && base=25
-        _sd_base_clamped=1
-    fi
-    _sd_last_base=$base
-
-    if [ "$cur" -ge "$barrier" ] || { [ "$_sd_wall_hold" = 1 ] && [ "$cur" -gt $((barrier - 2)) ]; }; then
-        _sd_wall_hold=1
-        _sd_last_cur=$cur
-        _sd_last_out=0
-        printf '0'
-        return 0
-    fi
-    _sd_wall_hold=0
-
-    room=$((barrier - cur))
-    v=$base
-    [ $((cur - gap)) -gt "$v" ] && v=$((cur - gap))
-    if [ "$room" -lt 4 ] && [ "$barrier" -gt "$base" ]; then
-        climb=$((base + (barrier - base) * (4 - room) / 4))
-        [ "$climb" -gt "$v" ] && v=$climb
-    fi
-    [ "$v" -gt "$cur" ] && v=$cur
-
-    if [ "$v" -lt 20 ]; then
-        _sd_last_cur=$cur
-        _sd_last_out=0
-        printf '0'
-        return 0
-    fi
-
-    _sd_last_cur=$cur
+    # 极速模式：恒定写同一个伪装温度。不看真实读数、不设温度墙、
+    # 不设熔断线、不按电量退出——插着电就一直让系统以为电池很凉。
+    # 下限 20℃：再低不少平台会把 NTC 判成开路，反而锁 5V/500mA。
+    v=${_st_shell_temp:-25}
+    case "$v" in ''|*[!0-9]*) v=25 ;; esac
+    [ "$v" -lt 20 ] && v=20
+    [ "$v" -gt 33 ] && v=33
     _sd_last_out=$v
-    sd_dbg thermal "目标=${v}℃ base=${base} 真实=${cur} 屏障=${barrier} 余量=${room} gap=${gap}"
+    _sd_last_base=$v
     printf '%s' "$v"
 }
 
@@ -1861,65 +1739,6 @@ sd_shell_emul() {
     return 0
 }
 
-sd_guard_one() {
-    local z="$1" t="${2:-}" limit cur
-    [ -n "$t" ] || { sd_read1 "$z/type" && t=$_sd_rv; }
-    sd_limit_for_type_v "$t"
-    limit=$_sd_rv
-    case "$limit" in ''|0|off) return 1 ;; esac
-    sd_guard_read_v "$z" "$t" || return 1
-    cur=$_sd_rv
-    [ "$cur" -ge "$limit" ] || return 1
-
-    sd_warn guard "⚠ 熔断：哨兵 ${z##*/} 实测 ${cur}℃ ≥ 上限 ${limit}℃"
-    sd_spoof_clear
-    _sd_emul_last=""
-    sd_shell_emul 0
-    _sd_guard_paused=1
-    sd_warn guard "已暂停伪装，温度回落后自动恢复（配置未改动）"
-    return 0
-}
-
-sd_guard_cooled() {
-    local e z t limit cur ok=1 checked=0 blind=0
-    _sd_zones_ready
-    for e in $_sd_zones; do
-        z=${e%%:*}; t=${e#*:}
-        sd_zone_is_guard_src "$t" || continue
-        sd_limit_for_type_v "$t"; limit=$_sd_rv
-        case "$limit" in ''|0|off) continue ;; esac
-        checked=$((checked + 1))
-        if ! sd_guard_read_v "$z" "$t"; then
-            ok=0; blind=1
-            continue
-        fi
-        cur=$_sd_rv
-        [ $((cur + 3)) -le "$limit" ] || ok=0
-    done
-    if [ "$checked" -eq 0 ]; then
-        sd_limit_for_type_v battery; limit=$_sd_rv
-        case "$limit" in
-            ''|0|off) ;;
-            *)
-                if sd_batt_temp_v; then
-                    checked=1
-                    [ $((_sd_rv + 3)) -le "$limit" ] || ok=0
-                else
-                    ok=0; blind=1
-                fi ;;
-        esac
-    fi
-    if [ "$blind" = 1 ] && [ "$ok" = 0 ]; then
-        if [ "${_sd_cool_blind:-0}" = 0 ]; then
-            _sd_cool_blind=1
-            sd_warn guard "熔断复查读不到温度，暂时保持熔断（不猜安全）"
-        fi
-    else
-        _sd_cool_blind=0
-    fi
-    [ "$checked" -gt 0 ] && [ "$ok" = 1 ]
-}
-
 SD_BATT_HARD=46
 _sd_batt_sp_last=""
 _sd_batt_sp_on=0
@@ -1942,7 +1761,7 @@ sd_spoof_batt_off() {
 }
 
 sd_batt_sp_guard() {
-    local want real now
+    local want
     want=$(sd_state_get batt_spoof off)
     case "$want" in
         ''|off|0)
@@ -1953,24 +1772,7 @@ sd_batt_sp_guard() {
     [ "$want" -ge 20 ] && [ "$want" -le 45 ] || { sd_spoof_batt_off; return 1; }
     [ "${_st_temp_mode:-}" = off ] && { sd_spoof_batt_off; return 0; }
 
-    if ! sd_batt_real_v; then
-        sd_spoof_batt_off
-        sd_state_set batt_spoof off
-        sd_warn guard "读不到真实电池温度（power_supply），已关闭电池伪装"
-        return 1
-    fi
-    real=$_sd_rv
-    now=$(date +%s)
-    if [ "$real" -ge "$SD_BATT_HARD" ]; then
-        sd_spoof_batt_off
-        _sd_batt_sp_hold=$((now + 120))
-        sd_warn guard "真实电池 ${real}℃ ≥ 硬上限 ${SD_BATT_HARD}℃，撤销电池伪装并冷却 120s"
-        return 1
-    fi
-    if [ "$_sd_batt_sp_hold" -gt "$now" ]; then
-        sd_spoof_batt_off
-        return 1
-    fi
+    # 不看真实温度：开着就一直伪装，满速优先。
     [ "$want" = "$_sd_batt_sp_last" ] && [ "${_sd_batt_sp_on:-0}" = 1 ] && return 0
     if sd_spoof_apply batt "$want" >/dev/null 2>&1; then
         _sd_batt_sp_last=$want
@@ -2017,50 +1819,6 @@ sd_spoof_pending() {
         sd_warn thermal "伪装请求连续 8 次无法落地，已放弃；用 diag 看温区是否可读"
     else
         printf '%s\n' "$((n + 1))" >"$SD_SPOOF_FLAG" 2>/dev/null
-    fi
-    return 0
-}
-
-sd_sentinel_guard() {
-    local e z t fb="" fb_t="" checked=0
-    [ "$_sd_st_loaded" = 1 ] || sd_state_load
-
-    if [ "$_sd_guard_paused" = 1 ]; then
-        if sd_guard_cooled; then
-            _sd_guard_paused=0
-            sd_info guard "温度已回落，恢复伪装"
-            sd_spoof_reapply
-            sd_sync_desc
-        else
-            return 1
-        fi
-    fi
-
-    if [ "${_st_temp_mode:-off}" = "off" ] \
-        && [ "${_st_core_temp:-off}" = "off" ] \
-        && [ "${_st_noncore_temp:-off}" = "off" ]; then
-        return 0
-    fi
-    _sd_zones_ready
-    for e in $_sd_zones; do
-        z=${e%%:*}
-        t=${e#*:}
-        [ -r "$z/temp" ] || continue
-        if sd_zone_is_guard_src "$t"; then
-            checked=1
-            sd_guard_one "$z" "$t" && return 1
-            continue
-        fi
-        sd_zone_is_core "$t" && continue
-        sd_zone_is_shell "$t" && continue
-        [ -z "$fb" ] && ! sd_zone_is_hot_load "$t" && { fb=$z; fb_t=$t; }
-    done
-    if [ "$checked" -eq 0 ] && sd_batt_temp_v; then
-        checked=1
-        sd_guard_one "$SD_PS/battery" battery && return 1
-    fi
-    if [ "$checked" -eq 0 ] && [ -n "$fb" ]; then
-        sd_guard_one "$fb" "$fb_t" && return 1
     fi
     return 0
 }
@@ -2564,8 +2322,6 @@ sd_curr_nodes() {
     return 0
 }
 
-_sd_curr_pct=""
-_sd_wall_eff=""
 
 _sd_bl_nodes=""
 _sd_screen_on=1
@@ -2636,61 +2392,6 @@ sd_screen_tick() {
     return 0
 }
 
-sd_curr_target_v() {
-    local ma wall cur pct lim t75 t50 t25 last
-    [ "$_sd_st_loaded" = 1 ] || sd_state_load
-    _sd_clamp "${_st_curr_max:-0}" 0 8000 0
-    ma=$_sd_rv
-    [ "$ma" -gt 0 ] || { _sd_rv=0; return 0; }
-
-    sd_pick_sentinel_v || { _sd_rv=$ma; return 0; }
-    sd_sentinel_best_v "$_sd_rv" "$_sd_sent_type" || { _sd_rv=$ma; return 0; }
-    cur=$_sd_rv
-
-    # 默认顶墙：墙 = min(用户墙, 熔断前 1℃)。60/off 表示不设墙。
-    # 2.9.75 的极限逻辑已并入默认，不再需要开关。
-    sd_limit_for_type_v "${_sd_sent_type:-battery}"
-    case "$_sd_rv" in ''|0|off) lim=48 ;; *) lim=$_sd_rv ;; esac
-    wall=$((lim - 1))
-    case "${_st_wall:-60}" in
-        off|''|0) ;;
-        *)
-            _sd_clamp "${_st_wall:-60}" 35 60 60
-            if [ "$_sd_rv" -lt 60 ] && [ "$_sd_rv" -lt "$wall" ]; then wall=$_sd_rv; fi ;;
-    esac
-    _sd_wall_eff=$wall
-    _sd_sb_note=""
-    [ "$_sd_screen_ticks" -gt 0 ] || sd_screen_tick
-
-    # 四档：100/75/50/25，全部贴着墙走（不提前）：
-    # 墙-3℃ 起 75%，墙-1℃ 起 50%，到墙 25%。
-    # 绝对限流（curr_max）仍在最前面做硬上限，默认 0 = 不设。
-    t75=$((wall - 3)); [ "$t75" -lt 30 ] && t75=30
-    t50=$((wall - 1)); [ "$t50" -le "$t75" ] && t50=$((t75 + 1))
-    t25=$wall;         [ "$t25" -le "$t50" ] && t25=$((t50 + 1))
-
-    pct=100
-    [ "$cur" -ge "$t75" ] && pct=75
-    [ "$cur" -ge "$t50" ] && pct=50
-    [ "$cur" -ge "$t25" ] && pct=25
-
-    # 滞回：降下去就要回落 2℃ 才准升档，避免 1℃ 抖动把电流来回拉
-    last=${_sd_curr_pct:-100}
-    case "$last" in ''|*[!0-9]*) last=100 ;; esac
-    if [ "$pct" -gt "$last" ]; then
-        case "$last" in
-            25) [ "$cur" -le $((t25 - 2)) ] || pct=25 ;;
-            50) [ "$cur" -le $((t50 - 2)) ] || pct=50 ;;
-            75) [ "$cur" -le $((t75 - 2)) ] || pct=75 ;;
-        esac
-    fi
-    _sd_curr_pct=$pct
-    sd_dbg charge "电流目标 ${cur}℃/墙 ${wall}℃（${t75}/${t50}/${t25}）→ ${pct}% of ${ma}mA${_sd_sb_note}"
-    _sd_rv=$((ma * pct / 100))
-    return 0
-}
-
-sd_curr_target() { sd_curr_target_v; printf '%s' "$_sd_rv"; }
 
 # ---------------------------------------------------------------- 亮屏快充
 # 亮屏掉功率的落点在内核充电驱动的 fb_notifier：
@@ -2798,22 +2499,13 @@ sd_scr_learn() {
 
 # 目标电流：正常值，按真实电池温度打折；≥42℃ 直接不接管
 sd_scr_target() {
-    local n bt lim
+    local n
     _sd_rv=0
     [ -f "$SD_FCC_NORM" ] || return 1
     n=$(cat "$SD_FCC_NORM" 2>/dev/null)
     case "$n" in ''|*[!0-9]*) return 1 ;; esac
     [ "$n" -gt 8000 ] && n=8000
-    bt=""
-    sd_batt_temp_v && bt=$_sd_rv
-    # 默认满速：38/41℃ 两档折损已取消，只在熔断前 1℃ 放手。
-    sd_limit_for_type_v battery
-    lim=$_sd_rv
-    case "$lim" in ''|0|off) lim=48 ;; esac
-    case "$bt" in
-        ''|*[!0-9]*) ;;
-        *) [ "$bt" -ge $((lim - 1)) ] && { _sd_rv=0; return 3; } ;;
-    esac
+    # 不看电池温度：亮屏就按息屏学到的峰值顶回去。
     _sd_rv=$n
     [ "$_sd_rv" -ge 500 ]
 }
@@ -2947,11 +2639,6 @@ sd_scr_tick() {
            return 0 ;;
     esac
 
-    if [ "${_sd_guard_paused:-0}" = 1 ] || [ "$(sd_state_int curr_max 0 0 8000)" -gt 0 ]; then
-        if sd_scr_active; then sd_scr_release; _sd_scr_log=""; fi
-        return 0
-    fi
-
     if [ "$_sd_screen_on" = 0 ]; then
         # 息屏只更新基准（记录驱动在息屏放开的峰值），不写任何节点。
         # 驱动在息屏边界会自己把 FCC 放开到协议允许的峰值，模块这时候写回
@@ -2965,28 +2652,7 @@ sd_scr_tick() {
         return 0
     fi
 
-    # 默认开启后所有人都会走到这里，两条路径共用一道温度闸：
-    # 内核参数那条一写就是「永远不看屏幕」，高温时更不能开。
-    # 极限模式下这道闸从写死的 42℃ 抬到熔断前 1℃，与伪装/降流用同一条线。
-    sd_limit_for_type_v battery
-    case "$_sd_rv" in
-        ''|0|off) hot_lim=48 ;;
-        *) hot_lim=$((_sd_rv - 1)) ;;
-    esac
-    bt=""
-    sd_batt_temp_v && bt=$_sd_rv
-    case "$bt" in
-        ''|*[!0-9]*) ;;
-        *) if [ "$bt" -ge "$hot_lim" ]; then
-               sd_scr_active && sd_scr_release
-               if [ "$_sd_scr_log" != hot ]; then
-                   sd_warn charge "亮屏快充：电池 ${bt}℃ 达到 ${hot_lim}℃，暂停接管"
-                   _sd_scr_log=hot
-               fi
-               return 0
-           fi ;;
-    esac
-    [ "$_sd_scr_log" = hot ] && _sd_scr_log=""
+    # 不设温度闸：亮屏就接管，直到没在充电为止。
 
     sd_scr_apply
     rc=$?
@@ -3093,65 +2759,7 @@ $_sd_curr_nodes"
     return 0
 }
 
-sd_curr_apply() {
-    local want="$1" n cur v n_ok=0
-    case "$want" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$want" -gt 0 ] || { sd_curr_restore; return 0; }
-    _sd_curr_prepare
-    for n in $_sd_curr_nodes; do
-        [ -e "$n" ] || continue
-        sd_read1 "$n" || continue
-        cur=$_sd_rv
-        case "$cur" in ''|*[!0-9]*) continue ;; esac
-        _sd_curr_unit "$n" "$cur"
-        if [ "$_sd_unit" = ua ]; then v=$((want * 1000)); else v=$want; fi
-        [ "$cur" -eq "$v" ] && { n_ok=$((n_ok + 1)); continue; }
-        _sd_curr_save_orig "$n" "$cur"
-        printf '%s\n' "$v" >"$n" 2>/dev/null && n_ok=$((n_ok + 1))
-    done
-    [ "$n_ok" -gt 0 ] && printf '%s\n' "$want" >"$SD_CURR_MARK" 2>/dev/null
-    [ "$n_ok" -gt 0 ]
-}
-
-sd_curr_keep() {
-    local want cur v n n_ok=0 last=""
-    sd_curr_target_v
-    want=$_sd_rv
-
-    if [ "$want" -eq 0 ]; then
-        if [ -f "$SD_CURR_ORIG" ]; then
-            sd_curr_restore
-        elif [ -f "$SD_CURR_MARK" ]; then
-            rm -f "$SD_CURR_MARK" 2>/dev/null
-        fi
-        return 0
-    fi
-
-    read -r last 2>/dev/null <"$SD_CURR_MARK"
-    case "$last" in ''|*[!0-9]*) last="" ;; esac
-
-    _sd_curr_prepare
-    for n in $_sd_curr_nodes; do
-        [ -e "$n" ] || continue
-        sd_read1 "$n" || continue
-        cur=$_sd_rv
-        case "$cur" in ''|*[!0-9]*) continue ;; esac
-        _sd_curr_unit "$n" "$cur"
-        if [ "$_sd_unit" = ua ]; then v=$((want * 1000)); else v=$want; fi
-        if [ "$want" != "$last" ] || [ "$cur" -gt $((v * 11 / 10)) ]; then
-            [ "$cur" -eq "$v" ] && continue
-            _sd_curr_save_orig "$n" "$cur"
-            printf '%s\n' "$v" >"$n" 2>/dev/null && n_ok=$((n_ok + 1))
-        fi
-    done
-    [ "$want" != "$last" ] && printf '%s\n' "$want" >"$SD_CURR_MARK" 2>/dev/null
-    [ "$n_ok" -gt 0 ] && sd_info charge "电流墙 → ${want}mA（$n_ok 节点）"
-    return 0
-}
-
 sd_charge_tick() {
-    local cap=0 fast_cap
-
     sd_batt_status_v
     case "$_sd_rv" in
         Charging|Full) ;;
@@ -3164,18 +2772,9 @@ sd_charge_tick() {
             return 0 ;;
     esac
 
-    cap=""
-    sd_ps_attr_v capacity && cap=$_sd_rv
-    case "$cap" in ''|*[!0-9]*) cap=0 ;; esac
-    _sd_clamp "${_st_fast_cap:-55}" 20 90 55
-    fast_cap=$_sd_rv
-
-    if [ "$cap" -lt "$fast_cap" ]; then
-        sd_shell_target >/dev/null
-        sd_shell_emul "$_sd_last_out"
-    else
-        sd_shell_emul 0
-    fi
+    # 不设电量阈值：插着电就一直伪装，充到 100% 也不再交还。
+    sd_shell_target >/dev/null
+    sd_shell_emul "$_sd_last_out"
 }
 
 # ------------------------------------------------------------------ 降流解除
@@ -3199,9 +2798,7 @@ sd_cool_node() {
 }
 
 sd_cool_tick() {
-    local want cur bt cap cool_stop cool_soft iab
-
-    [ "$(sd_state_int cool_guard 1 0 1)" = 1 ] || return 0
+    local cur iab bt cap
 
     if ! sd_cool_node; then
         if [ "$_sd_cool_log" != none ]; then
@@ -3214,62 +2811,28 @@ sd_cool_tick() {
     sd_batt_status_v
     case "$_sd_rv" in Charging|Full) ;; *) return 0 ;; esac
 
-    # 这里不再看屏幕状态。原先是"灭屏交给驱动"，但有的机型（如 PJD110，
-    # backlight 节点恒读 0）屏幕判定长期为灭屏，cool_down 停在 7~13 没人清，
-    # 亮屏游戏就只剩 5~10W。灭屏时驱动自己给 0，写 0 对它是空操作，没有副作用。
-
-    # 极限模式下把「留 2」与「交还」两条线一起抬到熔断前 1℃，中间不再轻放。
-    # 默认极限：45℃ 不再留「轻度降流」，一直写 0，到熔断前 1℃ 才交还驱动
-    cool_stop=48
-    sd_limit_for_type_v battery
-    case "$_sd_rv" in
-        ''|0|off) ;;
-        *) cool_stop=$((_sd_rv - 1)) ;;
-    esac
-    cool_soft=$cool_stop
-    bt=""
-    sd_batt_temp_v && bt=$_sd_rv
-    case "$bt" in ''|*[!0-9]*) bt=0 ;; esac
-    if [ "$bt" -ge "$cool_stop" ]; then
-        if [ "$_sd_cool_log" != hot ]; then
-            sd_warn charge "降流解除：电池 ${bt}℃ 过热，交还驱动控制"
-            _sd_cool_log=hot
-        fi
-        return 0
-    fi
-
-    cap=""
-    sd_ps_attr_v capacity && cap=$_sd_rv
-    case "$cap" in ''|*[!0-9]*) cap=0 ;; esac
-
-    # 电量 ≥85% 曾经写 1（"恒压段只轻放"）。实测这条会掉协议：PKX110 上
-    # cool_down 0→1 之后 charge_technology 从 7 变成 14、电流 3.6A → 1.0A，
-    # 功率 32W → 9W。恒压段电流本来就由驱动收，不需要再加一档降流。
-    if [ "$bt" -ge "$cool_soft" ]; then want=2
-    else want=0
-    fi
-
+    # 不看温度、不看电量：节点只要被抬起来就压回 0。
     sd_read1 "$SD_COOL_NODE" || return 0
     cur=$_sd_rv
     case "$cur" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$cur" = "$want" ] && return 0
+    [ "$cur" = 0 ] && return 0
 
     # 电流已经正常就别碰这个节点：写入本身会让 OPlus 重选档。
     # 实测 PKB110：ibat 4.3A 时被写 2→0，三秒后掉到 9.7W 并一路抖到 6W；
     # PKX110：写 0→1 后 tech 7→14、3.6A→1.0A，32W 掉到 9W。
-    # 只有确实被降流（<2.5A）时，写 0 才是"解降流"，否则只是自己把功率打下来。
+    # 只有确实被降流（<2.5A）时，写 0 才是"解降流"。
     iab=0
     sd_chg_current_v && iab=$_sd_rv
     case "$iab" in ''|*[!0-9-]*) iab=0 ;; esac
     [ "$iab" -lt 0 ] && iab=$((-iab))
-    if [ "$want" = 0 ] && [ "$iab" -ge 2500000 ]; then
-        return 0
-    fi
+    [ "$iab" -ge 2500000 ] && return 0
 
-    if printf '%s\n' "$want" >"$SD_COOL_NODE" 2>/dev/null; then
-        if [ "$_sd_cool_log" != "$want" ]; then
-            sd_info charge "降流解除：cool_down ${cur} → ${want}（电池 ${bt}℃ 电量 ${cap}% 电流 $((iab / 1000))mA）"
-            _sd_cool_log=$want
+    bt=""; sd_batt_temp_v && bt=$_sd_rv
+    cap=""; sd_ps_attr_v capacity && cap=$_sd_rv
+    if printf '0\n' >"$SD_COOL_NODE" 2>/dev/null; then
+        if [ "$_sd_cool_log" != 0 ]; then
+            sd_info charge "降流解除：cool_down ${cur} → 0（电池 ${bt:-?}℃ 电量 ${cap:-?}% 电流 $((iab / 1000))mA）"
+            _sd_cool_log=0
         fi
     elif [ "$_sd_cool_log" != fail ]; then
         sd_warn charge "降流解除失败：$SD_COOL_NODE 写不进去"
@@ -3322,20 +2885,7 @@ sd_unlock_tick() {
         return 0
     fi
 
-    # 兜底先于写入：读不到真实电池温度就不猜，直接撤销。
-    if ! sd_batt_real_v; then
-        sd_state_set chg_unlock 0
-        sd_unlock_restore
-        sd_warn charge "阶梯解锁已撤销：读不到电池真实温度，不猜安全"
-        return 0
-    fi
-    if [ "$_sd_rv" -ge "$SD_UNLOCK_HARD" ]; then
-        sd_state_set chg_unlock 0
-        sd_unlock_restore
-        sd_warn charge "阶梯解锁已撤销：电池真实 ${_sd_rv}℃ ≥ ${SD_UNLOCK_HARD}℃"
-        return 0
-    fi
-
+    # 不看温度：开着就一直压 0，HAL 写回来也再压。
     for p in $(sd_unlock_list); do
         [ -e "$p" ] && [ -w "$p" ] || continue
         sd_read1 "$p" || continue
@@ -3447,11 +2997,14 @@ sd_chg_current_v() {
         esac
         v=$_sd_rv
         case "$v" in ''|*[!0-9-]*) continue ;; esac
+        # 单位归一在这里做：有的机型 current_now 报 mA，有的报 µA。
+        # 不归一的话 2500000 这道闸永远放行，normal 状态也会去写 cool_down。
         abs=$v; [ "$abs" -lt 0 ] && abs=$((-abs))
+        sd_uv_norm "$abs" && abs=$_sd_rv
         [ "$abs" -eq 0 ] && continue
         have=1
         if [ "$best" -eq 0 ] || [ "$abs" -gt "$babs" ]; then
-            best=$v
+            if [ "$v" -lt 0 ]; then best=$((-abs)); else best=$abs; fi
             babs=$abs
         fi
     done
@@ -4147,15 +3700,14 @@ sd_power_json() {
 SD_DESC_LAST="$SD_RUN/desc.last"
 
 sd_desc_text() {
-    local mode gear hz n t
+    local mode t
     [ "$_sd_st_loaded" = 1 ] || sd_state_load
     mode=${_st_temp_mode:-off}
     [ "$mode" = dyn ] && mode=static
-    _sd_clamp "${_st_aggr:-10}" 0 10 10
-    gear=$_sd_rv
+    _sd_clamp "${_st_shell_temp:-25}" 20 33 25
 
     case "$mode" in
-        static|charge) t="温控档位 $gear/10" ;;
+        static|charge) t="温度伪装 $_sd_rv℃" ;;
         *)             t="温度伪装关闭" ;;
     esac
     [ "$mode" = charge ] && t="$t（仅充电）"
@@ -4323,9 +3875,9 @@ sd_diag() {
         printf '# 开始: %s  时长: %ss  间隔: %ss\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$dur" "$iv"
         printf '# 设备: %s\n' "$(getprop ro.product.model 2>/dev/null) $(getprop ro.build.display.id 2>/dev/null)"
         sd_plat_resolve
-        printf '# 平台: %s  温度模式: %s  wall: %s  aggr: %s  curr_max: %s  core: %s  noncore: %s\n' \
-            "$_sd_plat" "$(sd_state_get temp_mode off)" "$(sd_state_get wall off)" \
-            "$(sd_state_int aggr 10 0 10)" "$(sd_state_int curr_max 0 0 8000)" \
+        printf '# 平台: %s  温度模式: %s  伪装: %s℃  core: %s  noncore: %s\n' \
+            "$_sd_plat" "$(sd_state_get temp_mode off)" \
+            "$(sd_state_int shell_temp 25 20 33)" \
             "$(sd_state_get core_temp off)" "$(sd_state_get noncore_temp off)"
         printf '# 带 * 的温区表示 temp 已被 bind mount 顶成固定值（系统读到的不是真实温度）\n'
     } | tee "$f" 2>/dev/null
@@ -4346,16 +3898,8 @@ sd_diag() {
         [ "$cv" -gt 100000 ] 2>/dev/null && cvm=$((cv / 1000)) || cvm=$cv
         lim=$(( (cim < 0 ? -cim : cim) * cvm / 1000000 ))
 
-        sd_curr_target_v; tgt=$_sd_rv
-        pct=${_sd_curr_pct:-100}
-
         line=$(printf '[%4ss] %-9s 电池 %3s℃  %5smA  %5smV  %4sW' \
             "$i" "${st:-?}" "${bt:--}" "$cim" "$cvm" "$lim")
-        if [ "$tgt" -gt 0 ]; then
-            line="$line  限流 目标${tgt}mA(${pct}%)"
-        else
-            line="$line  限流 不限"
-        fi
 
         {
             printf '%s\n' "$line"
