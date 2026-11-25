@@ -1908,30 +1908,30 @@ sd_verify_json() {
 }
 
 sd_xf_hightemp() {
-    sed -E -e 's/([A-Za-z_]+=")true(")/\1false\2/g' -e 's/>true</>false</g' "$1" 2>/dev/null >"$2"
+    sed -e 's/\([A-Za-z_]\{1,\}="\)true\("\)/\1false\2/g' -e 's/>true</>false</g' "$1" 2>/dev/null >"$2"
 }
 
 sd_xf_control() {
-    sed -E 's/([A-Za-z_]+=")true(")/\1false\2/g' "$1" 2>/dev/null >"$2"
+    sed 's/\([A-Za-z_]\{1,\}="\)true\("\)/\1false\2/g' "$1" 2>/dev/null >"$2"
 }
 
 sd_xf_fps() {
-    sed -E 's/fps="[0-9.]+"/fps="144"/g' "$1" 2>/dev/null >"$2"
+    sed 's/fps="[0-9.]\{1,\}"/fps="144"/g' "$1" 2>/dev/null >"$2"
 }
 
 sd_xf_legacy() {
-    sed -E '/[Ee]nable/ s/>1</>0</g' "$1" 2>/dev/null >"$2"
+    sed '/[Ee]nable/ s/>1</>0</g' "$1" 2>/dev/null >"$2"
 }
 
 sd_xf_chargejson() {
-    sed -E 's/150,450\]/150,550]/g' "$1" 2>/dev/null >"$2"
+    sed 's/150,450\]/150,550]/g' "$1" 2>/dev/null >"$2"
 }
 
 sd_xf_qega() {
-    sed -E \
-        -e 's/(SkinTemperatureNode:[[:space:]]*)xo-therm/\1battery/' \
-        -e '/^100001/s/^100001([[:space:]]+)hok[[:space:]]+48000[[:space:]]+1200/180001\1hok         55000          2000/' \
-        -e '/^0[[:space:]]+adaptive/s/50000/55000/' \
+    sed \
+        -e 's/\(SkinTemperatureNode:[[:space:]]*\)xo-therm/\1battery/' \
+        -e '/^100001/s/^100001\([[:space:]]\{1,\}\)hok[[:space:]]\{1,\}48000[[:space:]]\{1,\}1200/180001\1hok         55000          2000/' \
+        -e '/^0[[:space:]]\{1,\}adaptive/s/50000/55000/' \
         "$1" 2>/dev/null >"$2"
 }
 
@@ -1945,10 +1945,17 @@ sd_transform() {
     local src="$1" dst="$2" tmp rc=1 kind=xml bk
     tmp="$dst.sdtmp"
 
+    # 源读不到（分区缺项、inode 已失效）属于环境问题，不是模块故障：静默跳过。
+    # 以前这里会一路走到 sd_xf_* 返回非 0，然后记一条 E "改写失败"——那类机器
+    # 每次开机都刷一批假错误，看起来像模块坏了，实际只是 ROM 里没有这份配置。
+    [ -r "$src" ] || return 0
+
     bk="$SD_BACKUP$src"
     if [ ! -f "$bk" ]; then
         mkdir -p "$(dirname "$bk")" 2>/dev/null
-        cp -p "$src" "$bk" 2>/dev/null
+        # 备份失败要留痕：以前 2>/dev/null 把错误吞了，只建目录不留文件，
+        # 等真要回滚时才发现备份是空的。
+        cp -p "$src" "$bk" 2>/dev/null || sd_warn override "备份失败: $src"
     fi
     mkdir -p "$(dirname "$dst")" 2>/dev/null
 
@@ -2118,7 +2125,17 @@ sd_nm_mirror() {
           printf '%s\n' "$rel"
       done ) >"$cur"
 
-    [ -s "$cur" ] || return 2
+    if [ ! -s "$cur" ]; then
+        # 一个覆盖文件都没产出：把上一轮的镜像目录和 nm.list 一起清掉。
+        # 留着的话 NoMount 下次开机会照旧清单去挂已经不存在的源，留下
+        # "目录项还在、stat 拿不到 inode"的断链挂载点，比不挂更糟。
+        if [ -n "$(ls -A "$SD_NM_ROOT" 2>/dev/null)" ] || [ -s "$SD_NM_LIST" ]; then
+            rm -rf "$SD_NM_ROOT" 2>/dev/null
+            rm -f "$SD_NM_LIST" 2>/dev/null
+            sd_info mount "无覆盖文件，已清空 NoMount 镜像与清单"
+        fi
+        return 2
+    fi
 
     if [ -s "$SD_NM_LIST" ]; then
         while IFS= read -r rel; do
@@ -2273,8 +2290,32 @@ sd_mounts_alive() {
     sd_mounts_content_ok
 }
 
+# 扫 /proc/self/mountinfo，把挂载源（root 字段）落在本模块目录下的挂载点全卸掉。
+# 只靠 mounts.list 与 files/ 会漏：files/ 被清空之后两边都对不上，上一版留下的
+# bind mount 就一直挂着；源被删后它变成 stat 不到的断链挂载点，umount 按路径
+# 也认不出来，只能按 root 字段匹配。
+sd_umount_module_mounts() {
+    [ -r /proc/self/mountinfo ] || return 0
+    awk '
+        {
+            i = 0
+            for (k = 1; k <= NF; k++) if ($k == "-") { i = k; break }
+            if (i > 0 && $5 != "" && $4 != "") print $5 "\t" $4
+        }
+    ' /proc/self/mountinfo 2>/dev/null |
+    while IFS="$(printf '\t')" read -r _mp _root; do
+        case "$_root" in
+            "$MODDIR"/*|"$SD_BACKUP"/*)
+                umount "$_mp" 2>/dev/null || umount -l "$_mp" 2>/dev/null
+                ;;
+        esac
+    done
+    return 0
+}
+
 sd_umount_overrides() {
     local p left n mp purge="${1:-}"
+    sd_umount_module_mounts
     mp=$(awk '{print $2}' /proc/mounts 2>/dev/null)
     {
         [ -f "$SD_MOUNTS" ] && sort -u "$SD_MOUNTS" 2>/dev/null
