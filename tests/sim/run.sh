@@ -6,6 +6,10 @@ PASS=0; FAIL=0; T0=$(date +%s); FAILED=""
 SD_SPOOF_DIR="${SD_SPOOF_DIR:-/tmp/qc-sim-spoof}"
 export SD_SPOOF_DIR
 
+# 仿真环境没开 SELinux，ls -Z 只返回 "?"。给一个固定上下文，模拟真机
+# /vendor/etc 下配置文件的标签，否则 chcon 兜底路径永远走失败分支。
+export SD_CTX_OVERRIDE="u:object_r:vendor_configs_file:s0"
+
 # 超长实际值截断：守护日志、整段 JSON 都可能几百字符，一条失败不该刷屏
 _short() {
     local v="$1"
@@ -101,7 +105,16 @@ printf '#!/bin/sh\necho "UI: $*"\n' >/usr/local/bin/ui_print
 printf '#!/bin/sh\necho "ABORT: $*" >&2\nexit 1\n' >/usr/local/bin/abort
 printf '#!/bin/sh\nexit 0\n' >/usr/local/bin/start
 printf '#!/bin/sh\nexit 0\n' >/usr/local/bin/stop
-printf '#!/bin/sh\nexit 1\n' >/usr/local/bin/chcon   # 无 SELinux，模拟失败
+# 模拟 toybox 的 chcon：不认 GNU 的 --reference，只接受显式上下文。
+# 真实机型上就是这个行为，旧代码在这里全数失败。
+cat >/usr/local/bin/chcon <<'EOS'
+#!/bin/sh
+case "$1" in
+    --reference=*) exit 1 ;;
+    u:object_r:*)  exit 0 ;;
+    *)             exit 1 ;;
+esac
+EOS
 printf '#!/bin/sh\necho "$@" >/tmp/am.args\n' >/usr/local/bin/am
 cat >/usr/local/bin/settings <<'EOS'
 #!/bin/sh
@@ -165,13 +178,9 @@ cat >/vendor/etc/sys_high_temp_protect_0.xml <<'EOF'
     <item enable="true" threshold="70000"/>
 </high_temp_protect>
 EOF
-cat >/vendor/etc/sys_thermal_control_config.xml <<'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<thermal_control enable="true">
-    <level value="1" enable="true"/>
-    <level value="2" enable="true"/>
-</thermal_control>
-EOF
+# 真实机型上这个文件带 UTF-8 BOM（EF BB BF），head -c 1 取到 0xEF，
+# 旧校验会判"非 XML"整份拒绝。这里就用 BOM 版本，确保这条路径被测到。
+printf '\357\273\277<?xml version="1.0" encoding="utf-8"?>\n<thermal_control enable="true">\n    <level value="1" enable="true"/>\n    <level value="2" enable="true"/>\n</thermal_control>\n' >/vendor/etc/sys_thermal_control_config.xml
 cat >/vendor/etc/thermallevel_to_fps.xml <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <ThermalLevel>
@@ -263,6 +272,7 @@ eq "$(grep -c 'enable="true"' "$OV/vendor/etc/sys_high_temp_protect_0.xml" 2>/de
 grep -q 'threshold="65000"' "$OV/vendor/etc/sys_high_temp_protect_0.xml" && ok "高温阈值未被改动" || ng "高温阈值被改"
 eq "$(grep -c 'enable="true"' "$OV/vendor/etc/sys_thermal_control_config.xml" 2>/dev/null)" "0" "温控开关 true→false"
 grep -q '<level value="1"' "$OV/vendor/etc/sys_thermal_control_config.xml" && ok "温控档位数据保留" || ng "温控档位丢失"
+eq "$(head -c 3 "$OV/vendor/etc/sys_thermal_control_config.xml" | od -An -tx1 | tr -d ' \n')" "efbbbf" "BOM 开头的温控表未被整份丢弃"
 eq "$(grep -c '>0<' "$OV/vendor/etc/sys_thermal_config.xml" 2>/dev/null)" "2" "legacy 含 enable 行的 1→0"
 grep -q '<other>1</other>' "$OV/vendor/etc/sys_thermal_config.xml" && ok "legacy 非 enable 行未被误伤" || ng "legacy 误伤其他行"
 grep -q '150,550\]' "$OV/vendor/etc/devices_config.json" && ok "充电窗口改到 55℃" || ng "充电窗口未改"
@@ -295,6 +305,7 @@ SD_MODDIR=/opt/qc sh /opt/qc/post-fs-data.sh >/tmp/pfd.log 2>&1
 eq "$?" "0" "post-fs-data 退出码 0"
 m=$(grep -c ' /vendor/etc/' /proc/mounts)
 eq "$m" "8" "8 个 vendor 配置已挂载"
+eq "$(cat "$SDD/run/chcon.fail" 2>/dev/null | wc -l | tr -d ' ')" "0" "chcon 走显式上下文兜底，无失败清单"
 grep -q 'fps="144"' /vendor/etc/thermallevel_to_fps.xml && ok "挂载后读到的是覆盖层内容" || ng "挂载未生效"
 eq "$(cat "$SDD/boot.count")" "1" "开机计数 1"
 

@@ -46,7 +46,14 @@ printf '#!/bin/sh\necho "UI: $*"\n' >/usr/local/bin/ui_print
 printf '#!/bin/sh\necho "ABORT: $*" >&2\nexit 1\n' >/usr/local/bin/abort
 printf '#!/bin/sh\nexit 0\n' >/usr/local/bin/start
 printf '#!/bin/sh\nexit 0\n' >/usr/local/bin/stop
-printf '#!/bin/sh\nexit 1\n' >/usr/local/bin/chcon
+cat >/usr/local/bin/chcon <<'EOS'
+#!/bin/sh
+case "$1" in
+    --reference=*) exit 1 ;;
+    u:object_r:*)  exit 0 ;;
+    *)             exit 1 ;;
+esac
+EOS
 cat >/usr/local/bin/settings <<'EOS'
 #!/bin/sh
 DB=/tmp/settings-m.db

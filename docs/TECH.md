@@ -686,7 +686,10 @@ su -c 'head -c 200 /data/adb/modules/quickcharge/system/vendor/etc/sys_thermal_c
 - **节点名因机型而异。** `shell-back` / `xo-therm` 这类名字不是所有机型都有；MTK 又是另一套
   `mtktsbattery` / `mtktscpu`。温区判断已改为按语义分类，匹配不上时仍会退化为"只挂配置"，
   日志里会有 `sentinel=none`。
-- **SELinux。** `chcon --reference` 失败会汇总成一条 `W` 日志，接着尝试挂载。若系统服务仍拒绝访问，先查这条。
+- **SELinux。** 覆盖文件的上下文先按 `chcon --reference` 继承，失败再从原件的 `ls -Z` 取
+  `u:object_r:xxx:sN` 显式设置（toybox 的 chcon 不认 `--reference`，这一步是常态而非异常）。
+  两条都不成会汇总成一条 `W` 日志，接着尝试挂载；系统服务仍拒绝访问时先查这条，
+  也可用 `SD_CTX_OVERRIDE` 强制指定。3.0.12 之前的版本在这里是全数失败。
 - **只骗得过读 `thermal_zone` 的软件层。** 内核级热保护、硬件断电保护不受影响，这是好事——它是最后一道防线。
 - **压得越狠，越容易撞上硬件保护。** 把电池温度压到 30 出头时，系统会按"电池很凉"继续给 60-80W，
   而充电 IC 与电池保护板读的是自己的 NTC，到 42-45℃ 会自行降流甚至短暂停充，表现为功率在

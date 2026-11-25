@@ -2078,13 +2078,60 @@ sd_xml_balanced() {
     [ "$o" = "$c" ]
 }
 
+# 不少 ROM 的温控 XML 带 UTF-8 BOM（EF BB BF），head -c 1 取到的是 0xEF。
+# 旧实现据此判定"非 XML"并整份丢弃，日志里表现为"校验失败(非 XML)"，
+# 结果 sys_thermal_control_config.xml 从未被覆盖。这里跳过 BOM 再看首字节。
+sd_xml_lead_ok() {
+    local c
+    c=$(head -c 1 "$1" 2>/dev/null)
+    [ "$c" = "<" ] && return 0
+    if command -v od >/dev/null 2>&1; then
+        [ "$(head -c 3 "$1" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')" = "efbbbf" ] || return 1
+    fi
+    [ "$(tail -c +4 "$1" 2>/dev/null | head -c 1)" = "<" ]
+}
+
+# 取参考文件的 SELinux 上下文。先取文件本身，再退到所在目录。
+# ls -Z 的列序在 GNU / toybox 下不一致，所以直接按 u:object_r:xxx:sN 提串。
+# SD_CTX_OVERRIDE 用于强制指定（老 ROM 的 ls 不带 -Z，或仿真测试）。
+sd_file_ctx() {
+    local c
+    [ -n "$SD_CTX_OVERRIDE" ] && { printf '%s' "$SD_CTX_OVERRIDE"; return 0; }
+    c=$(ls -Zd "$1" 2>/dev/null | grep -o 'u:object_r:[A-Za-z0-9_]*:s[0-9]*' | head -n 1)
+    [ -n "$c" ] && { printf '%s' "$c"; return 0; }
+    c=$(ls -Zd "${1%/*}" 2>/dev/null | grep -o 'u:object_r:[A-Za-z0-9_]*:s[0-9]*' | head -n 1)
+    [ -n "$c" ] && { printf '%s' "$c"; return 0; }
+    return 1
+}
+
+# toybox 的 chcon 不认 GNU 的 --reference，直接调用必然失败
+# （日志里"3/3 chcon 失败"就是这条）。改成先试 --reference，不行就显式设。
+sd_chcon_ref() {
+    local ctx
+    chcon --reference="$1" "$2" 2>/dev/null && return 0
+    ctx=$(sd_file_ctx "$1") || return 1
+    chcon "$ctx" "$2" 2>/dev/null
+}
+
+# chmod / chown 的 --reference 同样是 GNU 扩展，toybox 不认时退回显式值。
+sd_chmod_ref() {
+    local m
+    chmod --reference="$1" "$2" 2>/dev/null && return 0
+    m=$(stat -c %a "$1" 2>/dev/null) || return 1
+    [ -n "$m" ] && chmod "$m" "$2" 2>/dev/null
+}
+
+sd_chown_ref() {
+    local ug
+    chown --reference="$1" "$2" 2>/dev/null && return 0
+    ug=$(stat -c '%u:%g' "$1" 2>/dev/null) || return 1
+    [ -n "$ug" ] && chown "$ug" "$2" 2>/dev/null
+}
+
 sd_verify_xml() {
     local a b
     [ -s "$2" ] || { sd_warn override "校验失败(空文件): $2"; return 1; }
-    case "$(head -c 1 "$2" 2>/dev/null)" in
-        '<') ;;
-        *) sd_warn override "校验失败(非 XML): $2"; return 1 ;;
-    esac
+    sd_xml_lead_ok "$2" || { sd_warn override "校验失败(非 XML): $2"; return 1; }
     sd_xml_balanced "$1" || { sd_warn override "校验失败(原件不配平，拒绝): $1"; return 1; }
     sd_xml_balanced "$2" || { sd_warn override "校验失败(产物不配平): $2"; return 1; }
     a=$(sd_count_tags "$1")
@@ -2306,9 +2353,9 @@ sd_nm_mirror() {
           fi
           [ -f "$dst" ] || continue
           if [ -e "/$rel" ]; then
-              chmod --reference="/$rel" "$dst" 2>/dev/null
-              chown --reference="/$rel" "$dst" 2>/dev/null
-              chcon --reference="/$rel" "$dst" 2>/dev/null
+              sd_chmod_ref "/$rel" "$dst"
+              sd_chown_ref "/$rel" "$dst"
+              sd_chcon_ref "/$rel" "$dst"
           fi
           printf '%s\n' "$rel"
       done ) >"$cur"
@@ -2419,9 +2466,9 @@ sd_mount_overrides() {
           src="$SD_OVERRIDES/$rel"
           dst="/$rel"
           [ -e "$dst" ] || continue
-          chmod --reference="$dst" "$src" 2>/dev/null
-          chown --reference="$dst" "$src" 2>/dev/null
-          chcon --reference="$dst" "$src" 2>/dev/null || { echo "$dst" >>"$chgfail"; }
+          sd_chmod_ref "$dst" "$src"
+          sd_chown_ref "$dst" "$src"
+          sd_chcon_ref "$dst" "$src" || { echo "$dst" >>"$chgfail"; }
           umount -l "$dst" 2>/dev/null
           if mount -o bind "$src" "$dst" 2>/dev/null; then
               echo "$dst" >>"$SD_MOUNTS"
