@@ -58,9 +58,14 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 | 包体积 | 67 KB | 390 KB（内含 713 KB 静态二进制） |
 | 适用 | 任何机型，出问题容易用 `sh -x` 追 | 追求零唤醒开销、老机型 |
 
-C 版把 `bin/qcmon` 放进包里，`service.sh` 检测到它就 `exec`，不再走 shell 循环；
+C 版把 `bin/qcmon` 放进包里，并在 `module.prop` 写 `channel=c`，`service.sh` 只有看到
+这个标记才 `exec`，不再走 shell 循环；shell 包不含二进制、写 `channel=shell`。
 二进制不存在或跑不起来（架构不对、被杀软拦）会自动回退 shell 版，所以两个包
 共用同一份 `service.sh`。
+
+> 3.1.2～3.1.3 的 shell 包误带了二进制，`service.sh` 只看「文件在不在」，
+> 导致 shell 版实际跑的是 C 守护——shell 侧的修复对这批用户完全没生效。
+> 3.1.4 起改为显式通道判定，残留的二进制一律不碰。
 
 想临时验证 shell 版行为，不用重刷：
 
@@ -819,29 +824,28 @@ su 0 sh -c 'sh /data/adb/modules/quickcharge/action.sh status | grep 亮屏快�
 `/sys/class/graphics/fb0/blank`），一次 read、零 fork。不用 `dumpsys power`：
 15 秒一次的 fork 太贵，而且 KernelSU / APatch 的域经常连不上 power 服务。
 
-## 默认极限：所有降流闸都在熔断前 1℃
+## 配置改写：目录、开关与自检
 
-3.0 起没有「极限充电」按钮，也不再有 `max_mode`。以前那个按钮做的事直接变成默认值：
+只扫这 7 个目录（`-maxdepth 2`）：`/vendor/etc`、`/odm/etc`、`/my_stock/etc`、
+`/my_product/etc`、`/system/vendor/etc`、`/system/system_ext/etc`、`/vendor/qti/etc`。
+`/my_stock` 与 `/my_product` 是 ColorOS 14+ 放温控表的地方，3.1.4 起纳入。
 
-| 环节 | 默认行为 |
-|---|---|
-| 温度墙 | `wall=60`；60 与 off 都表示不设墙，按熔断前 1℃ 处理 |
-| 电流档位 | 四档 100 / 75 / 50 / 25%，从墙-3℃ 起逐级降；绝对限流默认关闭 |
-| 亮屏 FCC | 不再 38/41℃ 打七折，一直给满基准，熔断前 1℃ 才放手 |
-| cool_down | 45℃ 不再写 `2`，到熔断前 1℃ 才交还驱动 |
-| 壳温伪装 | 屏障 = 熔断前 1℃ |
-| 限流提前量 | 面板已移除；`curr_edge` 保留为兼容字段，不参与分档 |
+`charging_*.txt` 改写前做列语义探测：首列必须在 0~600（0.1℃ 量级）且单调不减，
+否则整份跳过并在日志记 `跳过改写(格式不符)`。这样不会把 +12℃ 加到电流列上。
 
-自定义温度墙仍然有效，但会被夹在熔断前 1℃：
+生成后跑一次自检：高温保护 XML 里不应再有 `="true"`，充电表行数应与原件一致，
+不符合记 `W`。日志里每个目录还有一行命中数（`改写 / 跳过 / 失败`），
+排查「没扫到」还是「改坏了」先看这几行。
+
+需要区分「是配置改写的锅还是伪装的锅」时：
 
 ```sh
-su 0 sh -c 'sh /data/adb/modules/quickcharge/action.sh wall 45'
+su 0 sh /data/adb/modules/quickcharge/action.sh overrides off   # 只卸配置层
+su 0 sh /data/adb/modules/quickcharge/action.sh overrides on    # 恢复
 ```
 
-`wall 60` 或 `wall off` 回到无限制。`curr_max` 是唯一还会主动降功率的用户设置：
-它和屏幕快充写同一个 FCC 节点，设了之后屏幕快充整段不接管。
-
-熔断本身不动：真实温度到 `battery_limit`（默认 48℃）照样撤伪装、停止改写。
+`overrides off` 会卸掉 bind mount、清空 NoMount 镜像与清单；温度伪装走
+`emul_temp`，与配置层无关，照常工作。
 
 ## 极限功率：`batt_spoof`、`unlock` 与 CPU 伪装
 
@@ -916,12 +920,13 @@ ADC，不是 thermal zone。所以：
 
 | 手段 | 收益 | 代价 |
 |---|---|---|
-| 提高 `wall` / 关墙 | 高，直接解除软件降流 | 机身更热，可随时改回 |
+| 壳温伪装（默认 30℃） | 高，充电策略看到的是凉机身 | 真实温度仍在涨，硬件保护会先切 |
 | `unlock on` | 中，HAL 侧不再按温度压流 | 机身更热，≥45℃ 自动撤销 |
 | `batt_spoof` | 中低，仅对读温区的策略有效 | 电池长期高温，寿命与安全 |
 | 抬浮充电压 | 高（多 4～6% 容量） | **本模块不做**，需改 dtbo，不可回滚 |
 
-`curr_max` 拉满（设为 0）只是取消上限，实际电流仍由适配器、线材、电量、温度共同决定。
+实际电流由适配器、线材、电量、温度共同决定，模块能做的只有两条：让充电策略
+读到的壳温更低（`emul_temp`），以及在确实被降流时把 `cool_down` 写回 0。
 
 ## 2.9.6：掉功率的三条真实路径
 

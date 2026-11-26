@@ -241,9 +241,9 @@ run sensor >/dev/null
 sv=$(val "$ROOT/sys/module/oplus_chg/parameters/ignore_screen_state")
 chk "息屏还原 ignore_screen_state" "$sv" "0"
 
-# ============================================================ 6b. FCC 回写路径：息屏保持
-# 旧实现息屏 30s 后按 scr.orig 还原，把亮屏被压的 2A 写回去，功率再也上不来。
-echo "[6b] 亮屏快充：FCC 回写（息屏不放手）"
+# ============================================================ 6b. FCC 回写路径：息屏不写
+# 息屏期间按 scr.orig 还原或继续回写，都会替驱动踩刹车（2.9.73~3.0.4 的老 bug）。
+echo "[6b] 亮屏快充：FCC 回写（息屏不写）"
 setup
 rm -rf "$ROOT/sys/module/oplus_chg"
 state static 30
@@ -259,8 +259,25 @@ printf '2000000\n' >"$ROOT/sys/class/power_supply/battery/constant_charge_curren
 screen_off
 run sensor >/dev/null
 run sensor >/dev/null
-chk "息屏也顶回 3A" \
-    "$(val "$ROOT/sys/class/power_supply/battery/constant_charge_current_max")" "3000000"
+# 息屏不写任何电池侧节点：驱动在息屏边界会自己把 FCC 放开，模块回写等于替驱动踩刹车
+chk "息屏不写 FCC（保持 2000000）" \
+    "$(val "$ROOT/sys/class/power_supply/battery/constant_charge_current_max")" "2000000"
+
+# ============================================================ 6c. 只有输入侧节点
+# usb/current_max 是充电器能力上限（PD 协商用），写它会让充电器重新协商：
+# 实测 OPPO Find X8 60W→37W、一加 12 停 33W。宁可判「本机不支持」。
+echo "[6c] 只有 usb/current_max 时不接管"
+setup
+rm -rf "$ROOT/sys/module/oplus_chg"
+rm -f "$ROOT/sys/class/power_supply/battery/constant_charge_current_max"
+rm -f "$ROOT/sys/class/power_supply/battery/current_max"
+state static 30
+screen_off; run sensor >/dev/null
+screen_on;  run sensor >/dev/null
+chk "usb/current_max 不被写（保持 2000000）" \
+    "$(val "$ROOT/sys/class/power_supply/usb/current_max")" "2000000"
+[ -f "$BASE/data/run/scr.orig" ] && bad "不该落 scr.orig（说明接管了）" || ok "不落 scr.orig"
+has "日志说明不支持" "本机不支持" "$BASE/data/log.txt"
 
 # ============================================================ 8. 电池伪装
 echo "[8] 电池伪装与硬上限"

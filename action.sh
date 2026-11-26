@@ -37,6 +37,7 @@ Quick Charge (QC) 控制入口。
   level <0-4>                  日志 0关（默认） 1事件 2详细 3逐轮 4调试；开 1/2 会先写环境头
   logs [e|w|i|d|boot|daemon|N] 查看日志
   mount | umount               手动挂载 / 卸载配置覆盖层
+  overrides <on|off>           配置改写总开关（off 只卸覆盖层，温度伪装照常）
   rebuild                      重新生成并挂载（OTA 后一般不用，开机自会处理）
   reboot-safe                  退出安全模式并立即重挂
   reset                        恢复初始状态（清空全部参数）
@@ -253,6 +254,7 @@ sd_set_temp() {
             echo "温度模式 -> off" ;;
         static)
             sd_state_set shell_temp "$t"
+            [ -n "${2:-}" ] && sd_state_set shell_temp_manual 1
             sd_state_set temp_mode static
             sd_state_set off_manual 0
             _sd_emul_last=""
@@ -452,6 +454,9 @@ case "$1" in
              case "$v" in ''|*[!0-9]*) echo "伪装温度需为 20~33 的整数"; exit 1 ;; esac
              { [ "$v" -ge 20 ] && [ "$v" -le 33 ]; } || { echo "伪装温度需为 20~33 的整数"; exit 1; }
              sd_state_set shell_temp "$v"
+             # 手改标记：升级迁移只改「从没被用户动过」的值，
+             # 否则把人家专门调好的 25 静默改成 30，升级即变慢。
+             sd_state_set shell_temp_manual 1
              echo "伪装温度 -> ${v}℃" ;;
     restart) sd_daemon_stop
              if sd_ensure_daemon; then
@@ -481,7 +486,7 @@ case "$1" in
                  *)          echo "用法: hzguard on|off"; exit 1 ;;
              esac ;;
     power)   sd_power_json ;;
-    chg)     if [ -x "$MODDIR/bin/qcmon" ]; then
+    chg)     if sd_use_c; then
                  "$MODDIR/bin/qcmon" chg 2>/dev/null || sd_chg_line
              else
                  sd_chg_line
@@ -519,6 +524,24 @@ case "$1" in
     logs)    shift; sd_do_logs "${1:-i}" "${2:-60}" ;;
     mount)   sd_mount_overrides ;;
     umount)  sd_umount_overrides purge ;;
+    overrides)
+             shift
+             case "${1:-}" in
+                 on|1)
+                     sd_state_set overrides_off 0
+                     rm -f "$SD_BUILT" 2>/dev/null
+                     sd_build_overrides
+                     sd_mount_overrides
+                     echo "配置改写 -> 开启（温度伪装不受影响）" ;;
+                 off|0)
+                     sd_state_set overrides_off 1
+                     sd_umount_overrides
+                     # 镜像与清单一起清掉：留着会让 NoMount 下次开机继续挂旧产物。
+                     rm -rf "$SD_OVERRIDES" "$SD_NM_ROOT" 2>/dev/null
+                     rm -f "$SD_BUILT" "$SD_NM_LIST" 2>/dev/null
+                     echo "配置改写 -> 关闭（已卸覆盖层；温度伪装照常工作）" ;;
+                 *)  echo "用法: overrides on|off"; exit 1 ;;
+             esac ;;
     reboot-safe)
         printf '0\n' >"$SD_DATA/boot.count"
         sd_umount_overrides

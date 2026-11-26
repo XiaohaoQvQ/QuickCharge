@@ -99,6 +99,7 @@ hz=off
 power_scale=100
 cells_mode=auto
 off_manual=0
+overrides_off=0
 log_level=1
 tick=15"
 
@@ -145,20 +146,26 @@ if [ "$defrev" -lt 4 ]; then
     for _k in aggr wall fast_cap sentinel_limit battery_limit curr_max curr_edge cool_guard; do
         grep -q "^$_k=" "$SD_STATE" 2>/dev/null && sed -i "/^$_k=/d" "$SD_STATE"
     done
-    # 旧的 30~60℃ 基准在新模型里太高，统一收到 30℃（用户手动改过的 20~33 保留）
-    _sh=$(sd_state_get shell_temp 30)
-    case "$_sh" in
-        ''|*[!0-9]*) sd_state_set shell_temp 30 ;;
-        *) [ "$_sh" -gt 33 ] && sd_state_set shell_temp 30 ;;
-    esac
+    # 旧的 30~60℃ 基准在新模型里太高，统一收到 30℃；用户手动设过的保留。
+    if [ "$(sd_state_get shell_temp_manual 0)" != 1 ]; then
+        _sh=$(sd_state_get shell_temp 30)
+        case "$_sh" in
+            ''|*[!0-9]*) sd_state_set shell_temp 30 ;;
+            *) [ "$_sh" -gt 33 ] && sd_state_set shell_temp 30 ;;
+        esac
+    fi
     sd_state_set defrev 4
 fi
 if [ "$defrev" -lt 5 ]; then
-    # 3.1.3：默认伪装温度 25 → 30。25℃ 贴着部分平台的低温限流线，
-    # 充满那段反而更慢；3.1.0~3.1.2 留下的默认 25 一律抬回 30。
-    if [ "$(sd_state_get shell_temp 0)" = "25" ]; then
-        sd_state_set shell_temp 30
-        ui_print "- 伪装温度 25℃ → 30℃，避开低温限流"
+    # 3.1.3 的默认伪装温度是 25℃，3.1.4 改回 30（25 贴着部分平台的低温限流线）。
+    # 但 3.1.3 那次是无条件迁移，把用户手动设的 25 也改掉了 —— 这正是
+    # 「升级后反而变慢」的来源。这里只提示、不静默改：
+    #   - 手改过的（shell_temp_manual=1）一律不动；
+    #   - 没标记的老配置无法区分「默认 25」和「自己调的 25」，也保持原值。
+    if [ "$(sd_state_get shell_temp 0)" = "25" ] \
+        && [ "$(sd_state_get shell_temp_manual 0)" != 1 ]; then
+        ui_print "- 伪装温度当前 25℃：新默认已改为 30℃（避开低温限流）"
+        ui_print "  需要提速执行: su 0 sh $MODPATH/action.sh base 30"
     fi
     sd_state_set defrev 5
 fi
@@ -189,7 +196,9 @@ done
 
 sd_sync_desc
 
-if [ "${n:-0}" -eq 0 ]; then
+if [ "$(sd_state_get overrides_off 0)" = 1 ]; then
+    ui_print "- 配置改写已关闭（action.sh overrides on 可恢复）· 温度伪装照常生效"
+elif [ "${n:-0}" -eq 0 ]; then
     ui_print "- 无可改写配置 · 运行期温度伪装照常生效"
 elif [ "${nm_n:-0}" -gt 0 ]; then
     ui_print "- 覆盖  $n 个配置 · ${nm_tag:-NoMount} 接管 $nm_n 个"

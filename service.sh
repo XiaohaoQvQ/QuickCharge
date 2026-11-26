@@ -82,9 +82,10 @@ sd_daemon() {
     mkdir -p "$SD_RUN" 2>/dev/null
 
     # C 守护包：把热路径整个交给 qcmon，不再走下面的 shell 循环。
-    # 二进制缺失、不可执行或跑不起来时，脚本会照旧走 shell 版本，
-    # 所以两个包共用这一份 service.sh，行为由 bin/qcmon 是否存在决定。
-    if [ -x "$MODDIR/bin/qcmon" ] && [ "${SD_SHELL_DAEMON:-0}" != 1 ]; then
+    # 只认 module.prop 的 channel=c：3.1.2/3.1.3 的 shell 包误带了二进制，
+    # 只看「文件在不在」会让 shell 版偷偷跑 C 守护，脚本侧的修复全部失效。
+    # 二进制缺失、不可执行或跑不起来时照旧走 shell 版本。
+    if sd_use_c && [ "${SD_SHELL_DAEMON:-0}" != 1 ]; then
         if "$MODDIR/bin/qcmon" -v >/dev/null 2>&1; then
             # qcmon 读 SD_MODDIR（用于回写 module.prop 描述），MODDIR 是兼容旧名
             export SD_DATA
@@ -127,7 +128,7 @@ sd_daemon() {
     sd_wait_boot || sd_warn daemon "等待 boot_completed 超时，继续启动"
 
     tick=$(sd_state_int tick 15 5 300)
-    sd_info daemon "循环参数: tick=${tick}s wall=$(sd_state_get wall off) aggr=$(sd_state_int aggr 10 0 10) curr_max=$(sd_state_get curr_max 0)"
+    sd_info daemon "循环参数: tick=${tick}s temp=$(sd_state_get temp_mode off) shell=$(sd_state_int shell_temp 30 20 33)℃ channel=$(sd_channel)"
 
     _sd_pause() {
         sleep "$1" & _sd_sp=$!

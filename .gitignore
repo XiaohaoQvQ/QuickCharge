@@ -11,3 +11,6 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# C 守护二进制只随 C 版包发布，shell 包不含
+bin/

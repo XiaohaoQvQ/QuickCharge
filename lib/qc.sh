@@ -188,8 +188,8 @@ sd_dump_env() {
     local mv cv
     mv=$(sd_prop_get version)
     cv=""
-    [ -x "$MODDIR/bin/qcmon" ] && cv=$("$MODDIR/bin/qcmon" -v 2>/dev/null | head -1)
-    _sd_emit I env "module=${mv:-?} daemon=${cv:-shell（无 C 守护）}"
+    sd_use_c && cv=$("$MODDIR/bin/qcmon" -v 2>/dev/null | head -1)
+    _sd_emit I env "module=${mv:-?} channel=$(sd_channel) daemon=${cv:-shell}"
     sd_plat_resolve
     _sd_emit I env "soc=${_sd_plat}（${_sd_plat_why}） emul=$_emul_n${_emul_head} shell-temp=$_sh charge-nodes=$(sd_curr_nodes 2>/dev/null | wc -l | tr -d ' ')"
     if [ -n "$sentinel" ]; then
@@ -1699,7 +1699,7 @@ _sd_emul_ok=-1
 _sd_guard_paused=0
 
 sd_shell_emul() {
-    local celsius="$1" ms e z t n=0 ps=0
+    local celsius="$1" ms pms e z t n=0 ps=0
     _sd_zones_ready
     case "$celsius" in ''|*[!0-9]*) return 1 ;; esac
     if [ "$celsius" -ne 0 ] && { [ "$celsius" -lt 20 ] || [ "$celsius" -gt 100 ]; }; then
@@ -1718,10 +1718,15 @@ sd_shell_emul() {
         printf '%s\n' "$ms" 2>/dev/null >"$z/emul_temp" && n=$((n + 1))
     done
 
+    # /proc/shell-temp 是欧加自定义 proc 接口，没有 emul_temp 那种「写 0 = 关闭
+    # 模拟」的语义：写 0 很可能被读成 0℃，插电头几秒进低温保护（锁 5V/500mA），
+    # 用户看到的就是「刚插上功率很低，过一会儿才好」。关闭时写中性 30℃。
+    pms=$ms
+    [ "$celsius" -eq 0 ] && pms=30000
     if [ -e /proc/shell-temp ]; then
         t=0
         while [ "$t" -le 9 ]; do
-            printf '%s %s\n' "$t" "$ms" 2>/dev/null >/proc/shell-temp && ps=1
+            printf '%s %s\n' "$t" "$pms" 2>/dev/null >/proc/shell-temp && ps=1
             t=$((t + 1))
         done
     fi
@@ -1930,14 +1935,39 @@ sd_xf_chargejson() {
 }
 
 sd_xf_qega() {
+    # 取样点只在电池伪装打开时才指向 battery。battery 与 xo-therm 默认都不在
+    # 伪装范围（sd_zone_class 里 battery/board 两类被隔离），把取样点从前者
+    # 换成后者等于「伪装白做」——3.1.0~3.1.3 的自相矛盾。batt_spoof 关闭时
+    # 保持原厂链路，改写成自己等于不动。
+    local sn=xo-therm
+    [ "$(sd_state_get batt_spoof off)" != off ] && sn=battery
     sed \
-        -e 's/\(SkinTemperatureNode:[[:space:]]*\)xo-therm/\1battery/' \
+        -e "s/\(SkinTemperatureNode:[[:space:]]*\)xo-therm/\1$sn/" \
         -e '/^100001/s/^100001\([[:space:]]\{1,\}\)hok[[:space:]]\{1,\}48000[[:space:]]\{1,\}1200/180001\1hok         55000          2000/' \
         -e '/^0[[:space:]]\{1,\}adaptive/s/50000/55000/' \
         "$1" 2>/dev/null >"$2"
 }
 
+# 返回值：0 改写完成；2 主动跳过（格式不像温度曲线，保持原厂）；1 真失败
 sd_xf_curve() {
+    local n
+    # 先数「三列整数」的行：一条都没有说明不是这个格式，原样保留，别乱动。
+    n=$(awk -F, '/^[0-9]+,[0-9]+,[0-9]+$/ {n++} END{print n+0}' "$2" 2>/dev/null)
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    [ "$n" -gt 0 ] || return 2
+    # 列语义探测：首列必须是 0.1℃ 量级（100~600）且单调不减。
+    # 有的机型首列是 ℃ 整数（35,3000,4500），+120 会变成 155；也有首列不是
+    # 温度的（电压/电流），+120 直接加到那一列 —— 那才是「功率异常低」的硬伤。
+    # 拿不准就跳过：宁可保持原厂，也不要把温度轴整体错位。
+    awk -F, 'BEGIN{ok=1;prev=-1;min=-1;n=0}
+        /^[0-9]+,[0-9]+,[0-9]+$/ {
+            v=$1+0
+            if (v>600 || v<prev) ok=0
+            prev=v
+            if (n==0 || v<min) min=v
+            n++
+        }
+        END{ if (n==0 || min<100) ok=0; exit ok?0:1 }' "$2" 2>/dev/null || return 2
     awk -F, -v off="$1" 'BEGIN{OFS=","}
         /^[0-9]+,[0-9]+,[0-9]+$/ { $1=$1+off; if ($1>600) $1=600; print; next }
         { print }' "$2" 2>/dev/null >"$3"
@@ -1974,6 +2004,8 @@ sd_transform() {
 
     if [ "$rc" -ne 0 ]; then
         rm -f "$tmp"
+        # 2 = 主动跳过：格式不是温度曲线，保持原厂，不算故障。
+        [ "$rc" = 2 ] && { sd_warn override "跳过改写(格式不符): $src"; return 2; }
         sd_err override "改写失败: $src"
         return 1
     fi
@@ -2002,9 +2034,39 @@ sd_fingerprint() {
         "${vc:-0}" "$off"
 }
 
+# 产物自检：改写只是文本替换，语义可能被改坏。只查两条能确定的：
+#   - 高温保护 XML 里不应再有 ="true"（否则等于没关）
+#   - charging_*.txt 行数应与原件一致（改写只动第一列）
+# 只记 W，不改行为：自检失败说明这份配置可能不适用，用户可从日志定位。
+sd_override_selftest() {
+    local f s n m
+    find "$SD_OVERRIDES" -type f -name 'sys_high_temp_protect_*.xml' 2>/dev/null |
+        while IFS= read -r f; do
+            s=$(grep -c '="true"' "$f" 2>/dev/null)
+            [ "${s:-0}" = 0 ] || sd_warn override "自检: ${f#"$SD_OVERRIDES"/} 仍有 $s 处 true"
+        done
+    find "$SD_OVERRIDES" -type f -name 'charging_*.txt' 2>/dev/null |
+        while IFS= read -r f; do
+            s="$SD_BACKUP/${f#"$SD_OVERRIDES"/}"
+            [ -f "$s" ] || continue
+            n=$(wc -l <"$s" 2>/dev/null | tr -d ' ')
+            m=$(wc -l <"$f" 2>/dev/null | tr -d ' ')
+            [ "$n" = "$m" ] || sd_warn override "自检: ${f#"$SD_OVERRIDES"/} 行数 $n → $m"
+        done
+    return 0
+}
+
 sd_build_overrides() {
-    local fp base f rel
+    local fp base f rel lf ok skip fail
     fp=$(sd_fingerprint)
+
+    # 用户用 `action.sh overrides off` 关掉配置改写时，一个文件也不生成。
+    # 温度伪装走 emul_temp，与配置层无关，不受影响——这是把「配置的锅」
+    # 和「伪装的锅」分开的必要开关。
+    if [ "$(sd_state_get overrides_off 0)" = 1 ]; then
+        sd_info override "配置改写已关闭(overrides off)，跳过生成"
+        return 0
+    fi
 
     case "$SD_OVERRIDES" in
         ""|/|/files) sd_err override "覆盖层路径异常($SD_OVERRIDES)，中止"; return 1 ;;
@@ -2018,10 +2080,12 @@ sd_build_overrides() {
 
     sd_info override "开始生成，指纹=$fp"
     rm -rf "$SD_OVERRIDES"
-    mkdir -p "$SD_OVERRIDES" 2>/dev/null
+    mkdir -p "$SD_OVERRIDES" "$SD_RUN" 2>/dev/null
 
+    lf="$SD_RUN/ovr.list"
     for base in $SD_CFG_DIRS; do
         [ -d "$base" ] || continue
+        # 用文件重定向而不是管道：管道会让 while 落进子 shell，计数全丢。
         find "$base" -maxdepth 2 -type f \( \
             -name 'sys_high_temp_protect_*.xml' -o \
             -name 'sys_thermal_control_config*.xml' -o \
@@ -2030,11 +2094,23 @@ sd_build_overrides() {
             -name 'devices_config.json' -o \
             -name 'QEGA_Config.txt' -o \
             -name 'charging_*.txt' \
-            \) 2>/dev/null | while IFS= read -r f; do
+            \) 2>/dev/null >"$lf"
+        ok=0; skip=0; fail=0
+        while IFS= read -r f; do
             rel="${f#/}"
             sd_transform "$f" "$SD_OVERRIDES/$rel"
-        done
+            case $? in
+                0) ok=$((ok + 1)) ;;
+                2) skip=$((skip + 1)) ;;
+                *) fail=$((fail + 1)) ;;
+            esac
+        done <"$lf"
+        [ $((ok + skip + fail)) -gt 0 ] &&
+            sd_info override "${base#/}: 改写 $ok · 跳过 $skip · 失败 $fail"
     done
+    rm -f "$lf" 2>/dev/null
+
+    sd_override_selftest
 
     printf '%s' "$fp" 2>/dev/null >"$SD_BUILT"
     sd_info override "扫描: $(for _d in $SD_CFG_DIRS; do [ -d "$_d" ] && printf '%s ' "${_d#/}"; done)"
@@ -2200,6 +2276,11 @@ sd_mount_mode() {
 
 sd_mount_overrides() {
     local src rel dst n=0 nchg=0 chgfail="$SD_RUN/chcon.fail" total mmn
+    if [ "$(sd_state_get overrides_off 0)" = 1 ]; then
+        sd_umount_overrides
+        sd_info mount "配置改写已关闭(overrides off)，不挂载"
+        return 0
+    fi
     [ -d "$SD_OVERRIDES" ] || return 1
 
     # rc=2 既可能是镜像真写失败，也可能只是没有覆盖文件可镜像。后者在源配置
@@ -2831,6 +2912,18 @@ sd_charge_tick() {
 SD_COOL_NODE=""
 _sd_cool_none=0
 _sd_cool_log=""
+# 写 0 之后要复查：写这个动作本身会让 OPlus 重选档，压错了就得写回去。
+_sd_cool_prev=0        # 写 0 之前读到的档位
+_sd_cool_prev_iab=0    # 写 0 之前读到的电流
+_sd_cool_prev_at=0     # 写 0 的时刻（/proc/uptime 秒）
+_sd_cool_hold=0        # 反噬后的冷却截止时刻
+_sd_cool_uptime() {
+    local u=0
+    read -r u _ 2>/dev/null </proc/uptime
+    u=${u%%.*}
+    case "$u" in ''|*[!0-9]*) u=0 ;; esac
+    _sd_rv=$u
+}
 
 sd_cool_node() {
     local p
@@ -2845,7 +2938,7 @@ sd_cool_node() {
 }
 
 sd_cool_tick() {
-    local cur iab bt cap
+    local cur iab bt cap now
 
     if ! sd_cool_node; then
         if [ "$_sd_cool_log" != none ]; then
@@ -2858,6 +2951,30 @@ sd_cool_tick() {
     sd_batt_status_v
     case "$_sd_rv" in Charging|Full) ;; *) return 0 ;; esac
 
+    _sd_cool_uptime
+    now=$_sd_rv
+
+    # 上一轮写过 0 的，先复查。写动作反噬（PKB110 实测 18W→9.7W）时电流不会上升，
+    # 这时候必须把原档位写回去，否则驱动被反复重选档，功率一路抖到 6W。
+    if [ "$_sd_cool_prev" -gt 0 ]; then
+        [ $((now - _sd_cool_prev_at)) -ge 20 ] || return 0
+        if sd_chg_current_v; then
+            iab=$_sd_rv
+            case "$iab" in ''|*[!0-9-]*) iab="" ;; esac
+            if [ -n "$iab" ]; then
+                [ "$iab" -lt 0 ] && iab=$((-iab))
+                if [ "$iab" -le $((_sd_cool_prev_iab * 6 / 5)) ] && [ "$iab" -lt 2500000 ]; then
+                    printf '%s\n' "$_sd_cool_prev" >"$SD_COOL_NODE" 2>/dev/null
+                    sd_warn charge "降流解除反噬：写 0 后电流 $((iab / 1000))mA 没升，已写回档位 ${_sd_cool_prev}，暂停 5 分钟"
+                    _sd_cool_hold=$((now + 300))
+                    _sd_cool_log=fail
+                fi
+            fi
+        fi
+        _sd_cool_prev=0
+    fi
+    [ "$now" -lt "$_sd_cool_hold" ] && return 0
+
     # 不看温度、不看电量：节点只要被抬起来就压回 0。
     sd_read1 "$SD_COOL_NODE" || return 0
     cur=$_sd_rv
@@ -2867,13 +2984,13 @@ sd_cool_tick() {
     # 电流已经正常就别碰这个节点：写入本身会让 OPlus 重选档。
     # 实测 PKB110：ibat 4.3A 时被写 2→0，三秒后掉到 9.7W 并一路抖到 6W；
     # PKX110：写 0→1 后 tech 7→14、3.6A→1.0A，32W 掉到 9W。
-    # 但档位 >=8 已经是重降流，这时候不解除就永远卡着：只按电流判会把
-    # 「压完还有 3A」的中档全部漏掉，用户看到的就是亮屏只有 3A。
-    iab=0
-    sd_chg_current_v && iab=$_sd_rv
-    case "$iab" in ''|*[!0-9-]*) iab=0 ;; esac
+    # 3.1.3 曾按档位 >=8 放行，等于让「3-4A + 高档位」也每轮写一次；这里收回：
+    # 只按电流判，电流读不到一律不动（以前当成 0，等于无条件写）。
+    sd_chg_current_v || return 0
+    iab=$_sd_rv
+    case "$iab" in ''|*[!0-9-]*) return 0 ;; esac
     [ "$iab" -lt 0 ] && iab=$((-iab))
-    if [ "$cur" -lt 8 ] && [ "$iab" -ge 2500000 ]; then return 0; fi
+    [ "$iab" -ge 2500000 ] && return 0
 
     bt=""; sd_batt_temp_v && bt=$_sd_rv
     cap=""; sd_ps_attr_v capacity && cap=$_sd_rv
@@ -2882,6 +2999,9 @@ sd_cool_tick() {
             sd_info charge "降流解除：cool_down ${cur} → 0（电池 ${bt:-?}℃ 电量 ${cap:-?}% 电流 $((iab / 1000))mA）"
             _sd_cool_log=0
         fi
+        _sd_cool_prev=$cur
+        _sd_cool_prev_iab=$iab
+        _sd_cool_prev_at=$now
     elif [ "$_sd_cool_log" != fail ]; then
         sd_warn charge "降流解除失败：$SD_COOL_NODE 写不进去"
         _sd_cool_log=fail
@@ -3844,6 +3964,23 @@ sd_prop_get() {
     [ -f "$f" ] || return 1
     sd_prop_fix "$f"
     grep -a "^$k=" "$f" 2>/dev/null | head -1 | cut -d= -f2-
+}
+
+# 通道判定：两个包共用同一份脚本，靠 module.prop 的 channel 决定谁来跑。
+# 3.1.2~3.1.3 的 shell 包误带了 bin/qcmon，service.sh 见到就 exec，
+# 结果 shell 版实际跑的是 C 守护，shell 侧的修复对这批用户完全没生效。
+# 现在只认显式 channel=c，残留的二进制一律不碰。
+sd_channel() {
+    local c=""
+    [ -n "${SD_CHANNEL:-}" ] || SD_CHANNEL=$(sd_prop_get channel)
+    c=$SD_CHANNEL
+    case "$c" in c|C) printf 'c' ;; *) printf 'shell' ;; esac
+}
+
+sd_use_c() {
+    [ "$(sd_channel)" = c ] || return 1
+    [ -x "$MODDIR/bin/qcmon" ] || return 1
+    "$MODDIR/bin/qcmon" -v >/dev/null 2>&1
 }
 
 sd_sync_desc() {

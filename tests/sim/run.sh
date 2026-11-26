@@ -287,7 +287,13 @@ eq "$(grep -c '>0<' "$OV/vendor/etc/sys_thermal_config.xml" 2>/dev/null)" "2" "l
 grep -q '<other>1</other>' "$OV/vendor/etc/sys_thermal_config.xml" && ok "legacy 非 enable 行未被误伤" || ng "legacy 误伤其他行"
 grep -q '150,550\]' "$OV/vendor/etc/devices_config.json" && ok "充电窗口改到 55℃" || ng "充电窗口未改"
 eq "$(grep -o '150,550\]' "$OV/vendor/etc/devices_config.json" 2>/dev/null | wc -l | tr -d ' ')" "2" "两处窗口都改"
-grep -q 'SkinTemperatureNode: battery' "$OV/vendor/etc/QEGA_Config.txt" && ok "QEGA 取样节点改 battery" || ng "QEGA 未改"
+# 取样点只在电池伪装打开时才指向 battery：battery 默认不在伪装范围，
+# 改成它等于让壳温伪装进不了充电决策。默认必须保持原厂 xo-therm。
+grep -q 'SkinTemperatureNode: xo-therm' "$OV/vendor/etc/QEGA_Config.txt" && ok "QEGA 取样点保持原厂（batt_spoof 关）" || ng "QEGA 取样点被误改"
+SD_MODDIR=/opt/qc SD_DATA="$SDD" sh -c '. /opt/qc/lib/qc.sh; sd_state_set batt_spoof 30; sd_xf_qega /vendor/etc/QEGA_Config.txt /tmp/qega.bs' >/dev/null 2>&1
+grep -q 'SkinTemperatureNode: battery' /tmp/qega.bs 2>/dev/null && ok "batt_spoof 开启时才改 battery" || ng "batt_spoof 开启后取样点未改"
+SD_MODDIR=/opt/qc SD_DATA="$SDD" sh -c '. /opt/qc/lib/qc.sh; sd_state_set batt_spoof off' >/dev/null 2>&1
+rm -f /tmp/qega.bs
 eq "$(head -1 "$OV/vendor/etc/charging_0.txt")" "470,3000,4500" "充电曲线温度轴 +120"
 [ -f "$OV/vendor/etc/horae_0.conf" ] && ng "horae 配置不再改写" || ok "horae 配置不再改写"
 [ -f "$OV/vendor/etc/sys_thermal_control_config_cdata.xml" ] && ok "CDATA 文件结构可正常改写" || ng "CDATA 文件被误拒绝"
@@ -309,6 +315,31 @@ FAKE_MFR=Xiaomi MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >
 eq "$?" "1" "Xiaomi 安装退出码 1"
 grep -q "仅支持" /tmp/install3.log && ok "提示不支持机型" || ng "缺少不支持提示"
 
+echo "===== T1d 通道判定：shell 包不跑 C ====="
+# 3.1.2~3.1.3 的 shell 包误带 bin/qcmon，service.sh 见到就 exec，
+# 结果 shell 版跑的是 C 守护，shell 侧的修复对这批用户完全没生效。
+mkdir -p /opt/qc/bin && printf '#!/bin/sh\nexit 0\n' >/opt/qc/bin/qcmon && chmod +x /opt/qc/bin/qcmon
+MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_use_c' && ng "channel=shell 时仍判定用 C" || ok "channel=shell 时不用 C 守护"
+sed -i 's/^channel=shell$/channel=c/' /opt/qc/module.prop
+MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_use_c' && ok "channel=c 时才用 C" || ng "channel=c 未识别"
+sed -i 's/^channel=c$/channel=shell/' /opt/qc/module.prop
+rm -rf /opt/qc/bin
+
+echo "===== T1e 充电曲线列语义校验 ====="
+printf '35,3000,4500\n40,2500,4000\n' >/vendor/etc/charging_9.txt      # ℃ 整数
+printf '2000,3000,4500\n2200,2500,4000\n' >/vendor/etc/charging_8.txt  # 首列不是温度
+printf '300,3000,4500\n350,2500,4000\n' >/vendor/etc/charging_7.txt     # 正常 0.1℃
+rm -f "$SDD/built.id"
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install9.log 2>&1
+[ -f /opt/qc/files/vendor/etc/charging_9.txt ] && ng "℃ 整数曲线被改写" || ok "℃ 整数曲线被跳过"
+[ -f /opt/qc/files/vendor/etc/charging_8.txt ] && ng "非温度首列被改写" || ok "非温度首列被跳过"
+grep -q '^420,3000,4500' /opt/qc/files/vendor/etc/charging_7.txt && ok "正常曲线照常 +120" || ng "正常曲线未改写"
+grep -q '跳过改写(格式不符)' "$SDD/log.txt" && ok "跳过记 W 日志" || ng "跳过无日志"
+rm -f /vendor/etc/charging_9.txt /vendor/etc/charging_8.txt /vendor/etc/charging_7.txt
+# 回到干净的 8 个覆盖文件，后面的挂载断言按这个数走
+rm -f "$SDD/built.id"
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
+
 echo "===== T2 挂载 ====="
 orig_md5=$(md5sum /vendor/etc/charging_0.txt | awk '{print $1}')
 SD_MODDIR=/opt/qc sh /opt/qc/post-fs-data.sh >/tmp/pfd.log 2>&1
@@ -318,6 +349,16 @@ eq "$m" "8" "8 个 vendor 配置已挂载"
 eq "$(cat "$SDD/run/chcon.fail" 2>/dev/null | wc -l | tr -d ' ')" "0" "chcon 走显式上下文兜底，无失败清单"
 grep -q 'fps="144"' /vendor/etc/thermallevel_to_fps.xml && ok "挂载后读到的是覆盖层内容" || ng "挂载未生效"
 eq "$(cat "$SDD/boot.count")" "1" "开机计数 1"
+
+echo "===== T2b overrides 开关 ====="
+SD_MODDIR=/opt/qc sh /opt/qc/action.sh overrides off >/tmp/ovoff.log 2>&1
+eq "$?" "0" "overrides off 退出码 0"
+eq "$(find /opt/qc/files -type f 2>/dev/null | wc -l | tr -d ' ')" "0" "off 后覆盖层清空"
+eq "$(grep -c ' /vendor/etc/' /proc/mounts)" "0" "off 后 vendor 挂载已卸"
+grep -q "温度伪装照常" /tmp/ovoff.log && ok "off 回执说明伪装不受影响" || ng "off 回执缺说明"
+SD_MODDIR=/opt/qc sh /opt/qc/action.sh overrides on >/tmp/ovon.log 2>&1
+[ -f /opt/qc/files/vendor/etc/thermallevel_to_fps.xml ] && ok "on 后覆盖层重建" || ng "on 后未重建"
+eq "$(grep -c ' /vendor/etc/' /proc/mounts)" "8" "on 后重新挂载 8 个"
 
 echo "===== T3 温度决策 ====="
 MODDIR=/opt/qc
@@ -512,6 +553,17 @@ SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp off >/dev/null 2>&1
 eq "$(grep '^off_manual=' "$SDD/state.conf")" "off_manual=1" "手动关闭写入标记"
 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 sh /opt/qc/action.sh temp charge >/dev/null 2>&1
 eq "$(grep '^off_manual=' "$SDD/state.conf")" "off_manual=0" "重新开启清除标记"
+
+# 3.1.4：迁移不再覆盖用户手改的伪装温度（3.1.3 把所有人的 25 都改成了 30）
+printf 'temp_mode=charge\nshell_temp=25\nshell_temp_manual=1\ndefrev=3\n' >"$SDD/state.conf"
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install6.log 2>&1
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=25" "手改过的 25℃ 升级后保留"
+
+# 老配置没有 manual 标记，无法区分默认和手改：保持原值，只提示
+printf 'temp_mode=charge\nshell_temp=25\ndefrev=3\n' >"$SDD/state.conf"
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install7.log 2>&1
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=25" "无标记的 25℃ 不被静默改成 30"
+grep -q "新默认已改为 30" /tmp/install7.log && ok "无标记升级给出 30℃ 提示" || ng "缺 30℃ 提示"
 
 echo "===== T11 刷新率 ====="
 rm -f /tmp/settings.db

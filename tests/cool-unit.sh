@@ -19,6 +19,9 @@ setup() {
     printf '40\n'       >"$ROOT/ps/battery/capacity"
     printf '512\n'      >"$ROOT/bl/panel0-backlight/actual_brightness"
     printf '7\n'        >"$ROOT/oplus/battery/cool_down"
+    # 默认给一个「确实被降流」的电流：电流读不到时 cool_tick 不再动节点，
+    # 没这一行所有用例都会因为「不知道电流」而跳过。
+    printf '1500000\n'  >"$ROOT/ps/battery/current_now"
     cat >"$BASE/data/state.conf" <<'EOF'
 temp_mode=static
 shell_temp=30
@@ -36,6 +39,17 @@ run_cool() {
 cool() { cat "$ROOT/oplus/battery/cool_down" | tr -d ' \r\n'; }
 setb() { printf '%s\n' "$2" >"$ROOT/ps/battery/$1"; }
 setcool() { printf '%s\n' "$1" >"$ROOT/oplus/battery/cool_down"; }
+
+# 同进程连跑两轮，中间把 current_now 改成 $1：验证「写 0 后复查」那条路。
+run_cool2() {
+    SD_DATA=$BASE/data SD_PS=$ROOT/ps SD_OPLUS_CHG=$ROOT/oplus/battery \
+    SD_BL=$ROOT/bl SD_FB=$ROOT/none MODDIR=$MOD \
+    sh -c '. "$MODDIR/lib/qc.sh"; sd_state_load; _sd_st_loaded=1; _sd_screen_on=1
+           sd_cool_tick
+           _sd_cool_prev_at=$((_sd_cool_prev_at - 60))
+           printf "%s\n" "$1" >"$SD_PS/battery/current_now"
+           sd_cool_tick' _ "$1" 2>/dev/null
+}
 
 echo "[1] 充电中被降流就压回 0（不看温度/电量）"
 setup; run_cool 1
@@ -73,6 +87,22 @@ chk "正好 2.5A → 不动（边界含在闸内）" "$(cool)" "7"
 
 setup; setb current_now 2499000; run_cool 1
 chk "2499mA → 写 0" "$(cool)" "0"
+
+echo "[1c] 电流读不到：不知道就别动"
+setup; rm -f "$ROOT/ps/battery/current_now"; run_cool 1
+chk "没有 current_now → 保持 7" "$(cool)" "7"
+
+setup; printf 'x\n' >"$ROOT/ps/battery/current_now"; run_cool 1
+chk "current_now 非数字 → 保持 7" "$(cool)" "7"
+
+echo "[1d] 写 0 后复查：电流没升就写回原档位"
+setup; setb current_now 1500000
+run_cool2 1500000
+chk "写 0 后仍是 1.5A → 写回 7" "$(cool)" "7"
+
+setup; setb current_now 1500000
+run_cool2 3000000
+chk "写 0 后升到 3.0A → 保持 0" "$(cool)" "0"
 
 echo "[2] 不该动的场景"
 setup; run_cool 0

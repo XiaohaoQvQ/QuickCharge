@@ -306,7 +306,7 @@ static void conf_defaults(void)
     memset(&g_c, 0, sizeof g_c);
     snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "off");
     snprintf(g_c.hz, sizeof g_c.hz, "off");
-    g_c.shell_temp = 25;   /* 与 shell 侧 sd_shell_target 的缺省一致 */
+    g_c.shell_temp = 30;   /* 与 shell 侧 sd_shell_target 的缺省一致 */
     g_c.tick = 15;
     g_c.chg_unlock = 0;
     /* 默认事件级：0 只留 E，日志面板会空得没法排查 */
@@ -357,7 +357,7 @@ static void conf_load(void)
 
     /* 与 shell 版 _sd_clamp 的兜底值保持一致 */
     if (g_c.tick < 5 || g_c.tick > 300) g_c.tick = 15;
-    if (g_c.shell_temp < 25 || g_c.shell_temp > 60) g_c.shell_temp = 30;
+    if (g_c.shell_temp < 20 || g_c.shell_temp > 33) g_c.shell_temp = 30;
     if (g_c.log_level < 0 || g_c.log_level > 4) g_c.log_level = 1;
     if (g_c.temp_mode[0] == 0) snprintf(g_c.temp_mode, sizeof g_c.temp_mode, "off");
     /* dyn 是旧键值，等价 static */
@@ -992,22 +992,35 @@ static int scr_node(char *out, size_t n)
     return -1;
 }
 
-/* 优先级：电池侧 FCC → 电池侧 current_max → 欧加 chg_current_max → USB 输入上限。
+/* 输入侧节点：写它等于改 USB 端口/协议能力，会打断 PD/VOOC 协商。
+ * 与 shell 的 sd_scr_is_input 对齐；宁可判「本机不支持」也不碰。 */
+static int scr_is_input(const char *p)
+{
+    return strstr(p, "/usb/") || strstr(p, "/charger/") ||
+           strstr(p, "/pc_port/") || strstr(p, "/wireless/") ||
+           strstr(p, "input_current_limit");
+}
+
+/* 优先级：电池侧 FCC → 电池侧 current_max → 欧加 chg_current_max。
  * chg_current_max 才是欧加真正的充电电流上限；漏掉它会一路落到 usb/current_max
- * （充电器能力值，常见固定 2A），把 2A 当目标反而压功率。 */
+ * （充电器能力值，常见固定 2A），把 2A 当目标反而压功率。
+ * 3.0.3 及更早把 usb/current_max 当兜底，实测 OPPO Find X8 60W→37W、
+ * 一加 12 停 33W，3.0.4 在 shell 侧删掉了这个候选；C 版这里必须一致。 */
 static int scr_fcc_node(char *out, size_t n)
 {
     curr_prepare();
     const char *pref[] = { "constant_charge_current_max", "battery/current_max",
-                           "chg_current_max", "usb/current_max", NULL };
+                           "chg_current_max", NULL };
     for (int p = 0; pref[p]; p++) {
         for (int i = 0; i < g_curr_n; i++) {
             if (!strstr(g_curr_nodes[i], pref[p])) continue;
+            if (scr_is_input(g_curr_nodes[i])) continue;
             if (access(g_curr_nodes[i], F_OK) == 0) { snprintf(out, n, "%s", g_curr_nodes[i]); return 0; }
         }
     }
     for (int i = 0; i < g_curr_n; i++) {
         const char *q = g_curr_nodes[i];
+        if (scr_is_input(q)) continue;
         size_t l = strlen(q);
         /* 长度要按整段后缀算："/current_max" 是 12 字节，"/constant_charge_current" 是 24，
          * 之前写成 11/21，strcmp 永远不等，这条兜底其实一直没生效过。 */
@@ -1036,7 +1049,7 @@ static void scr_learn(void)
     if (scr_fcc_node(fcc, sizeof fcc) < 0) return;
     if (scr_read_ma(fcc, &v) < 0) return;
     if (v < 500) return;
-    if (v > 8000) v = 8000;
+    if (v > 12000) v = 12000;
 
     int old = 0;
     char b[32];
@@ -1054,7 +1067,7 @@ static int scr_target(int *tgt)
     if (read_line(g_fcc_norm, b, sizeof b) < 0) return 2;
     int n = atoi(b);
     if (n <= 0) return 2;
-    if (n > 8000) n = 8000;
+    if (n > 12000) n = 12000;
     /* 不看电池温度：亮屏就按息屏学到的峰值顶回去 */
     *tgt = n;
     return *tgt >= 500 ? 0 : 2;
@@ -1062,8 +1075,9 @@ static int scr_target(int *tgt)
 
 static void scr_release(void)
 {
-    /* 退出（拔线/关模式/熔断/高温）时按原值还原。息屏不走这里——息屏保持接管，
-     * 正是为了避免"一还原就把电流压回亮屏档"。 */
+    /* 退出（拔线/关模式/熔断/高温）时按原值还原。
+     * 电流类节点先看现状：驱动已经放宽（息屏边界/温控回收）就别拿旧值压回去，
+     * 与 shell 的 sd_scr_release 一致；开关型参数（ignore_screen_state 的 0/1）照常还原。 */
     FILE *f = fopen(g_scr_orig, "r");
     if (f) {
         char line[400];
@@ -1075,7 +1089,13 @@ static void scr_release(void)
             char *e = val + strlen(val);
             while (e > val && (e[-1] == '\n' || e[-1] == '\r')) *--e = 0;
             if (!line[0] || !val[0]) continue;
-            if (access(line, F_OK) == 0) write_str(line, val);
+            if (access(line, F_OK) != 0) continue;
+            int orig = atoi(val);
+            if (orig >= 100) {              /* 电流量级才做放宽判断 */
+                int now = 0;
+                if (read_int(line, &now) == 0 && now > orig) continue;
+            }
+            write_str(line, val);
         }
         fclose(f);
         unlink(g_scr_orig);
@@ -1195,35 +1215,30 @@ static void scr_tick(void)
     }
 
     if (!g_screen_on) {
+        /* 息屏只学基准，不写任何节点：驱动在息屏边界会自己把 FCC 放到协议峰值，
+         * 模块这时候回写等于替驱动踩刹车（2.9.73~3.0.4 的老 bug，实测 60W 掉 30W）。
+         * 内核参数那条一写就是「永久忽略屏幕」，息屏必须还原给驱动。 */
         scr_learn();
-        /* 内核参数那条一写就是「永久忽略屏幕」，息屏还原给驱动按正常 FCC 走；
-         * FCC 路径不再放手：一放手，驱动/热管理压下来的档位就没人顶回去。 */
         char node[MAXPATH];
-        if (scr_node(node, sizeof node) == 0) {
-            if (scr_active()) { scr_release(); logged[0] = 0; }
-            return;
-        }
+        if (scr_node(node, sizeof node) == 0 && scr_active()) { scr_release(); logged[0] = 0; }
+        return;
     }
 
     /* 不设温度闸：亮屏就接管，直到没在充电为止 */
 
     switch (scr_apply()) {
         case 0: {
-            char key[24];
-            snprintf(key, sizeof key, "%s%s", g_scr_way_s, g_screen_on ? "" : ":off");
-            if (strcmp(key, logged)) {
+            if (strcmp(g_scr_way_s, logged)) {
                 if (!strcmp(g_scr_way_s, "kernel"))
                     log_msg("I", "charge", "亮屏快充：已接管（内核 ignore_screen_state）");
                 else {
                     char b[32] = "";
                     read_line(g_fcc_norm, b, sizeof b);
                     log_msg("I", "charge",
-                            g_screen_on
-                                ? "亮屏快充：已接管（回写 FCC，目标 %smA，节点 %s 实读 %dmA）"
-                                : "亮屏快充：息屏保持（回写 FCC，目标 %smA，节点 %s 实读 %dmA）",
+                            "亮屏快充：已接管（回写 FCC，目标 %smA，节点 %s 实读 %dmA）",
                             b[0] ? b : "?", g_scr_node[0] ? g_scr_node : "?", g_scr_cur);
                 }
-                snprintf(logged, sizeof logged, "%s", key);
+                snprintf(logged, sizeof logged, "%s", g_scr_way_s);
             }
             break;
         }
@@ -1291,6 +1306,12 @@ static int cool_node(char *out, size_t n)
     return -1;
 }
 
+/* 写 0 之后要复查：写这个动作本身会让 OPlus 重选档，压错了必须写回去。 */
+static int g_cool_prev = 0;          /* 写 0 之前的档位 */
+static long g_cool_prev_iab = 0;     /* 写 0 之前的电流（µA） */
+static time_t g_cool_prev_at = 0;
+static time_t g_cool_hold = 0;       /* 反噬后的冷却截止 */
+
 static void cool_tick(void)
 {
     char node[MAXPATH];
@@ -1307,6 +1328,31 @@ static void cool_tick(void)
     batt_status(st, sizeof st);
     if (strcmp(st, "Charging") && strcmp(st, "Full")) return;
 
+    time_t now = time(NULL);
+
+    /* 上一轮写过 0 的，先复查。反噬时电流不会上升（PKB110 实测 18W→9.7W），
+     * 这时候必须把原档位写回去，否则驱动被反复重选档，功率一路抖到 6W。 */
+    if (g_cool_prev > 0) {
+        if (now - g_cool_prev_at >= 20) {
+            long back = chg_current();
+            if (back > 0 && back <= g_cool_prev_iab * 6 / 5 && back < 2500000) {
+                char b[32];
+                snprintf(b, sizeof b, "%d\n", g_cool_prev);
+                if (write_str(node, b) == 0) {
+                    log_msg("W", "charge",
+                            "降流解除反噬：写 0 后电流 %ldmA 没升，已写回档位 %d，暂停 5 分钟",
+                            back / 1000, g_cool_prev);
+                    g_cool_hold = now + 300;
+                    g_cool_logged = -3;
+                }
+            }
+            g_cool_prev = 0;
+        } else {
+            return;
+        }
+    }
+    if (now < g_cool_hold) return;
+
     /* 不看温度、不看电量：节点只要被抬起来就压回 0 */
     int cur = 0;
     if (read_int(node, &cur) < 0) return;
@@ -1314,9 +1360,9 @@ static void cool_tick(void)
 
     /* 电流已经正常就别碰这个节点：写入本身会让 OPlus 重选档。
      * 实测 PKB110：ibat 4.3A 时被写 2→0，三秒后掉到 9.7W 并一路抖到 6W。
-     * 只有确实被降流（<2.5A）时，写 0 才是"解降流"。 */
+     * 只有确实被降流（<2.5A）时，写 0 才是"解降流"；读不到一律不动。 */
     long iab = chg_current();
-    if (iab < 0) iab = -iab;
+    if (iab <= 0) return;
     if (iab >= 2500000) return;
 
     int bt = batt_temp_ps();
@@ -1326,6 +1372,9 @@ static void cool_tick(void)
                     cur, bt > -100 ? bt : 0, iab / 1000);
             g_cool_logged = 0;
         }
+        g_cool_prev = cur;
+        g_cool_prev_iab = iab;
+        g_cool_prev_at = now;
     } else if (g_cool_logged != -3) {
         log_msg("W", "charge", "降流解除失败：%s 写不进去", node);
         g_cool_logged = -3;
