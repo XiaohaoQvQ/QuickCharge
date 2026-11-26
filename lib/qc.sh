@@ -542,6 +542,7 @@ sd_state_get() {
         chg_unlock)     printf '%s' "${_st_chg_unlock:-${2:-0}}" ;;
         shell_temp_manual) printf '%s' "${_st_shell_temp_manual:-${2:-0}}" ;;
         overrides_off)  printf '%s' "${_st_overrides_off:-${2:-0}}" ;;
+        overrides_manual) printf '%s' "${_st_overrides_manual:-${2:-0}}" ;;
         *)              printf '%s' "${2:-}" ;;
     esac
 }

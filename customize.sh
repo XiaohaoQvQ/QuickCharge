@@ -100,6 +100,7 @@ power_scale=100
 cells_mode=auto
 off_manual=0
 overrides_off=0
+overrides_manual=0
 log_level=1
 tick=15"
 
@@ -177,7 +178,9 @@ if [ "$defrev" -lt 6 ]; then
     fi
     # 3.1.4 的 overrides 开关「能写不能读」，用户点了 off 从未生效，多半早忘了。
     # 本版能读了，别让这个遗留值突然接管 —— 按「用户没表达过」处理并告知。
-    if [ "$(sd_state_get overrides_off 0)" = "1" ]; then
+    # 3.1.6 起用户点开关会落 overrides_manual，之后只看标记，不再靠 defrev 猜。
+    if [ "$(sd_state_get overrides_off 0)" = "1" ] \
+        && [ "$(sd_state_get overrides_manual 0)" != "1" ]; then
         sd_state_set overrides_off 0
         ui_print "- 旧版「关闭配置改写」当时未生效，本版按开启处理"
         ui_print "  确实要关闭: su 0 sh $MODPATH/action.sh overrides off"

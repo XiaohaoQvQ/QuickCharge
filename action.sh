@@ -529,12 +529,15 @@ case "$1" in
              case "${1:-}" in
                  on|1)
                      sd_state_set overrides_off 0
+                     # 用户明确表达过意图，升级时按标记判断，不再靠 defrev 猜
+                     sd_state_set overrides_manual 1
                      rm -f "$SD_BUILT" 2>/dev/null
                      sd_build_overrides
                      sd_mount_overrides
                      echo "配置改写 -> 开启（温度伪装不受影响）" ;;
                  off|0)
                      sd_state_set overrides_off 1
+                     sd_state_set overrides_manual 1
                      sd_umount_overrides
                      # 镜像与清单一起清掉：留着会让 NoMount 下次开机继续挂旧产物。
                      rm -rf "$SD_OVERRIDES" "$SD_NM_ROOT" 2>/dev/null

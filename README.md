@@ -37,7 +37,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 这个守护进程每 15 秒读几十个 sysfs 小文件、算一遍目标、偶尔写几个节点。
 用 shell 写它有实打实的代价（每轮 4 次 fork、1.3 ms），但换来三件事：
 
-**能读。** 全部逻辑在 `lib/qc.sh` 一个文件里，4115 行，没有编译产物。想知道"为什么
+**能读。** 全部逻辑在 `lib/qc.sh` 一个文件里，4116 行，没有编译产物。想知道"为什么
 我的手机没效果"，`grep` 一下就能找到判定分支。
 
 **能改。** 现场发现某个机型的温区名字不一样，改一行正则、`action.sh restart` 就生效。
@@ -335,9 +335,9 @@ quickcharge/
 ├── customize.sh          安装：设备检测、生成覆盖层、初始化参数、写 need_reboot
 ├── post-fs-data.sh       开机早期：备份原文件、挂载覆盖层，OTA 后自动重建
 ├── service.sh            开机后期启动守护；channel=c 且带 bin/qcmon 才交给 C 版
-├── action.sh             控制入口：CLI 与交互菜单，598 行
+├── action.sh             控制入口：CLI 与交互菜单，601 行
 ├── uninstall.sh          卸载：停守护、卸挂载、归零、清数据
-├── lib/qc.sh             核心库，4115 行，全部逻辑在这里
+├── lib/qc.sh             核心库，4116 行，全部逻辑在这里
 ├── webroot/index.html    WebUI（纯静态，KernelSU / MMRL / KsuWebUI 加载）
 ├── src/qcmon.c           C 版源码（2711 行，仅仓库内、不打包，已拆到 QuickCharge-C）
 ├── docs/TECH.md          设计细节与踩过的坑（不打包）

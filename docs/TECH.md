@@ -7,7 +7,7 @@ ColorOS / RealmeUI 温控与充电策略改写模块，高通与联发科（天�
 
 | 链路 | 做法 | 生效时机 | 恢复方式 |
 |---|---|---|---|
-| 配置改写 | 改写 `/vendor/etc` 下温控 XML、充电曲线、horae 配置的副本，bind mount 覆盖 | 开机早期，挂上即固定 | `umount`，重启自然恢复 |
+| 配置改写 | 在 7 个 `/etc` 目录里改写温控 XML、充电曲线、温控配置的副本，bind mount 覆盖 | 开机早期，挂上即固定 | `umount`，重启自然恢复 |
 | 温度伪装 | 守护进程周期性写 `thermal_zone*/emul_temp` 与 `/proc/shell-temp`；没有 `emul_temp` 的温区改用假温度文件 bind 覆盖 `temp` | boot_completed 之后 | 卸载、`emul_temp` 归零、解除 bind |
 
 两条链路互不依赖：只挂配置也能降温控，只跑守护也能伪装读数。
@@ -262,12 +262,21 @@ type=USB_DCP scr=1 proto=vooc cells=2 status=Charging
 
 | 层 | 拔电后 |
 |---|---|
-| 传感器读数（`emul_temp` / `/proc/shell-temp`） | 归零，系统重新读到真实温度 |
+| `emul_temp` | 归零，系统重新读到真实温度 |
+| `/proc/shell-temp` | **不写**，保持关闭前最后一次写入的值 |
 | `/vendor/etc` 温控配置覆盖层 | 仍挂着，运行时不解挂 |
 
 第二层是模块实现「满功率」的核心：把 `sys_thermal_control_config*.xml` 里的
 `enable="true"` 改成 `false`，系统才不会在 42℃ 就降频限流。这些文件在 thermal HAL
 启动时读一次，运行时解挂不会让已加载的策略失效，所以「拔电即还原」只能是传感器层。
+
+`/proc/shell-temp` 为什么不是「归零」：这个欧加自定义 proc 没有 `emul_temp` 那种
+「写 0 = 关闭模拟」的语义，写 0 会被读成 0℃，插电头几秒落进低温保护（锁 5V/500mA）；
+写死 30℃ 又会让节点永久停在假值。所以关闭时整段不写，交还驱动自己更新。
+
+**已知边界**：如果某机型内核不主动刷新这个节点，拔电后它会一直停在关闭前的值。
+自查：拔电 30 秒后 `su -c 'cat /proc/shell-temp'`，仍是上次写的 `9 30000` 即未刷新。
+目前没有跨机型可靠的「交还」接口，先记录在案；遇到这种机型，重装或重启可清。
 
 要彻底回到原厂，卸载模块后重启。
 
@@ -825,11 +834,10 @@ su 0 sh -c 'sh /data/adb/modules/quickcharge/action.sh status | grep 亮屏快�
 `/sys/class/graphics/fb0/blank`），一次 read、零 fork。不用 `dumpsys power`：
 15 秒一次的 fork 太贵，而且 KernelSU / APatch 的域经常连不上 power 服务。
 
-## 配置改写：目录、开关与自检
+## 配置改写：开关与自检
 
-只扫这 7 个目录（`-maxdepth 2`）：`/vendor/etc`、`/odm/etc`、`/my_stock/etc`、
-`/my_product/etc`、`/system/vendor/etc`、`/system/system_ext/etc`、`/vendor/qti/etc`。
-`/my_stock` 与 `/my_product` 是 ColorOS 14+ 放温控表的地方，3.1.4 起纳入。
+目录清单见上文「配置改写范围」（7 个 `/etc`）。`/my_stock` 与 `/my_product`
+是 ColorOS 14+ 放温控表的地方，3.1.4 起纳入。
 
 `charging_*.txt` 改写前做列语义探测：首列必须在 0~600（0.1℃ 量级）且单调不减，
 否则整份跳过并在日志记 `跳过改写(格式不符)`。这样不会把 +12℃ 加到电流列上。
