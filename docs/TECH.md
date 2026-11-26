@@ -613,7 +613,7 @@ PKB110 上还会一路抖到 6W。
 
 只扫这 7 个目录（`-maxdepth 2`）：`/vendor/etc`、`/odm/etc`、`/my_stock/etc`、
 `/my_product/etc`、`/system/vendor/etc`、`/system/system_ext/etc`、`/vendor/qti/etc`。
-（完整清单见下文「配置改写：目录、开关与自检」）。只改这些文件：
+只改这些文件：
 
 | 文件 | 改动 |
 |---|---|
