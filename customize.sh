@@ -123,6 +123,7 @@ if grep -q '^defrev=' "$SD_STATE" 2>/dev/null; then
 else
     sd_state_set defrev 3
     defrev=3
+    _fresh_install=1
 fi
 if [ "$defrev" -lt 2 ]; then
     migrated=""
@@ -156,18 +157,23 @@ if [ "$defrev" -lt 4 ]; then
     fi
     sd_state_set defrev 4
 fi
-if [ "$defrev" -lt 5 ]; then
-    # 3.1.3 的默认伪装温度是 25℃，3.1.4 改回 30（25 贴着部分平台的低温限流线）。
-    # 但 3.1.3 那次是无条件迁移，把用户手动设的 25 也改掉了 —— 这正是
-    # 「升级后反而变慢」的来源。这里只提示、不静默改：
-    #   - 手改过的（shell_temp_manual=1）一律不动；
-    #   - 没标记的老配置无法区分「默认 25」和「自己调的 25」，也保持原值。
-    if [ "$(sd_state_get shell_temp 0)" = "25" ] \
-        && [ "$(sd_state_get shell_temp_manual 0)" != 1 ]; then
-        ui_print "- 伪装温度当前 25℃：新默认已改为 30℃（避开低温限流）"
-        ui_print "  需要提速执行: su 0 sh $MODPATH/action.sh base 30"
+if [ "$defrev" -lt 6 ]; then
+    # 3.1.3 把默认伪装温度从 25 无条件改成 30，连用户手调的 25 一起改了；
+    # 3.1.4 只提示却不改，而提示条件写成「当前值=25」—— 被 3.1.3 改成 30 的人
+    # 永远看不到。这里改成按 defrev 判断，覆盖所有从旧版升上来的用户：
+    #   - 值还是 25（3.1.2 及更早的默认）→ 抬到 30，25 贴着部分平台低温限流线；
+    #   - 值已是 30（3.1.3 迁移过的）→ 只提示可试回 25，不静默改；
+    #   - 有 shell_temp_manual 标记的一律不动。
+    if [ "$(sd_state_get shell_temp_manual 0)" != 1 ]; then
+        _sh=$(sd_state_get shell_temp 30)
+        if [ "$_sh" = "25" ]; then
+            sd_state_set shell_temp 30
+            ui_print "- 伪装温度 25℃ → 30℃（避开低温限流；想回退: action.sh base 25）"
+        elif [ "${_fresh_install:-0}" != 1 ]; then
+            ui_print "- 若升级后感觉比以前慢，可试回旧基准: su 0 sh $MODPATH/action.sh base 25"
+        fi
     fi
-    sd_state_set defrev 5
+    sd_state_set defrev 6
 fi
 
 [ "$(sd_state_get temp_mode off)" = "dyn" ] && {

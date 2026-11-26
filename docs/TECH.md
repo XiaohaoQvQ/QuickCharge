@@ -55,7 +55,7 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 | 守护 | `lib/qc.sh` + shell 循环 | `bin/qcmon`（C，静态 arm64） |
 | 每 tick | 1.3 ms / 4 次 fork（首轮后 1 次） | 0.1-0.2 ms / 0 次 fork |
 | 常驻内存 | 3-5 MB | < 1 MB |
-| 包体积 | 67 KB | 390 KB（内含 713 KB 静态二进制） |
+| 包体积 | 80 KB | 406 KB（内含 713 KB 静态二进制） |
 | 适用 | 任何机型，出问题容易用 `sh -x` 追 | 追求零唤醒开销、老机型 |
 
 C 版把 `bin/qcmon` 放进包里，并在 `module.prop` 写 `channel=c`，`service.sh` 只有看到

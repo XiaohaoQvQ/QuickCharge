@@ -28,6 +28,7 @@ SD_SPOOF_FLAG="$SD_RUN/spoof.pending"
 SD_PWR_HIST="$SD_RUN/power.hist"
 SD_BUILT="$SD_DATA/built.id"
 SD_PS="${SD_PS:-/sys/class/power_supply}"
+SD_SHELL_TEMP="${SD_SHELL_TEMP:-/proc/shell-temp}"
 SD_BL="${SD_BL:-/sys/class/backlight}"
 SD_FB="${SD_FB:-/sys/class/graphics/fb0/blank}"
 SD_OPLUS_CHG="${SD_OPLUS_CHG:-/sys/class/oplus_chg/battery}"
@@ -174,7 +175,7 @@ sd_dump_env() {
     # 80 个温区名铺一行会把日志冲成几百字符，只留数量和前三个
     _emul_head=""
     [ "$_emul_n" -gt 3 ] && _emul_head="（${emul# } …）"
-    [ -e /proc/shell-temp ] && _sh=yes || _sh=no
+    [ -e "$SD_SHELL_TEMP" ] && _sh=yes || _sh=no
 
     sentinel=""
     if sd_pick_sentinel_v; then
@@ -245,7 +246,7 @@ sd_check() {
     else
         sd_pick_sentinel_v && sname=${_sd_rv##*/}
     fi
-    [ -e /proc/shell-temp ] && sh=yes
+    [ -e "$SD_SHELL_TEMP" ] && sh=yes
 
     cfg=$(find "$SD_OVERRIDES" -type f 2>/dev/null | wc -l | tr -d ' ')
     [ -n "$cfg" ] || cfg=0
@@ -287,7 +288,7 @@ sd_check() {
     if [ -n "$emul" ]; then
         printf '[ok] 温度改写 emul_temp（%s）\n' "${emul##*/}"
     elif [ "$sh" = yes ]; then
-        printf '[ok] 温度改写 /proc/shell-temp\n'
+        printf '[ok] 温度改写 %s\n' "$SD_SHELL_TEMP"
     else
         printf '[--] 温度改写 不可用（无 emul_temp，也无 shell-temp）\n'
     fi
@@ -523,7 +524,7 @@ sd_state_get() {
     case "$1" in
         temp_mode)      printf '%s' "${_st_temp_mode:-${2:-off}}" ;;
         off_manual)     printf '%s' "${_st_off_manual:-${2:-0}}" ;;
-        shell_temp)     printf '%s' "${_st_shell_temp:-${2:-25}}" ;;
+        shell_temp)     printf '%s' "${_st_shell_temp:-${2:-30}}" ;;
         core_temp)      printf '%s' "${_st_core_temp:-${2:-off}}" ;;
         noncore_temp)   printf '%s' "${_st_noncore_temp:-${2:-off}}" ;;
         curve_offset)   printf '%s' "${_st_curve_offset:-${2:-120}}" ;;
@@ -539,6 +540,8 @@ sd_state_get() {
         cells_mode)     printf '%s' "${_st_cells_mode:-${2:-auto}}" ;;
         batt_spoof)     printf '%s' "${_st_batt_spoof:-${2:-off}}" ;;
         chg_unlock)     printf '%s' "${_st_chg_unlock:-${2:-0}}" ;;
+        shell_temp_manual) printf '%s' "${_st_shell_temp_manual:-${2:-0}}" ;;
+        overrides_off)  printf '%s' "${_st_overrides_off:-${2:-0}}" ;;
         *)              printf '%s' "${2:-}" ;;
     esac
 }
@@ -1492,8 +1495,8 @@ sd_shell_target() {
     # 极速模式：恒定写同一个伪装温度。不看真实读数、不设温度墙、
     # 不设熔断线、不按电量退出——插着电就一直让系统以为电池很凉。
     # 下限 20℃：再低不少平台会把 NTC 判成开路，反而锁 5V/500mA。
-    v=${_st_shell_temp:-25}
-    case "$v" in ''|*[!0-9]*) v=25 ;; esac
+    v=${_st_shell_temp:-30}
+    case "$v" in ''|*[!0-9]*) v=30 ;; esac
     [ "$v" -lt 20 ] && v=20
     [ "$v" -gt 33 ] && v=33
     _sd_last_out=$v
@@ -1699,7 +1702,7 @@ _sd_emul_ok=-1
 _sd_guard_paused=0
 
 sd_shell_emul() {
-    local celsius="$1" ms pms e z t n=0 ps=0
+    local celsius="$1" ms e z t n=0 ps=0
     _sd_zones_ready
     case "$celsius" in ''|*[!0-9]*) return 1 ;; esac
     if [ "$celsius" -ne 0 ] && { [ "$celsius" -lt 20 ] || [ "$celsius" -gt 100 ]; }; then
@@ -1719,21 +1722,20 @@ sd_shell_emul() {
     done
 
     # /proc/shell-temp 是欧加自定义 proc 接口，没有 emul_temp 那种「写 0 = 关闭
-    # 模拟」的语义：写 0 很可能被读成 0℃，插电头几秒进低温保护（锁 5V/500mA），
-    # 用户看到的就是「刚插上功率很低，过一会儿才好」。关闭时写中性 30℃。
-    pms=$ms
-    [ "$celsius" -eq 0 ] && pms=30000
-    if [ -e /proc/shell-temp ]; then
+    # 模拟」的语义：写 0 会被读成 0℃，插电头几秒进低温保护（锁 5V/500mA）。
+    # 但也不能像 3.1.4 那样在关闭时写死 30℃ —— 那会让这个节点永久停在假值，
+    # 和「关闭」的语义相反。关闭时干脆不写，把它交还驱动自己更新。
+    if [ "$celsius" -ne 0 ] && [ -e "$SD_SHELL_TEMP" ]; then
         t=0
         while [ "$t" -le 9 ]; do
-            printf '%s %s\n' "$t" "$pms" 2>/dev/null >/proc/shell-temp && ps=1
+            printf '%s %s\n' "$t" "$ms" 2>/dev/null >"$SD_SHELL_TEMP" && ps=1
             t=$((t + 1))
         done
     fi
 
     if [ "$celsius" -eq 0 ]; then
         _sd_emul_ok=1
-        sd_dbg thermal "关闭壳温模拟，改读真实读数"
+        sd_dbg thermal "关闭壳温模拟：emul_temp 归零，shell-temp 交还驱动"
     elif [ "$n" -gt 0 ] || [ "$ps" = 1 ]; then
         _sd_emul_ok=1
         sd_dbg thermal "壳温写 ${celsius}℃ 到 $n 个节点"
@@ -1955,19 +1957,26 @@ sd_xf_curve() {
     n=$(awk -F, '/^[0-9]+,[0-9]+,[0-9]+$/ {n++} END{print n+0}' "$2" 2>/dev/null)
     case "$n" in ''|*[!0-9]*) n=0 ;; esac
     [ "$n" -gt 0 ] || return 2
-    # 列语义探测：首列必须是 0.1℃ 量级（100~600）且单调不减。
-    # 有的机型首列是 ℃ 整数（35,3000,4500），+120 会变成 155；也有首列不是
-    # 温度的（电压/电流），+120 直接加到那一列 —— 那才是「功率异常低」的硬伤。
+    # 列语义探测：首列是 0.1℃ 量级的温度轴。判据放三关：
+    #   1) 所有值 ≤600（0.1℃ 的 60℃ 上限）；
+    #   2) 去掉 0 之后单调（升或降都行，有些机型从高温往低温排）；
+    #   3) 非零部分最大值 ≥100 —— 这是区分「0.1℃」和「℃ 整数」的关键：
+    #      25,30,35℃ 那种整数表最大值只有 35，+120 会变成 145，必须跳过。
+    # 0 允许出现在任意位置：低温保护段常写成 0,50,250，整份跳过会白丢一台机型。
     # 拿不准就跳过：宁可保持原厂，也不要把温度轴整体错位。
-    awk -F, 'BEGIN{ok=1;prev=-1;min=-1;n=0}
+    awk -F, 'BEGIN{ok=1;n=0;nz=0;mx=0;prev=-1;dir=0}
         /^[0-9]+,[0-9]+,[0-9]+$/ {
-            v=$1+0
-            if (v>600 || v<prev) ok=0
-            prev=v
-            if (n==0 || v<min) min=v
-            n++
+            v=$1+0; n++
+            if (v>600) { ok=0; next }
+            if (v==0) next
+            if (nz>0) {
+                if (v>prev) { if (dir<0) ok=0; dir=1 }
+                else if (v<prev) { if (dir>0) ok=0; dir=-1 }
+            }
+            prev=v; nz++
+            if (v>mx) mx=v
         }
-        END{ if (n==0 || min<100) ok=0; exit ok?0:1 }' "$2" 2>/dev/null || return 2
+        END{ if (n==0 || nz<2 || mx<100) ok=0; exit ok?0:1 }' "$2" 2>/dev/null || return 2
     awk -F, -v off="$1" 'BEGIN{OFS=","}
         /^[0-9]+,[0-9]+,[0-9]+$/ { $1=$1+off; if ($1>600) $1=600; print; next }
         { print }' "$2" 2>/dev/null >"$3"
@@ -3872,7 +3881,7 @@ sd_desc_text() {
     [ "$_sd_st_loaded" = 1 ] || sd_state_load
     mode=${_st_temp_mode:-off}
     [ "$mode" = dyn ] && mode=static
-    _sd_clamp "${_st_shell_temp:-25}" 20 33 25
+    _sd_clamp "${_st_shell_temp:-30}" 20 33 30
 
     case "$mode" in
         static|charge) t="温度伪装 $_sd_rv℃" ;;

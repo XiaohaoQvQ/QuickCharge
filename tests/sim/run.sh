@@ -315,27 +315,37 @@ FAKE_MFR=Xiaomi MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >
 eq "$?" "1" "Xiaomi 安装退出码 1"
 grep -q "仅支持" /tmp/install3.log && ok "提示不支持机型" || ng "缺少不支持提示"
 
-echo "===== T1d 通道判定：shell 包不跑 C ====="
+echo "===== T1d 通道判定：只认 channel ====="
 # 3.1.2~3.1.3 的 shell 包误带 bin/qcmon，service.sh 见到就 exec，
 # 结果 shell 版跑的是 C 守护，shell 侧的修复对这批用户完全没生效。
+# 这一条要同时适用于两个仓（shell 包 channel=shell、C 包 channel=c），
+# 所以按 module.prop 的原值恢复，不能写死。
 mkdir -p /opt/qc/bin && printf '#!/bin/sh\nexit 0\n' >/opt/qc/bin/qcmon && chmod +x /opt/qc/bin/qcmon
+_orig_ch=$(sed -n 's/^channel=//p' /opt/qc/module.prop 2>/dev/null | head -1)
+[ -n "$_orig_ch" ] || _orig_ch=shell
+sed -i "s/^channel=.*/channel=shell/" /opt/qc/module.prop
 MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_use_c' && ng "channel=shell 时仍判定用 C" || ok "channel=shell 时不用 C 守护"
-sed -i 's/^channel=shell$/channel=c/' /opt/qc/module.prop
+sed -i "s/^channel=.*/channel=c/" /opt/qc/module.prop
 MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_use_c' && ok "channel=c 时才用 C" || ng "channel=c 未识别"
-sed -i 's/^channel=c$/channel=shell/' /opt/qc/module.prop
+sed -i "s/^channel=.*/channel=$_orig_ch/" /opt/qc/module.prop
 rm -rf /opt/qc/bin
 
 echo "===== T1e 充电曲线列语义校验 ====="
 printf '35,3000,4500\n40,2500,4000\n' >/vendor/etc/charging_9.txt      # ℃ 整数
 printf '2000,3000,4500\n2200,2500,4000\n' >/vendor/etc/charging_8.txt  # 首列不是温度
 printf '300,3000,4500\n350,2500,4000\n' >/vendor/etc/charging_7.txt     # 正常 0.1℃
+printf '0,3000,4500\n50,3050,4550\n250,3100,4600\n' >/vendor/etc/charging_6.txt  # 低温段从 0 起
+printf '450,3000,4500\n400,3100,4600\n' >/vendor/etc/charging_5.txt     # 降序排列
 rm -f "$SDD/built.id"
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install9.log 2>&1
 [ -f /opt/qc/files/vendor/etc/charging_9.txt ] && ng "℃ 整数曲线被改写" || ok "℃ 整数曲线被跳过"
 [ -f /opt/qc/files/vendor/etc/charging_8.txt ] && ng "非温度首列被改写" || ok "非温度首列被跳过"
 grep -q '^420,3000,4500' /opt/qc/files/vendor/etc/charging_7.txt && ok "正常曲线照常 +120" || ng "正常曲线未改写"
+grep -q '^120,3000,4500' /opt/qc/files/vendor/etc/charging_6.txt && ok "从 0℃ 起的曲线照常 +120" || ng "低温段曲线被误跳过"
+grep -q '^570,3000,4500' /opt/qc/files/vendor/etc/charging_5.txt && ok "降序曲线照常 +120" || ng "降序曲线被误跳过"
 grep -q '跳过改写(格式不符)' "$SDD/log.txt" && ok "跳过记 W 日志" || ng "跳过无日志"
 rm -f /vendor/etc/charging_9.txt /vendor/etc/charging_8.txt /vendor/etc/charging_7.txt
+rm -f /vendor/etc/charging_6.txt /vendor/etc/charging_5.txt
 # 回到干净的 8 个覆盖文件，后面的挂载断言按这个数走
 rm -f "$SDD/built.id"
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/dev/null 2>&1
@@ -559,11 +569,45 @@ printf 'temp_mode=charge\nshell_temp=25\nshell_temp_manual=1\ndefrev=3\n' >"$SDD
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install6.log 2>&1
 eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=25" "手改过的 25℃ 升级后保留"
 
-# 老配置没有 manual 标记，无法区分默认和手改：保持原值，只提示
+# 3.1.2 及更早的默认就是 25（3.1.3 之前没有 manual 标记，无法区分默认和手改）：
+# 25 贴着部分平台的低温限流线，统一抬到 30，并明确告诉用户怎么回退。
 printf 'temp_mode=charge\nshell_temp=25\ndefrev=3\n' >"$SDD/state.conf"
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install7.log 2>&1
-eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=25" "无标记的 25℃ 不被静默改成 30"
-grep -q "新默认已改为 30" /tmp/install7.log && ok "无标记升级给出 30℃ 提示" || ng "缺 30℃ 提示"
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=30" "无标记的 25℃ 抬到 30"
+grep -q "伪装温度 25℃ → 30℃" /tmp/install7.log && ok "给出 25→30 的迁移提示" || ng "缺 25→30 提示"
+
+# 3.1.3 被无条件迁移过的人：值是 30、没有标记、defrev=5。
+# 不能静默改，但必须给出「可试回 25」的提示 —— 3.1.4 的提示条件写成「值=25」，
+# 这批人永远看不到，等于提示形同虚设。
+printf 'temp_mode=charge\nshell_temp=30\ndefrev=5\n' >"$SDD/state.conf"
+MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install8.log 2>&1
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=30" "3.1.3 迁移来的 30℃ 保持"
+eq "$(grep '^defrev=' "$SDD/state.conf")" "defrev=6" "defrev 升到 6"
+grep -q "可试回旧基准" /tmp/install8.log && ok "30℃ 用户收到回退提示" || ng "缺回退提示"
+
+echo "===== T10b 关闭伪装不再伪造 shell-temp ====="
+# 3.1.4 为了避开「写 0 被读成 0℃」在关闭时写死 30℃，结果节点永久停在假值，
+# 与「关闭」语义相反。现在关闭时整段不写，交还驱动。
+: >/tmp/st.fake
+out=$(SD_SHELL_TEMP=/tmp/st.fake MODDIR=/opt/qc sh -c '
+. /opt/qc/lib/qc.sh
+sd_shell_emul 30
+a=$(tail -1 "$SD_SHELL_TEMP" 2>/dev/null)
+sd_shell_emul 0
+b=$(tail -1 "$SD_SHELL_TEMP" 2>/dev/null)
+printf "%s|%s" "$a" "$b"')
+eq "$(printf "%s" "$out" | cut -d"|" -f1)" "9 30000" "开启时写 30℃"
+eq "$(printf '%s' "$out" | cut -d'|' -f2)" "9 30000" "关闭时不再改写 shell-temp"
+rm -f /tmp/st.fake
+
+echo "===== T10c overrides off 时开机不重建 ====="
+printf 'temp_mode=charge\nshell_temp=30\ndefrev=6\noverrides_off=1\n' >"$SDD/state.conf"
+printf '0\n' >"$SDD/boot.count"
+SD_MODDIR=/opt/qc SD_DATA=$SDD sh /opt/qc/post-fs-data.sh >/dev/null 2>&1
+grep -q "配置改写已关闭" "$SD_LOG" && ok "开机跳过覆盖层" || ng "未跳过覆盖层"
+grep -q "覆盖层为空，现场生成" "$SD_LOG" && ng "仍在打「覆盖层为空」噪音" || ok "无多余生成日志"
+printf 'temp_mode=charge\nshell_temp=30\ndefrev=6\noverrides_off=0\n' >"$SDD/state.conf"
+printf '0\n' >"$SDD/boot.count"
 
 echo "===== T11 刷新率 ====="
 rm -f /tmp/settings.db
@@ -1225,7 +1269,7 @@ fake_daemon_start
 # 出厂状态：module.prop 是安装包里的原始文案，从未同步过
 cp /mod/module.prop /opt/qc/module.prop
 MODDIR=/opt/qc SD_DATA=$SDD sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_sync_desc'
-grep -q '温度伪装 25℃' /opt/qc/module.prop && ok "首次同步写入实际状态" || ng "首次同步没写"
+grep -q '温度伪装 30℃' /opt/qc/module.prop && ok "首次同步写入实际状态" || ng "首次同步没写"
 grep -q '欧加真温控' /opt/qc/module.prop && ng "简介仍是出厂文案" || ok "出厂文案已被替换"
 
 # 覆盖安装：新包的 module.prop 把 description 换回出厂文案，
@@ -1233,7 +1277,7 @@ grep -q '欧加真温控' /opt/qc/module.prop && ng "简介仍是出厂文案" |
 cp /mod/module.prop /opt/qc/module.prop
 [ -s "$SDD/run/desc.last" ] && ok "升级后 desc.last 仍保留" || ng "desc.last 缺失，用例无效"
 MODDIR=/opt/qc SD_DATA=$SDD sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_sync_desc'
-grep -q '温度伪装 25℃' /opt/qc/module.prop && ok "覆盖安装后简介自动改回状态" || ng "升级后简介停在出厂文案"
+grep -q '温度伪装 30℃' /opt/qc/module.prop && ok "覆盖安装后简介自动改回状态" || ng "升级后简介停在出厂文案"
 
 # 已经一致时不该重写：闪存写入比一次字符串比较贵得多
 T1=$(stat -c '%y' /opt/qc/module.prop)

@@ -59,6 +59,14 @@ fi
 sd_session boot "post-fs-data 启动 (计数 $cnt/3)"
 sd_info boot "模块=$MODDIR 覆盖层=$SD_OVERRIDES"
 
+# 用户关掉配置改写时，覆盖层是故意空的：跳过整段生成/挂载，
+# 否则每次开机都会多两行「覆盖层为空 → 已关闭」，查日志时像故障。
+if [ "$(sd_state_get overrides_off 0)" = 1 ]; then
+    sd_info boot "配置改写已关闭(overrides off)，跳过覆盖层"
+    sd_dump_env
+    exit 0
+fi
+
 need=0
 if [ ! -d "$SD_OVERRIDES" ] || [ -z "$(ls -A "$SD_OVERRIDES" 2>/dev/null)" ]; then
     need=1
