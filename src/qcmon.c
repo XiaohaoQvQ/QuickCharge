@@ -873,7 +873,10 @@ static void shell_emul(int celsius)
         snprintf(b, sizeof b, "%d\n", ms);
         if (write_str(p, b) == 0) n++;
     }
-    if (access(g_shellproc, W_OK) == 0) {
+    /* 与 sd_shell_emul 一致：/proc/shell-temp 没有「写 0 = 关闭模拟」的语义，
+     * 写 0 会被读成 0℃，插电头几秒进低温保护（锁 5V/500mA）。关闭时干脆不写，
+     * 交还驱动自己更新；写死 30℃ 又会让节点永久停在假值。 */
+    if (celsius != 0 && access(g_shellproc, W_OK) == 0) {
         for (int t = 0; t <= 9; t++) {
             char b[32];
             snprintf(b, sizeof b, "%d %d\n", t, ms);

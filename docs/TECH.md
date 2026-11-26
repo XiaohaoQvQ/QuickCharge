@@ -611,7 +611,9 @@ PKB110 上还会一路抖到 6W。
 
 ## 配置改写范围
 
-只扫 `/vendor/etc`、`/odm/etc`、`/system/vendor/etc`、`/system/system_ext/etc`、`/vendor/qti/etc`（`-maxdepth 2`），只改这些文件：
+只扫这 7 个目录（`-maxdepth 2`）：`/vendor/etc`、`/odm/etc`、`/my_stock/etc`、
+`/my_product/etc`、`/system/vendor/etc`、`/system/system_ext/etc`、`/vendor/qti/etc`。
+（完整清单见下文「配置改写：目录、开关与自检」）。只改这些文件：
 
 | 文件 | 改动 |
 |---|---|
@@ -620,9 +622,8 @@ PKB110 上还会一路抖到 6W。
 | `thermallevel_to_fps.xml` | `fps` 全部改 144 |
 | `sys_thermal_config.xml` | 含 `enable` 的行 `>1<` → `>0<` |
 | `devices_config.json` | 充电温度窗口 `150,450]` → `150,550]` |
-| `QEGA_Config.txt` | 取样节点 `xo-therm` → `battery` |
+| `QEGA_Config.txt` | `batt_spoof` 开启时取样节点 `xo-therm` → `battery`；关闭时保持原样 |
 | `charging_*.txt` | 温度轴整体 +12℃（可调 `curve_offset`），上限截断 60℃ |
-| `horae*.conf` | 置空（空文件比删除安全：SELinux 标签保留） |
 
 **只改属性值，绝不删 XML 节点。** 删节点会留下无主闭标签，产出结构残缺的 XML，thermal HAL 解析失败 → 开机循环。
 

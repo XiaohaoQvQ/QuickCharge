@@ -202,6 +202,20 @@ run sensor >/dev/null
 chk "拔电：还原模拟" "$(val "$(z thermal_zone1)/emul_temp")" "0"
 printf 'Charging\n' >"$ROOT/sys/class/power_supply/battery/status"
 
+# ============================================================ 4b. 关闭伪装不动 shell-temp
+# /proc/shell-temp 没有 emul_temp 那种「写 0 = 关闭」的语义：写 0 被读成 0℃，
+# 插电头几秒进低温保护（锁 5V/500mA）。拔电/退出时 node 必须保持原值。
+echo "[4b] 关闭壳温模拟不改写 /proc/shell-temp"
+setup
+state charge 30
+screen_on
+run sensor >/dev/null
+chk "插电写壳温到 shell-temp" "$(cat "$ROOT/proc/shell-temp")" "9 30000"
+printf 'Discharging\n' >"$ROOT/sys/class/power_supply/battery/status"
+run sensor >/dev/null
+chk "拔电不动 shell-temp" "$(cat "$ROOT/proc/shell-temp")" "9 30000"
+chk "拔电仍把 emul_temp 归零" "$(val "$(z thermal_zone1)/emul_temp")" "0"
+
 # ============================================================ 5. 高温继续伪装
 echo "[5] 电池 50℃ / 板温 90℃：仍继续伪装"
 setup
