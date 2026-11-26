@@ -1823,7 +1823,9 @@ sd_spoof_pending() {
     return 0
 }
 
-SD_CFG_DIRS="/vendor/etc /odm/etc /system/vendor/etc /system/system_ext/etc /vendor/qti/etc"
+# /my_stock 与 /my_product 是 ColorOS 14+ 新起的配置分区，OPPO 把一半温控表
+# 挪到了这里。以前只扫 vendor/odm，这些表从未被改写，高温保护照旧生效。
+SD_CFG_DIRS="/vendor/etc /odm/etc /my_stock/etc /my_product/etc /system/vendor/etc /system/system_ext/etc /vendor/qti/etc"
 
 sd_count_tags() { grep -o '<[/]*[A-Za-z_]' "$1" 2>/dev/null | wc -l | tr -d ' '; }
 
@@ -2035,6 +2037,7 @@ sd_build_overrides() {
     done
 
     printf '%s' "$fp" 2>/dev/null >"$SD_BUILT"
+    sd_info override "扫描: $(for _d in $SD_CFG_DIRS; do [ -d "$_d" ] && printf '%s ' "${_d#/}"; done)"
     sd_info override "生成完成，文件数=$(find "$SD_OVERRIDES" -type f 2>/dev/null | wc -l | tr -d ' ')"
 }
 
@@ -2525,7 +2528,7 @@ sd_scr_learn() {
     sd_scr_read_ma "$_sd_sf" || return 1
     v=$_sd_rv
     [ "$v" -ge 500 ] || return 1
-    [ "$v" -gt 8000 ] && v=8000
+    [ "$v" -gt 12000 ] && v=12000
     # 基线必须绑在节点上：换了节点（例如从 usb/current_max 换到电池侧 FCC）
     # 就把旧基线作废重学，否则会拿旧节点的历史最大值去压新节点。
     [ -f "$SD_FCC_NORM_NODE" ] && nprev=$(cat "$SD_FCC_NORM_NODE" 2>/dev/null)
@@ -2548,7 +2551,7 @@ sd_scr_target() {
     [ -f "$SD_FCC_NORM" ] || return 1
     n=$(cat "$SD_FCC_NORM" 2>/dev/null)
     case "$n" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$n" -gt 8000 ] && n=8000
+    [ "$n" -gt 12000 ] && n=12000
     # 不看电池温度：亮屏就按息屏学到的峰值顶回去。
     _sd_rv=$n
     [ "$_sd_rv" -ge 500 ]
@@ -2864,12 +2867,13 @@ sd_cool_tick() {
     # 电流已经正常就别碰这个节点：写入本身会让 OPlus 重选档。
     # 实测 PKB110：ibat 4.3A 时被写 2→0，三秒后掉到 9.7W 并一路抖到 6W；
     # PKX110：写 0→1 后 tech 7→14、3.6A→1.0A，32W 掉到 9W。
-    # 只有确实被降流（<2.5A）时，写 0 才是"解降流"。
+    # 但档位 >=8 已经是重降流，这时候不解除就永远卡着：只按电流判会把
+    # 「压完还有 3A」的中档全部漏掉，用户看到的就是亮屏只有 3A。
     iab=0
     sd_chg_current_v && iab=$_sd_rv
     case "$iab" in ''|*[!0-9-]*) iab=0 ;; esac
     [ "$iab" -lt 0 ] && iab=$((-iab))
-    [ "$iab" -ge 2500000 ] && return 0
+    if [ "$cur" -lt 8 ] && [ "$iab" -ge 2500000 ]; then return 0; fi
 
     bt=""; sd_batt_temp_v && bt=$_sd_rv
     cap=""; sd_ps_attr_v capacity && cap=$_sd_rv
@@ -3921,7 +3925,7 @@ sd_diag() {
         sd_plat_resolve
         printf '# 平台: %s  温度模式: %s  伪装: %s℃  core: %s  noncore: %s\n' \
             "$_sd_plat" "$(sd_state_get temp_mode off)" \
-            "$(sd_state_int shell_temp 25 20 33)" \
+            "$(sd_state_int shell_temp 30 20 33)" \
             "$(sd_state_get core_temp off)" "$(sd_state_get noncore_temp off)"
         printf '# 带 * 的温区表示 temp 已被 bind mount 顶成固定值（系统读到的不是真实温度）\n'
     } | tee "$f" 2>/dev/null

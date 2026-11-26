@@ -296,7 +296,7 @@ grep -q 'a < b' "$OV/vendor/etc/sys_thermal_control_config_cdata.xml" && ok "CDA
 [ -f "$SDD/backup/vendor/etc/thermallevel_to_fps.xml" ] && ok "原件已备份" || ng "原件未备份"
 cmp -s "$SDD/backup/vendor/etc/charging_0.txt" /vendor/etc/charging_0.txt && ok "备份与原件逐字节一致" || ng "备份与原件不一致"
 eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=charge" "默认仅充电时生效"
-eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=25" "默认伪装 25℃"
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=30" "默认伪装 30℃"
 grep -q '^wall=' "$SDD/state.conf" && ng "默认配置里仍有 wall" || ok "默认配置无 wall"
 
 echo "===== T1b 覆盖安装不叠加 ====="
@@ -489,7 +489,7 @@ printf 'temp_mode=static\nshell_temp=38\nsentinel_limit=95\nbattery_limit=52\nwa
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install5.log 2>&1
 eq "$(grep '^temp_mode=' "$SDD/state.conf")" "temp_mode=static" "升级保留 temp_mode"
 eq "$(grep '^curve_offset=' "$SDD/state.conf")" "curve_offset=200" "升级保留 curve_offset"
-eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=25" "旧的高基准收到 25℃"
+eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=30" "旧的高基准收到 30℃"
 for _k in aggr wall fast_cap sentinel_limit battery_limit curr_max curr_edge cool_guard; do
     grep -q "^$_k=" "$SDD/state.conf" && ng "升级后仍残留已删除的键 $_k" || ok "升级清掉废弃键 $_k"
 done

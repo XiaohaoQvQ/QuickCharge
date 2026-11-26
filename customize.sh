@@ -90,7 +90,7 @@ elif sd_mm_active; then
 fi
 
 SD_DEFAULTS="temp_mode=charge
-shell_temp=25
+shell_temp=30
 core_temp=off
 noncore_temp=off
 chg_unlock=0
@@ -145,13 +145,22 @@ if [ "$defrev" -lt 4 ]; then
     for _k in aggr wall fast_cap sentinel_limit battery_limit curr_max curr_edge cool_guard; do
         grep -q "^$_k=" "$SD_STATE" 2>/dev/null && sed -i "/^$_k=/d" "$SD_STATE"
     done
-    # 旧的 30~60℃ 基准在新模型里太高，统一收到 25℃（用户手动改过的 20~33 保留）
-    _sh=$(sd_state_get shell_temp 25)
+    # 旧的 30~60℃ 基准在新模型里太高，统一收到 30℃（用户手动改过的 20~33 保留）
+    _sh=$(sd_state_get shell_temp 30)
     case "$_sh" in
-        ''|*[!0-9]*) sd_state_set shell_temp 25 ;;
-        *) [ "$_sh" -gt 33 ] && sd_state_set shell_temp 25 ;;
+        ''|*[!0-9]*) sd_state_set shell_temp 30 ;;
+        *) [ "$_sh" -gt 33 ] && sd_state_set shell_temp 30 ;;
     esac
     sd_state_set defrev 4
+fi
+if [ "$defrev" -lt 5 ]; then
+    # 3.1.3：默认伪装温度 25 → 30。25℃ 贴着部分平台的低温限流线，
+    # 充满那段反而更慢；3.1.0~3.1.2 留下的默认 25 一律抬回 30。
+    if [ "$(sd_state_get shell_temp 0)" = "25" ]; then
+        sd_state_set shell_temp 30
+        ui_print "- 伪装温度 25℃ → 30℃，避开低温限流"
+    fi
+    sd_state_set defrev 5
 fi
 
 [ "$(sd_state_get temp_mode off)" = "dyn" ] && {

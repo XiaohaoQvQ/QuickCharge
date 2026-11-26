@@ -82,8 +82,8 @@ sd_do_status() {
 
     printf '模式      %s' "$mode"
     case "$mode" in
-        static) printf ' · 恒定 %s℃' "$(sd_state_int shell_temp 25 20 33)" ;;
-        charge) printf ' · 恒定 %s℃（插电即写，不设电量阈值）' "$(sd_state_int shell_temp 25 20 33)" ;;
+        static) printf ' · 恒定 %s℃' "$(sd_state_int shell_temp 30 20 33)" ;;
+        charge) printf ' · 恒定 %s℃（插电即写，不设电量阈值）' "$(sd_state_int shell_temp 30 20 33)" ;;
         off)    printf ' · 未启用（仅配置改写生效）' ;;
     esac
     printf '\n'
@@ -186,7 +186,7 @@ sd_do_json() {
         sd_shell_target >/dev/null
         if [ -n "$_cacheout" ]; then tgt=$_cacheout; else tgt=$_sd_last_out; fi
     fi
-    shv=$(sd_state_int shell_temp 25 20 33)
+    shv=$(sd_state_int shell_temp 30 20 33)
     shset=$shv
     [ -n "$_sd_last_base" ] && shv=$_sd_last_base
     hz=$(sd_state_get hz off)
@@ -238,11 +238,11 @@ sd_do_json() {
 
 sd_set_temp() {
     local mode="$1" t="${2:-}"
-    [ -n "$t" ] || t=$(sd_state_int shell_temp 25 20 33)
-    case "$t" in ''|*[!0-9]*) t=25 ;; esac
+    [ -n "$t" ] || t=$(sd_state_int shell_temp 30 20 33)
+    case "$t" in ''|*[!0-9]*) t=30 ;; esac
     if [ "$t" -lt 20 ] || [ "$t" -gt 33 ]; then
-        echo "壳温需在 20~33℃ 之间，已改用 25℃"
-        t=25
+        echo "壳温需在 20~33℃ 之间，已改用 30℃"
+        t=30
     fi
     case "$mode" in
         off)
