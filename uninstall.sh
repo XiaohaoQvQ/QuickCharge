@@ -133,13 +133,6 @@ if [ -f "$ST" ]; then
     fi
 fi
 
-if [ -f "$SD_RUN/curr.orig" ]; then
-    while IFS='|' read -r p o; do
-        [ -n "$p" ] && [ -e "$p" ] || continue
-        printf '%s\n' "$o" 2>/dev/null >"$p"
-    done <"$SD_RUN/curr.orig"
-fi
-
 # 阶梯解锁：把 HAL 限流节点写回原值，别让它们停在 0
 if [ -f "$SD_RUN/unlock.orig" ]; then
     while IFS='|' read -r p o; do

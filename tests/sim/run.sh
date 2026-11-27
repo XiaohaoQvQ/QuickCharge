@@ -449,6 +449,11 @@ kill -0 "$DPID" 2>/dev/null && ok "守护进程已启动" || ng "守护未能启
 SD_DATA=$SDD sh /opt/qc/uninstall.sh >/dev/null 2>&1
 sleep 1
 kill -0 "$DPID" 2>/dev/null && { ng "守护进程残留"; kill -9 "$DPID" 2>/dev/null; } || ok "守护进程已停止"
+# service.sh --daemon 用 setsid 起了子进程，uninstall 杀的父 PID 死了，子进程
+# 可能还活着。它会跑进 T6/T8 把 run/sensor 覆盖成当时的 state，T8 的 json 读
+# 缓存就报错 —— 3.1.8 那次 612/1 的假红是这么来的。按命令行清一遍场。
+pkill -f "service.sh --daemon" 2>/dev/null
+sleep 1
 [ -d "$SDD" ] && ng "数据目录残留(守护轮)" || ok "数据目录已删除(守护轮)"
 
 echo "===== T6 安全边界 ====="
@@ -501,6 +506,9 @@ V=$(grep '^version=' /opt/qc/module.prop | cut -d= -f2)
 echo "$J" | grep -q "\"version\":\"$V\"" && ok "json 带版本号" || ng "json 缺版本号"
 # 仅充电档未插电：不算目标温度，target 保持 0
 echo "$J" | grep -q '"target":0' && ok "json 未插电 target=0" || ng "json target 异常"
+# 面板的 json 优先用守护读到的缓存（设计如此，真机最多滞后一个 tick）。用例
+# 直接改 state.conf，缓存里还是上一轮的 30，得先清掉，否则测的是缓存不是计算。
+rm -f "$SDD/run/sensor"
 printf 'temp_mode=static\nshell_temp=25\n' >"$SDD/state.conf"
 printf '41000\n' >/sys/class/thermal/thermal_zone1/temp
 J2=$(SD_NO_DAEMON=1 sh /opt/qc/action.sh json 2>/dev/null)

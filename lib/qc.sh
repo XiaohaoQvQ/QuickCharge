@@ -1480,7 +1480,7 @@ sd_spoof_apply() {
         return 1
     fi
     if [ "$scope" = batt ] && [ "$celsius" -gt 45 ]; then
-        sd_err thermal "电池伪装上限 45℃（再高就失去意义且危险）: $celsius"
+        sd_err thermal "电池伪装只能设 20-45℃（超出范围拒绝写入）: $celsius"
         return 1
     fi
 
@@ -2573,7 +2573,6 @@ sd_scr_apply() {
     sd_scr_target
     case $? in
         0) ;;
-        3) return 3 ;;      # 电池偏热，本轮不接管
         *) return 2 ;;      # 还没有基准
     esac
     tgt=$_sd_rv
@@ -2711,12 +2710,6 @@ sd_scr_tick() {
             if [ "$_sd_screen_on" = 1 ] && [ "$_sd_scr_log" != "wait" ]; then
                 sd_info charge "亮屏快充：还没有基准值，先息屏充一次再亮屏"
                 _sd_scr_log=wait
-            fi ;;
-        3)
-            sd_scr_active && sd_scr_release
-            if [ "$_sd_screen_on" = 1 ] && [ "$_sd_scr_log" != "hot" ]; then
-                sd_info charge "亮屏快充：电池偏热，本轮不接管"
-                _sd_scr_log=hot
             fi ;;
         *)
             # 息屏时 apply 失败不落「本机不支持」：息屏边缘节点偶尔读不到，
@@ -2900,8 +2893,8 @@ sd_cool_tick() {
 # ---------------------------------------------------------------- 充电阶梯解锁
 # 「阶梯」的两个来源：系统 thermal HAL 按温度写 charge_control_limit /
 # thermal_charging，以及驱动按电池温度自己分档。unlock 只动 HAL 侧——
-# 写 0 表示不限流——并在写之前把原值备份到 run/unlock.orig，关闭、超温、
-# 卸载时还原。
+# 写 0 表示不限流——并在写之前把原值备份到 run/unlock.orig，关闭、卸载时
+# 还原。
 #
 # 刻意不碰两处：
 #   - usb/current_max：输入侧能力上限，写它会打断 PD/VOOC 协商（3.0.4 的教训）；

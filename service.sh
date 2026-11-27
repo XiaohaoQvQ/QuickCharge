@@ -33,7 +33,7 @@ if [ -f "$SD_LOG" ] && [ "$(sd_file_mtime "$SD_LOG")" -lt "$_boot_ts" ]; then
     sd_log_reset
     sd_info boot "清理上一轮日志（post-fs-data 未执行）"
 fi
-rm -f "$SD_RUN/curr.want" "$SD_RUN/hb" "$SD_RUN/sensor" 2>/dev/null
+rm -f "$SD_RUN/hb" "$SD_RUN/sensor" 2>/dev/null
 
 sd_apply_state() {
     local mode c nc

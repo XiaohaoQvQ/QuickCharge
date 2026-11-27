@@ -346,7 +346,7 @@ sd_set_batt() {
         ''|*[!0-9]*) echo "用法: batt off|20-45"; return 1 ;;
     esac
     if [ "$v" -lt 20 ] || [ "$v" -gt 45 ]; then
-        echo "电池伪装只能 20-45℃（上限 45，再高既无意义又危险）"
+        echo "电池伪装只能设 20-45℃（超出范围拒绝写入）"
         return 1
     fi
     real=--

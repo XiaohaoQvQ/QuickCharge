@@ -56,6 +56,11 @@ if [ -f "$BIN" ]; then
 else
     bad "$BIN 不存在"
 fi
+# 两处在说「有温度兜底」的假话。WebUI 那行是 HTML 初值：JS 正常加载会覆盖，
+# 首帧仍会闪，JS 抛错就一直显示；日志里那句「电池偏热」对应的分支也只活在
+# 3.1.3 之前的温度闸里。都在 bin 之外，preflight 原来拦不到。
+nhas "$A/webroot/index.html" "≥46℃ 撤销" "WebUI 静态文案不承诺 46℃ 撤销"
+nhas "$A/lib/qc.sh" "电池偏热" "不再有「电池偏热」分支文案"
 
 echo "[3] 版本号自洽"
 v_prop=$(sed -n 's/^version=//p' "$A/module.prop" | head -1)

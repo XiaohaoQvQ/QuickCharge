@@ -912,7 +912,7 @@ ADC，不是 thermal zone。所以：
 | 充电驱动自己分档 | `oplus_chg/battery/cool_down`、`constant_charge_current_max` | `oplus_chg` 驱动按电池温度 |
 
 `unlock on` 只动第一类：把这些节点写 0（= 不限流），写之前把原值存进
-`run/unlock.orig`，`unlock off` / 超温 / 卸载时逐行还原。
+`run/unlock.orig`，`unlock off` / 卸载时逐行还原。
 
 刻意不碰两处：
 
