@@ -128,12 +128,13 @@ else
     _fresh_install=1
 fi
 if [ "$defrev" -lt 2 ]; then
-    migrated=""
-    [ "$(sd_state_get wall off)" = "off" ] && { sd_state_set wall 42; migrated="$migrated wall"; }
-    [ "$(sd_state_get aggr 5)" = "5" ] && { sd_state_set aggr 10; migrated="$migrated aggr"; }
-    [ "$(sd_state_get shell_temp 0)" = "0" ] && { sd_state_set shell_temp 30; migrated="$migrated shell_temp"; }
+    # 这里曾经还设 wall=42 / aggr=10，但 defrev<4 那段会把这两个键整个删掉
+    # （3.1.0 起没有温度墙了），设了必定被清，只剩一句"42℃ 以下最猛"误导人。
+    if [ "$(sd_state_get shell_temp 0)" = "0" ]; then
+        sd_state_set shell_temp 30
+        ui_print "- 基础温度接到 30℃（温度墙参数已在新模型里取消）"
+    fi
     sd_state_set defrev 2
-    [ -n "$migrated" ] && ui_print "- 切换到新默认: 42℃ 以下最猛（$migrated）"
 fi
 if [ "$defrev" -lt 3 ]; then
     if [ "$(sd_state_get temp_mode off)" = "off" ] \
@@ -173,7 +174,7 @@ if [ "$defrev" -lt 6 ]; then
             sd_state_set shell_temp 30
             ui_print "- 伪装温度 25℃ → 30℃（避开低温限流；想回退: action.sh base 25）"
         elif [ "${_fresh_install:-0}" != 1 ]; then
-            ui_print "- 若升级后感觉比以前慢，可试回旧基准: su 0 sh $MODPATH/action.sh base 25"
+            ui_print "- 若升级后感觉比以前慢，可试 base 32（更暖更容易满速，但机身更热）"
         fi
     fi
     # 3.1.4 的 overrides 开关「能写不能读」，用户点了 off 从未生效，多半早忘了。

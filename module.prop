@@ -1,8 +1,8 @@
 id=quickcharge
 # 源码完全公开 · 禁止商用与非法用途
 name=Quick Charge
-version=3.1.7
-versionCode=301701
+version=3.1.8
+versionCode=301801
 channel=shell
 author=Xiaohao
 updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/update.json

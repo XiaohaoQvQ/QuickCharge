@@ -577,13 +577,14 @@ eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=30" "无标记的 25�
 grep -q "伪装温度 25℃ → 30℃" /tmp/install7.log && ok "给出 25→30 的迁移提示" || ng "缺 25→30 提示"
 
 # 3.1.3 被无条件迁移过的人：值是 30、没有标记、defrev=5。
-# 不能静默改，但必须给出「可试回 25」的提示 —— 3.1.4 的提示条件写成「值=25」，
-# 这批人永远看不到，等于提示形同虚设。
+# 不能静默改，但必须给出提示。3.1.8 前提示的是「可试回旧基准 25℃」—— 而 25℃
+# 正是低温限流区间，往那儿调只会更慢，所以改成往高处建议并写明代价。
 printf 'temp_mode=charge\nshell_temp=30\ndefrev=5\n' >"$SDD/state.conf"
 MODPATH=/opt/qc sh -c 'MODPATH=/opt/qc . /opt/qc/customize.sh' >/tmp/install8.log 2>&1
 eq "$(grep '^shell_temp=' "$SDD/state.conf")" "shell_temp=30" "3.1.3 迁移来的 30℃ 保持"
 eq "$(grep '^defrev=' "$SDD/state.conf")" "defrev=6" "defrev 升到 6"
-grep -q "可试回旧基准" /tmp/install8.log && ok "30℃ 用户收到回退提示" || ng "缺回退提示"
+grep -q "可试 base 32" /tmp/install8.log && ok "30℃ 用户收到调温提示" || ng "缺调温提示"
+grep -q "base 25" /tmp/install8.log && ng "仍在建议调回 25℃（更慢）" || ok "不再建议调回 25℃"
 
 echo "===== T10b 关闭伪装不再伪造 shell-temp ====="
 # 3.1.4 为了避开「写 0 被读成 0℃」在关闭时写死 30℃，结果节点永久停在假值，
@@ -2159,9 +2160,6 @@ eq "$(t42 cat /sys/class/thermal/thermal_zone0/temp)" \
 eq "$(t42 sh /opt/qc/action.sh json | grep -o '"batt_spoof":"[a-z0-9]*","batt_real":[0-9]*')" \
    '"batt_spoof":"30","batt_real":38' "json：伪装值与真实值分开报"
 
-eq "$(t42 sh -c '. /opt/qc/lib/qc.sh
-sd_sentinel_best_v /sys/class/thermal/thermal_zone0 battery; echo $_sd_rv')" \
-   "38" "熔断读真实值，不读被伪装的 30"
 
 printf '470\n' >/sys/class/power_supply/battery/temp
 eq "$(t42 sh /opt/qc/action.sh batt 35 2>&1 | grep -c '电池 NTC 伪装')" \

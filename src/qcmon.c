@@ -445,6 +445,13 @@ static int cls_of(const char *t)
         strstr(t, "ddr") || strstr(t, "mtktsap") || strstr(t, "mtktsabb") ||
         strstr(t, "tzts") || strstr(t, "tsen_max") || strstr(t, "soc") ||
         strstr(t, "Soc") || !strncmp(t, "ap", 2) || strstr(t, "ap0")) return C_CORE;
+    /* wifi_pa / pa_therm 这类：shell 侧 sd_zone_class 有 `*_pa` 规则判 board，
+     * 这里一直漏着，落到 C_OTHER，于是 noncore 伪装会把 PA 温度也钉死。
+     * 放在 core 之后 —— cpu_pa 先被上面命中，仍按 core 处理（与 shell 一致）。 */
+    {
+        size_t n = strlen(t);
+        if (n >= 3 && !strcmp(t + n - 3, "_pa")) return C_BOARD;
+    }
     if (strstr(t, "xo-therm") || strstr(t, "xtherm") || strstr(t, "pmic") ||
         strstr(t, "charger") || strstr(t, "board") || strstr(t, "sys-therm") ||
         strstr(t, "mtktspa") || strstr(t, "mtktswmt") || strstr(t, "mtktsbtsmdpa") ||

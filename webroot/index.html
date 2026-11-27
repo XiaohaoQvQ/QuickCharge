@@ -232,7 +232,7 @@
   <div class="switch" id="coreHint" style="margin-top:4px"></div>
 
   <button id="unlockBtn" class="bigbtn">取消充电阶梯限流</button>
-  <div class="switch" id="thermalHint" style="margin-top:8px">写 0 解除 HAL 限流；电池 ≥45℃ 自动撤销</div>
+  <div class="switch" id="thermalHint" style="margin-top:8px">写 0 解除 HAL 限流；不按温度撤销，要还原得手动关</div>
   </div></div>
 </div>
 
@@ -677,8 +677,8 @@
       ? "阶梯限流已解除 · 点击还原"
       : "取消充电阶梯限流";
     $("thermalHint").textContent = d.unlock === true
-      ? "已解锁：HAL 限流节点写 0；电池 ≥45℃ 自动撤销"
-      : "写 0 解除 HAL 限流；电池 ≥45℃ 自动撤销";
+      ? "已解锁：HAL 限流节点写 0；不按温度撤销"
+      : "写 0 解除 HAL 限流；不按温度撤销，要还原得手动关";
     var ct = (d.core && d.core !== "off") ? Number(d.core) : 0;
     var xp = [];
     if (bsp > 0) xp.push("电池 " + bsp + "℃");
@@ -1132,7 +1132,7 @@
     $("unlockBtn").addEventListener("click", function () {
       var el = this;
       if (!hasCls(el, "on")) {
-        ask("解除阶梯限流会写 0 到 charge_control_limit / thermal_charging，\n充电不再按温度降档，机身会更热。\n\n原值会备份，电池 ≥45℃ 时自动撤销并还原。\n\n确定开启？",
+        ask("解除阶梯限流会写 0 到 charge_control_limit / thermal_charging，\n充电不再按温度降档，机身会更热。\n\n原值会备份，但不会因为电池温度高而自动撤销——\n要还原得自己点关闭。\n\n确定开启？",
           function () { apply("unlock on", "阶梯限流已解除"); });
         return;
       }

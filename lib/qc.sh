@@ -1334,92 +1334,6 @@ sd_sentinel_temp_v() {
     sd_temp_norm "$_sd_rv"
 }
 
-_sd_temp_src=""
-sd_batt_best_v() {
-    local z="$1" zv="" pv=""
-    if [ -n "$z" ] && sd_sentinel_temp_v "$z"; then
-        zv=$_sd_rv
-        if [ "$zv" -lt 8 ] || [ "$zv" -gt 90 ]; then zv=""; fi
-    fi
-    if sd_batt_temp_v; then
-        pv=$_sd_rv
-        if [ "$pv" -lt 5 ] || [ "$pv" -gt 80 ]; then pv=""; fi
-    fi
-
-    if [ -n "$zv" ] && [ -n "$pv" ]; then
-        # 温区若是连接器侧，会比电芯 NTC 高 8℃ 以上，这种偏差下以电量计为准
-        r=$(sd_batt_rank "$(sd_zone_type_of "$z")")
-        if [ "${r:-1}" -gt 0 ] && [ $((zv - pv)) -gt 8 ]; then
-            _sd_rv=$pv; _sd_temp_src=ps
-        else
-            _sd_rv=$zv; _sd_temp_src=both
-        fi
-    elif [ -n "$zv" ]; then
-        _sd_rv=$zv; _sd_temp_src=zone
-    elif [ -n "$pv" ]; then
-        _sd_rv=$pv; _sd_temp_src=ps
-    else
-        return 1
-    fi
-    return 0
-}
-
-# 熔断专用：温区与电量计都读，取较高的一侧。
-# 「连接器侧偏高就用低值」适合展示，不适合保护——单点传感器挂了或读数滞后，
-# 就会变成漏熔断。两个源都在时宁可早熔断，也不要赌低的那个是真的。
-sd_batt_guard_v() {
-    local z="$1" zv="" pv=""
-    if _sd_batt_spoof_on; then
-        sd_batt_real_v
-        return $?
-    fi
-    if [ -n "$z" ] && sd_sentinel_temp_v "$z"; then
-        zv=$_sd_rv
-        case "$zv" in ''|*[!0-9]*) zv="" ;; esac
-        [ -n "$zv" ] && { [ "$zv" -lt 8 ] || [ "$zv" -gt 90 ] && zv="" ; }
-    fi
-    if sd_batt_temp_v; then
-        pv=$_sd_rv
-        case "$pv" in ''|*[!0-9]*) pv="" ;; esac
-        [ -n "$pv" ] && { [ "$pv" -lt 5 ] || [ "$pv" -gt 80 ] && pv="" ; }
-    fi
-    if [ -n "$zv" ] && [ -n "$pv" ]; then
-        if [ "$pv" -gt "$zv" ]; then _sd_rv=$pv; _sd_temp_src=ps
-        else _sd_rv=$zv; _sd_temp_src=zone; fi
-        return 0
-    fi
-    [ -n "$zv" ] && { _sd_rv=$zv; _sd_temp_src=zone; return 0; }
-    [ -n "$pv" ] && { _sd_rv=$pv; _sd_temp_src=ps; return 0; }
-    return 1
-}
-
-# 熔断读数入口：电池类走 sd_batt_guard_v，其余温区只有一个源
-sd_guard_read_v() {
-    local z="$1" t="${2:-}"
-    [ -n "$t" ] || { sd_read1 "$z/type" && t=$_sd_rv; }
-    sd_zone_class "$t"
-    if [ "$_sd_zc" = battery ]; then
-        sd_batt_guard_v "$z"
-        return $?
-    fi
-    sd_sentinel_temp_v "$z"
-}
-
-sd_sentinel_best_v() {
-    local z="$1" t="${2:-}"
-    if [ -z "$t" ]; then sd_read1 "$z/type" && t=$_sd_rv; fi
-    sd_zone_class "$t"
-    if [ "$_sd_zc" = battery ]; then
-        if _sd_batt_spoof_on; then
-            sd_batt_real_v
-            return $?
-        fi
-        sd_batt_best_v "$z"
-        return $?
-    fi
-    sd_sentinel_temp_v "$z"
-}
-
 # 电池类温区优先级：0 = 电芯本体，1 = 其它 batt*，2 = 连接器/充电侧。
 # 一加/OPPO 上 batt-therm 挂在电池连接器旁，比电芯 NTC 高 8~12℃，
 # 直接当电池用会让 real 虚高、壳温目标算高，还容易顶到温度墙熔断。
@@ -1747,7 +1661,6 @@ sd_shell_emul() {
     return 0
 }
 
-SD_BATT_HARD=46
 _sd_batt_sp_last=""
 _sd_batt_sp_on=0
 _sd_batt_sp_hold=0
@@ -1787,16 +1700,6 @@ sd_batt_sp_guard() {
         _sd_batt_sp_on=1
     fi
     return 0
-}
-
-sd_spoof_reapply() {
-    local c nc b_
-    c=$(sd_state_get core_temp off)
-    case "$c" in ''|off) ;; *) sd_valid_temp "$c" && sd_spoof_apply core "$c" ;; esac
-    nc=$(sd_state_get noncore_temp off)
-    case "$nc" in ''|off) ;; *) sd_valid_temp "$nc" && sd_spoof_apply noncore "$nc" ;; esac
-    b_=$(sd_state_get batt_spoof off)
-    case "$b_" in ''|off|0) ;; *) sd_batt_sp_guard ;; esac
 }
 
 sd_spoof_request() {
@@ -2833,9 +2736,6 @@ sd_scr_tick() {
 
 _sd_curr_nodes=""
 
-SD_CURR_ORIG="$SD_RUN/curr.orig"
-SD_CURR_MARK="$SD_RUN/curr.want"
-
 _sd_curr_unit() {
     local p="$1" cur="${2:-}"
     case "$cur" in
@@ -2846,27 +2746,6 @@ _sd_curr_unit() {
         */oplus_chg/*|*/input_current_limit|*/charger/current_max) _sd_unit=ma ;;
         *) _sd_unit=ua ;;
     esac
-}
-
-_sd_curr_save_orig() {
-    local p="$1" v="$2"
-    [ -f "$SD_CURR_ORIG" ] || : >"$SD_CURR_ORIG" 2>/dev/null || return 0
-    awk -F'|' -v p="$p" '$1==p{f=1} END{exit !f}' "$SD_CURR_ORIG" 2>/dev/null && return 0
-    printf '%s|%s\n' "$p" "$v" >>"$SD_CURR_ORIG" 2>/dev/null
-}
-
-sd_curr_restore() {
-    local p o n=0
-    if [ -f "$SD_CURR_ORIG" ]; then
-        while IFS='|' read -r p o; do
-            [ -n "$p" ] && [ -e "$p" ] || continue
-            printf '%s\n' "$o" >"$p" 2>/dev/null && n=$((n + 1))
-        done <"$SD_CURR_ORIG"
-        rm -f "$SD_CURR_ORIG" 2>/dev/null
-    fi
-    rm -f "$SD_CURR_MARK" 2>/dev/null
-    [ "$n" -gt 0 ] && sd_info charge "限流已关闭，还原 $n 个节点"
-    return 0
 }
 
 _sd_curr_prepare() {
@@ -3029,7 +2908,6 @@ sd_cool_tick() {
 #   - cool_down：写它会让 OPlus 重选档。PKB110 实测 ibat 4.3A 时写 2→0，
 #     三秒后 18W 掉到 9.7W；交给 sd_cool_tick 只在真被降流时写。
 SD_UNLOCK_ORIG="$SD_RUN/unlock.orig"
-SD_UNLOCK_HARD=45
 _sd_unlock_log=""
 _sd_unlock_at=0
 
@@ -3328,7 +3206,7 @@ sd_tier_report() {
     printf '\n判读：\n'
     printf '  阶梯来自两处：系统 thermal HAL 写 charge_control_limit / thermal_charging，\n'
     printf '  以及充电驱动按电池温度自己分档（oplus 的 cool_down）。\n'
-    printf '  取消这些限制：unlock on（写入前备份原值，电池 ≥45℃ 自动撤销）\n'
+    printf '  取消这些限制：unlock on（写入前备份原值；不看电池温度，要还原得手动 unlock off）\n'
     printf '  只想看当前谁在限：保持现状，用 diag 采样对比 unlock 前后。\n'
 }
 

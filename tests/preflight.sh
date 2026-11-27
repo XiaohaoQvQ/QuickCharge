@@ -90,10 +90,10 @@ chknd "C README src/qcmon.c 行数" \
     "$(nl "$(line 'src/qcmon.c' "$B/README.md" | grep 'C 守护源码' | head -1)")" "$(num "$B/src/qcmon.c")"
 c_cases=$(n1 "$(line 'tests/c-test.sh' "$B/README.md" | grep '项冒烟测试' | head -1)")
 # 只查「不少于」，加用例不用回来改这里；漏写/写小才是要拦的
-if [ -n "$c_cases" ] && [ "$c_cases" -ge 87 ] 2>/dev/null; then
-    ok "C README c-test 项数 = $c_cases（≥87）"
+if [ -n "$c_cases" ] && [ "$c_cases" -ge 93 ] 2>/dev/null; then
+    ok "C README c-test 项数 = $c_cases（≥93）"
 else
-    bad "C README c-test 项数：文档写 ${c_cases:-（没写）}，应 ≥87"
+    bad "C README c-test 项数：文档写 ${c_cases:-（没写）}，应 ≥93"
 fi
 chknd "C README c-test 行数" \
     "$(nl "$(line 'tests/c-test.sh' "$B/README.md" | grep '项冒烟测试' | head -1)")" "$(num "$B/tests/c-test.sh")"
@@ -114,14 +114,17 @@ if [ "$FULL" = 1 ]; then
         rm -f "$X86"
         want=$(n1 "$(line '共 **' "$B/README.md" | head -1)")
         chknd "c-test 用例数（C README）" "$want" "$got"
-        # 单测总数必须写 97（44+31+12+4+6）。3.1.6 漏了 zone-rank 写成 91，
-        # 这里只认「同一行里既有 单元 又有 97」，写漏写错都红。
+        # 单测总数不写死：实跑五个脚本求和，再和 RELEASE 里那行比。
+        # 3.1.6 漏了 zone-rank 写成 91、3.1.8 删熔断后从 97 变 92，
+        # 都是人肉维护数字出的错 —— 这里改成算出来的。
+        ut=0
+        for t in chg-unit cool-unit state-unit mount-unit zone-rank; do
+            n=$(sh "$A/tests/$t.sh" 2>/dev/null | sed -n 's/.*通过 \([0-9][0-9]*\)，失败.*/\1/p')
+            ut=$((ut + ${n:-0}))
+        done
         for r in "$A/RELEASE.md" "$B/RELEASE.md"; do
-            if grep -q '单元.*97' "$r" 2>/dev/null; then
-                ok "${r##*/} 单测总数写的是 97"
-            else
-                bad "${r##*/} 里找不到「单元 … 97」"
-            fi
+            got_n=$(n1 "$(line '单元' "$r" | head -1)")
+            chknd "${r##*/} 单测总数" "$got_n" "$ut"
         done
     else
         bad "x86 编译失败，跳过用例数核对"

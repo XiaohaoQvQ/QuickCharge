@@ -167,32 +167,16 @@ printf '2000\n' >"$BASE/data/run/fcc.norm"
 printf '2300\n' >"$FCC"
 chk "2300 已超目标 → 不动" "$(run_scr | tr -d ' \r\n')" "2300"
 
-# ---------------------------------------------------------------- 熔断读数
-# 温区与电量计都读，取较高的一侧：只信偏低的一侧，单点传感器挂了就是漏熔断。
-setup
-mkdir -p "$BASE/g/zone0" "$BASE/g/zone5" "$BASE/data/run"
-printf 'battery\n'      >"$BASE/g/zone0/type"; printf '40000\n' >"$BASE/g/zone0/temp"; : >"$BASE/g/zone0/emul_temp"
-printf 'mtktsbattery\n' >"$BASE/g/zone5/type"; printf '50000\n' >"$BASE/g/zone5/temp"; : >"$BASE/g/zone5/emul_temp"
-
-run_guard() {
-    SD_DATA=$BASE/data SD_PS=$ROOT/ps SD_OPLUS_CHG=$ROOT/oplus/battery \
-    SD_ZONE_GLOB="$BASE/g/zone*" MODDIR=$MOD \
-    sh -c '. "$MODDIR/lib/qc.sh"; sd_state_load; _sd_st_loaded=1; sd_guard_read_v "$1" "$2"; printf "%s" "$_sd_rv"' _ "$1" "$2" 2>/dev/null
-}
-
-printf '400\n' >"$ROOT/ps/battery/temp"
-chk "温区 50℃ / 电量计 40℃ → 取 50" "$(run_guard "$BASE/g/zone5" mtktsbattery)" "50"
-printf '520\n' >"$ROOT/ps/battery/temp"
-chk "温区 50℃ / 电量计 52℃ → 取 52" "$(run_guard "$BASE/g/zone5" mtktsbattery)" "52"
-printf '400\n' >"$ROOT/ps/battery/temp"
-chk "非电池温区只读自己 → 40" "$(run_guard "$BASE/g/zone0" battery)" "40"
-
-# 熔断整套已删除：sd_sentinel_guard / sd_guard_read_v 都不再存在（防回归）
-if grep -q 'sd_sentinel_guard()' "$MOD/lib/qc.sh" 2>/dev/null; then
-    bad "sd_sentinel_guard 仍在（应已删除）"
-else
-    ok "熔断守卫已删除"
-fi
+# ---------------------------------------------------------------- 熔断残留
+# 熔断（sd_sentinel_guard / sd_guard_read_v / sd_batt_guard_v / sd_batt_best_v /
+# sd_sentinel_best_v）在 3.1.0 移除，但函数体一直留着，连注释都在讲"为什么熔断
+# 要取高值"。3.1.8 删干净，这里守住，别让谁再顺手加回来。
+_stale=""
+for _f in sd_sentinel_guard sd_guard_read_v sd_batt_guard_v sd_batt_best_v \
+          sd_sentinel_best_v SD_BATT_HARD SD_UNLOCK_HARD; do
+    grep -q "$_f" "$MOD/lib/qc.sh" 2>/dev/null && _stale="$_stale $_f"
+done
+chk "熔断读数链与硬上限常量已删净" "$_stale" ""
 if grep -q 'battery_limit' "$MOD/lib/qc.sh" 2>/dev/null; then
     bad "battery_limit 仍在（应已删除）"
 else

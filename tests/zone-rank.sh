@@ -28,13 +28,20 @@ pick_zone() {
            sd_pick_batt_zone_v && printf "%s %s" "${_sd_rv##*/}" "$_sd_sent_type"' 2>/dev/null
 }
 
-# 输出：<温度> <来源>
+# 输出：选中温区的温度
 pick_temp() {
     SD_DATA=$BASE/data SD_PS=$BASE/ps SD_ZONE_GLOB="$ROOT/thermal_zone*" MODDIR=$MOD \
     sh -c '. "$MODDIR/lib/qc.sh"; _sd_scanned=0
            sd_pick_batt_zone_v || exit 1
-           z=$_sd_rv
-           sd_batt_best_v "$z" && printf "%s %s" "$_sd_rv" "$_sd_temp_src"' 2>/dev/null
+           sd_sentinel_temp_v "$_sd_rv" && printf "%s" "$_sd_rv"' 2>/dev/null
+}
+
+# 输出：电池真实温度。生产代码（面板、batt 命令）走的就是这条，只认
+# power_supply，跟温区类型无关 —— 原来那条"连接器高 8℃ 就取电量计"的
+# 容差逻辑随 sd_batt_best_v 一起删了，这里测的是真正在跑的路。
+pick_real() {
+    SD_DATA=$BASE/data SD_PS=$BASE/ps SD_ZONE_GLOB="$ROOT/thermal_zone*" MODDIR=$MOD \
+    sh -c '. "$MODDIR/lib/qc.sh"; sd_batt_real_v && printf "%s" "$_sd_rv"' 2>/dev/null
 }
 
 echo "[1] 电芯与连接器同时存在"
@@ -42,23 +49,13 @@ setup
 mkz thermal_zone0 battery    34000
 mkz thermal_zone1 batt-therm 48000
 chk "选中 battery 而非 batt-therm" "$(pick_zone)" "thermal_zone0 battery"
-chk "温度取电芯 34℃"              "$(pick_temp)" "34 both"
+chk "温度取电芯 34℃"              "$(pick_temp)" "34"
 
 echo "[2] 只有连接器侧（比电量计高 14℃）"
 setup
 mkz thermal_zone1 batt-therm 48000
 chk "温区仍是 batt-therm" "$(pick_zone)" "thermal_zone1 batt-therm"
-chk "温度回退电量计 34℃"  "$(pick_temp)" "34 ps"
-
-echo "[3] 连接器只高 6℃（在容差内）"
-setup
-mkz thermal_zone1 batt-therm 40000
-chk "保留温区读数" "$(pick_temp)" "40 both"
-
-echo "[4] 两者同值"
-setup
-mkz thermal_zone0 battery 34000
-chk "来源 both" "$(pick_temp)" "34 both"
+chk "真实温度仍取电量计 34℃" "$(pick_real)" "34"
 
 echo
 echo "结果：通过 $PASS，失败 $FAIL"

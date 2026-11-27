@@ -20,7 +20,7 @@ Quick Charge (QC) 控制入口。
   zones                        温区判定全表：type / 语义类 / 是否 core 候选
   check                        适配检查：一次采样，直接给出能用哪些功能
   diag [秒] [间隔]             现场诊断采样（默认 120s/2s），排查掉功率用
-  temp <off|static|charge> [℃] 温度模式（默认 charge 25℃）
+  temp <off|static|charge> [℃] 温度模式（默认 charge 30℃）
   shell <℃|off>                等同 temp static
   core <off|20-100>            CPU/GPU/DDR 固定伪装
   noncore <off|20-100>         其它温区固定伪装（电池 NTC 要单独用 batt 开）
@@ -381,7 +381,7 @@ sd_menu_sub() {
     local t
     case "$1" in
         temp)
-            printf '\n温度模式: 1) 关闭  2) 静态 22℃  3) 静态 25℃  4) 静态 28℃  5) 仅充电 25℃  0) 返回\n选择: '
+            printf '\n温度模式: 1) 关闭  2) 静态 22℃  3) 静态 25℃  4) 静态 28℃  5) 仅充电 30℃  0) 返回\n选择: '
             read -r t || return 0
             case "$t" in
                 1) sd_set_temp off ;; 2) sd_set_temp static 22 ;; 3) sd_set_temp static 25 ;;
@@ -589,12 +589,12 @@ esac
 
 _rc=$?
 case "$_CMD" in
-    temp|shell|core|noncore|base|screen|unlock|level|hz|hzguard)
+    temp|shell|core|noncore|base|unlock|level|hz|hzguard)
         sd_ensure_daemon >/dev/null 2>&1
         sd_daemon_kick ;;
 esac
 case "$_CMD" in
-    temp|shell|core|noncore|base|screen|unlock|level|hz|hzguard|\
+    temp|shell|core|noncore|base|unlock|level|hz|hzguard|\
     mount|umount|rebuild|reboot-safe|reset)
         [ "$_rc" = "0" ] && sd_sync_desc ;;
 esac

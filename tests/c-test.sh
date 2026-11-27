@@ -526,6 +526,24 @@ echo "$out" | grep -q 'iusb=2.03A' && ok "iusb 取实测输入电流" || bad "iu
 echo "$out" | grep -q 'pin=18.0W'  && ok "pin = iusb×vusb"     || bad "pin 错：$out"
 echo "$out" | grep -q 'pb=16.9W'   && ok "pb = |ibat|×vbat"    || bad "pb 错：$out"
 
+echo "[17b] noncore 分类：*_pa 归 board（3.1.8 前 shell 判 board、C 判 other）"
+setup
+state static 30 off 30
+mkz thermal_zone8 wifi_pa 46000
+mkz thermal_zone9 cpu_pa  50000
+out=$(run zones)
+echo "$out" | grep -q 'wifi_pa .*cls=board' && ok "wifi_pa 归 board" \
+    || bad "wifi_pa 分类错：$(echo "$out" | grep wifi_pa)"
+echo "$out" | grep -q 'cpu_pa .*cls=core'   && ok "cpu_pa 归 core" \
+    || bad "cpu_pa 分类错：$(echo "$out" | grep cpu_pa)"
+daemon_start
+sleep 6
+chk "wifi_pa 不被 noncore 伪装" "$(val "$(z thermal_zone8)/temp")" "46000"
+chk "pa 不被 noncore 伪装"     "$(val "$(z thermal_zone4)/temp")" "39000"
+chk "bms 仍是 other → 被伪装"  "$(val "$(z thermal_zone7)/temp")" "30000"
+chk "cpu_pa 归 core → 不被伪装" "$(val "$(z thermal_zone9)/temp")" "50000"
+daemon_stop
+
 echo "[18] log_level=0 时守护不写日志"
 setup
 state static 30
