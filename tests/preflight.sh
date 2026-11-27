@@ -116,6 +116,11 @@ esac
 
 # README 不在打包范围，升级时最容易被忘掉。它写错版本，用户照着复制 zipUrl
 # 就会拿到上一版 —— 3.1.7 就这么漏过一次，所以并进版本检查一起看。
+# 下面几条按主仓 README 的版式取值。C 仓那份副本单独跑时（A 就是 C 仓）版式不同，
+# 取不到值会连报 4 条假红，所以先看通道：channel=c 说明坐在 C 仓里。
+if [ "$vcch" = c ]; then
+    ok "当前是 C 仓副本：跳过 4 条主仓 README 数字检查（全量请看主仓的 preflight）"
+else
 v_readme=$(sed -n 's/^- 当前版本：`\([^`]*\)`.*/\1/p' "$A/README.md" | head -1)
 [ "$v_readme" = "$v_prop" ] && ok "README 当前版本 = $v_readme" \
     || bad "README 当前版本写 ${v_readme:-（没写）}，module.prop 是 $v_prop"
@@ -149,6 +154,7 @@ chknd "C README lib/qc.sh 行数" \
 d_doc=$(grep -F '| `shell_temp` |' "$A/README.md" | grep -o '`[0-9][0-9]*`' | head -1 | tr -d '`')
 d_code=$(sed -n 's/^shell_temp=//p' "$A/customize.sh" | head -1)
 chknd "README shell_temp 默认值" "$d_doc" "$d_code"
+fi
 
 # 用例数静态数不出来（循环里的断言只算一行代码），要跑一遍才准。
 if [ "$FULL" = 1 ]; then
