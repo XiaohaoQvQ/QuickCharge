@@ -39,6 +39,9 @@ fi
 echo "[1] 两仓源码与测试一致"
 same "$A/src/qcmon.c"      "$B/src/qcmon.c"      "src/qcmon.c 逐字节一致"
 same "$A/tests/c-test.sh"  "$B/tests/c-test.sh"  "tests/c-test.sh 逐字节一致"
+# 这份拷贝 3.1.11 分叉了 16 行（versionCode 反算、去重只在主仓），发版时全绿也没发现，
+# 就是因为清单里没有它。加进来才算真同步 —— 守卫本身不同步，等于 C 仓没有守卫。
+same "$A/tests/preflight.sh" "$B/tests/preflight.sh" "tests/preflight.sh 逐字节一致"
 for f in lib/qc.sh customize.sh post-fs-data.sh action.sh service.sh; do
     same "$A/$f" "$B/$f" "$f 一致"
 done

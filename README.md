@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`3.1.11`（`versionCode 3011101`），C 版为 `3.1.11-c`
+- 当前版本：`3.1.12`（`versionCode 3011201`），C 版为 `3.1.12-c`
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -381,19 +381,19 @@ su 0 sh -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 | 仓库 | 当前版本 | 包名 | versionCode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.1.11` | `QuickCharge-v3.1.11.zip` | 3011101 |
-| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.1.11-c` | `QuickCharge-v3.1.11-c.zip` | 3011100 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.1.12` | `QuickCharge-v3.1.12.zip` | 3011201 |
+| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.1.12-c` | `QuickCharge-v3.1.12-c.zip` | 3011200 |
 
 每个仓库的 Release 只附自己那一份模块包，装哪个版本就去哪个仓库下载，不会混。
 
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v3.1.11
-Quick Charge v3.1.11-c
+Quick Charge v3.1.12
+Quick Charge v3.1.12-c
 ```
 
-tag 与标题一致：shell 仓 `v3.1.11`，C 仓 `3.1.11-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v3.1.12`，C 仓 `3.1.12-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
 
 ### 版本号规则（3.0 起）
@@ -411,7 +411,7 @@ tag 与标题一致：shell 仓 `v3.1.11`，C 仓 `3.1.11-c`。历史发行版�
 | 版本 | shell | C |
 |---|---|---|
 | `3.1.10` | `3011001` | `3011000` |
-| `3.1.11` | `3011101` | `3011100` |
+| `3.1.12` | `3011201` | `3011200` |
 | `3.2.0` | `3020001` | `3020000` |
 
 修订占两位（`00`–`99`），所以「修订到 100 进一位」正好对上「次版本 +1」，两条规则不再打架。
@@ -437,9 +437,9 @@ updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/up
 
 ```json
 {
-  "version": "3.1.11",
-  "versionCode": 3011101,
-  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.1.11/QuickCharge-v3.1.11.zip",
+  "version": "3.1.12",
+  "versionCode": 3011201,
+  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.1.12/QuickCharge-v3.1.12.zip",
   "changelog": "https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/RELEASE.md"
 }
 ```
