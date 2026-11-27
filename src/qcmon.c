@@ -900,10 +900,16 @@ static void shell_emul(int celsius)
 #define MAXCURR 12
 static char g_curr_nodes[MAXCURR][MAXPATH];
 static int g_curr_n = 0;
+static int g_curr_ex = -1;      /* 上一次数到的存在个数，-1 = 还没数过 */
 
 static void plat_resolve(void)
 {
-    if (g_plat[0]) return;
+    /* mtk/qcom 认出来就定死；other 多半是启动早期 getprop 还没就绪，不缓存，
+     * 试满 8 次还是 other 才认命。与 shell 的 sd_plat_resolve 对齐。 */
+    static int tries = 0;
+    if (g_plat[0] && strcmp(g_plat, "other")) return;
+    if (tries >= 8) return;
+    tries++;
     char b[128] = "";
     FILE *p = popen("getprop ro.soc.manufacturer 2>/dev/null", "r");
     if (p) { if (fgets(b, sizeof b, p)) {} pclose(p); }
@@ -954,6 +960,16 @@ static void curr_prepare(void)
         for (int i = 0; mtk[i] && g_curr_n < MAXCURR; i++)
             snprintf(g_curr_nodes[g_curr_n++], MAXPATH, "%s/%s", g_ps, mtk[i]);
     }
+}
+
+/* 候选里真正存在的有几个。启动早期 sysfs 没就绪时是 0，但下一次调用会重新数
+ * —— 不存在「缓存空结果」这回事，缓存的是候选路径本身。 */
+static int curr_existing(void)
+{
+    int n = 0;
+    for (int i = 0; i < g_curr_n; i++)
+        if (access(g_curr_nodes[i], F_OK) == 0) n++;
+    return n;
 }
 
 /* ------------------------------------------------------------------ 亮屏快充 */
@@ -1244,16 +1260,24 @@ static void scr_tick(void)
     }
 }
 
-/* ------------------------------------------------------------------ 降流解除 */
+/* -------------------------------------------------------------- cool_down */
 /*
- * ColorOS 16 用 oplus_chg/battery/cool_down 做亮屏降流：灭屏 0，亮屏 7~13，
- * 与温度无关（实测电池 33.8℃ 照样跳到 7）。该节点可写，写 0 后满速立即恢复，
- * 驱动不会逐秒覆盖，只在屏幕状态等事件时重算，所以按 tick 复查即可。
+ * cool_down 是 OPlus 的亮屏降流标记：灭屏 0，亮屏 3~13，与温度无关
+ * （实测电池 33.8℃ 照样跳到 7）。它是「结果」，不是开关。
+ *
+ * 3.0~3.1.12 这里往它写过 0（"降流解除"），三次实测全是净损失：
+ *   PKB110 写 2→0：18W → 9.7W，一路抖到 6W
+ *   PKX110 写 0→1：32W → 9W，tech 7→14
+ *   PJD110 写 3→0：33.6W → 2.2W，随后 45 分钟没回到 10W 以上
+ *     （同一秒 vusb 8V→5.15V、imax 2.00A→0.50A、vooc 1→0、type→Unknown，
+ *      也就是写入这个动作让驱动重选档、重走协议协商，只能拔插线恢复）。
+ * 对照组在同一分钟里：驱动自己把 cool_down 清到 0 时功率 31.5W 正常 ——
+ * 同一个值、同一台机器，差别只在"谁写的"。所以这里只读不写。
  */
 
 static char g_cool_path[MAXPATH];
 static int g_cool_none = 0;
-static int g_cool_logged = -99;
+static int g_cool_logged = -99;      /* 上一次记下的档位，-99 = 还没记过 */
 
 static int cool_node(char *out, size_t n)
 {
@@ -1281,19 +1305,13 @@ static int cool_node(char *out, size_t n)
     return -1;
 }
 
-/* 写 0 之后要复查：写这个动作本身会让 OPlus 重选档，压错了必须写回去。 */
-static int g_cool_prev = 0;          /* 写 0 之前的档位 */
-static long g_cool_prev_iab = 0;     /* 写 0 之前的电流（µA） */
-static time_t g_cool_prev_at = 0;
-static time_t g_cool_hold = 0;       /* 反噬后的冷却截止 */
-
 static void cool_tick(void)
 {
     char node[MAXPATH];
 
     if (cool_node(node, sizeof node) < 0) {
         if (g_cool_logged != -1) {
-            log_msg("W", "charge", "降流解除：本机没有 cool_down 节点，跳过");
+            log_msg("W", "charge", "cool_down：本机没有这个节点，跳过");
             g_cool_logged = -1;
         }
         return;
@@ -1303,57 +1321,15 @@ static void cool_tick(void)
     batt_status(st, sizeof st);
     if (strcmp(st, "Charging") && strcmp(st, "Full")) return;
 
-    time_t now = time(NULL);
-
-    /* 上一轮写过 0 的，先复查。反噬时电流不会上升（PKB110 实测 18W→9.7W），
-     * 这时候必须把原档位写回去，否则驱动被反复重选档，功率一路抖到 6W。 */
-    if (g_cool_prev > 0) {
-        if (now - g_cool_prev_at >= 20) {
-            long back = chg_current();
-            if (back > 0 && back <= g_cool_prev_iab * 6 / 5 && back < 2500000) {
-                char b[32];
-                snprintf(b, sizeof b, "%d\n", g_cool_prev);
-                if (write_str(node, b) == 0) {
-                    log_msg("W", "charge",
-                            "降流解除反噬：写 0 后电流 %ldmA 没升，已写回档位 %d，暂停 5 分钟",
-                            back / 1000, g_cool_prev);
-                    g_cool_hold = now + 300;
-                    g_cool_logged = -3;
-                }
-            }
-            g_cool_prev = 0;
-        } else {
-            return;
-        }
-    }
-    if (now < g_cool_hold) return;
-
-    /* 不看温度、不看电量：节点只要被抬起来就压回 0 */
     int cur = 0;
     if (read_int(node, &cur) < 0) return;
-    if (cur == 0) return;
+    if (cur == g_cool_logged) return;
 
-    /* 电流已经正常就别碰这个节点：写入本身会让 OPlus 重选档。
-     * 实测 PKB110：ibat 4.3A 时被写 2→0，三秒后掉到 9.7W 并一路抖到 6W。
-     * 只有确实被降流（<2.5A）时，写 0 才是"解降流"；读不到一律不动。 */
-    long iab = chg_current();
-    if (iab <= 0) return;
-    if (iab >= 2500000) return;
-
-    int bt = batt_temp_ps();
-    if (write_str(node, "0\n") == 0) {
-        if (g_cool_logged != 0) {
-            log_msg("I", "charge", "降流解除：cool_down %d → 0（电池 %d℃ 电流 %ldmA）",
-                    cur, bt > -100 ? bt : 0, iab / 1000);
-            g_cool_logged = 0;
-        }
-        g_cool_prev = cur;
-        g_cool_prev_iab = iab;
-        g_cool_prev_at = now;
-    } else if (g_cool_logged != -3) {
-        log_msg("W", "charge", "降流解除失败：%s 写不进去", node);
-        g_cool_logged = -3;
-    }
+    if (cur > 0)
+        log_msg("I", "charge", "cool_down=%d（亮屏降流标记，只记录不写入）", cur);
+    else
+        log_msg("I", "charge", "cool_down=0（当前没被降流）");
+    g_cool_logged = cur;
 }
 
 /* ---------------------------------------------------------------- 阶梯解锁 */
@@ -2371,12 +2347,19 @@ static void apply_core_nc(int force)
     }
 }
 
-/* 充电且开着降流解除时把 tick 压到 3s：cool_down 被驱动抬高后要尽快清零。
- * 以前只在亮屏时压，但屏幕判定靠不住，改成充电即压。 */
-static int next_tick(int charging)
+/* 轮询间隔基本只看配置。3.1.12 及以前充电时一律压到 3s，为的是尽快把
+ * cool_down 清零；现在 cool_down 只读，3 秒一次只剩耗电（每轮要把几十个
+ * 温区读一遍），所以改回按配置走。
+ * 例外：有伪装/接管在位时最多睡 10s —— 拔电、关开关要尽快还原，不能因为
+ * 用户把 tick 设成 60 就干等一分钟。 */
+static int next_tick(void)
 {
-    if (charging) return 3;
-    return charging ? 10 : g_c.tick;
+    int t = g_c.tick;
+    if (t > 10 && (g_emul_ok == 1 || g_spoof_ok[SC_BATT] || g_spoof_ok[SC_CORE] ||
+                   g_spoof_ok[SC_NONCORE] || scr_active() ||
+                   access(g_unlock_orig, F_OK) == 0))
+        t = 10;
+    return t;
 }
 
 /* 一轮热路径。返回本轮该睡多久。 */
@@ -2400,6 +2383,16 @@ static int loop_once(int *mode_changed)
             else
                 log_msg("I", "daemon", "屏幕 无亮度节点，按亮屏处理");
         }
+    }
+
+    /* 启动瞬间 sysfs 常常还没就绪，那一次 charge nodes=0 会被读成「永久没节点」。
+     * 这里隔一阵重新数一次，数量变了才记一条 —— 缓存的是候选路径，不是空结果。 */
+    if (g_tick_n % 20 == 1) {
+        curr_prepare();
+        int ex = curr_existing();
+        if (g_curr_ex >= 0 && ex != g_curr_ex)
+            log_msg("I", "env", "charge nodes=%d/%d（存在/候选，重新探测）", ex, g_curr_n);
+        g_curr_ex = ex;
     }
 
     char st[32];
@@ -2479,7 +2472,7 @@ static int loop_once(int *mode_changed)
             break;
     }
 
-    return next_tick(charging);
+    return next_tick();
 }
 
 /* ---------------------------------------------------------------- 环境头 */
@@ -2541,10 +2534,17 @@ static void log_env(void)
             g_bl, g_bl_cnt, g_fb, g_screen_on ? "亮" : "灭");
 
     curr_prepare();
-    if (g_curr_n > 0)
-        log_msg("I", "env", "charge nodes=%d first=%s", g_curr_n, g_curr_nodes[0]);
-    else
-        log_msg("I", "env", "charge nodes=0（找不到电流节点，亮屏快充用不了）");
+    {
+        /* 两个数一起给：只写一个「候选数」会让人以为节点都存在，
+         * 只写「存在数」又会把启动早期那个 0 读成永久状态。 */
+        int ex = curr_existing();
+        if (ex > 0)
+            log_msg("I", "env", "charge nodes=%d/%d（存在/候选） first=%s",
+                    ex, g_curr_n, g_curr_nodes[0]);
+        else
+            log_msg("W", "env", "charge nodes=0/%d（候选都在、文件还没出现，每轮重新探测）", g_curr_n);
+        g_curr_ex = ex;
+    }
 }
 
 int main(int argc, char **argv)

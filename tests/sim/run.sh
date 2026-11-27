@@ -1935,7 +1935,11 @@ q9() {
 # 守护没跑时 $SD_RUN 可能还不存在。旧版所有节点在"写临时文件"这一步失败，
 # 最后报的却是"没有节点被伪装"，被误判成机型不支持。
 rm -rf "$D9/run"
-eq "$(q9 core 45)" "核心 伪装 -> 45℃" "core 45 回执（SD_RUN 不存在）"
+# 回执第一行是结果，后面可能跟提醒行（3.1.13 起核心伪装会提示"写得越高越早降频"）
+_o9=$(q9 core 45)
+eq "$(printf '%s\n' "$_o9" | head -1)" "核心 伪装 -> 45℃" "core 45 回执（SD_RUN 不存在）"
+case "$_o9" in *"越早降频"*) ok "core 回执带降频提醒" ;;
+    *) bad "core 回执缺提醒：$_o9" ;; esac
 eq "$(sed -n 's/^core_temp=//p' "$D9/state.conf")" "45" "core 45 写入状态"
 eq "$(cat /sys/class/thermal/thermal_zone0/temp)" "45000" "core 45：核心节点被顶成 45000"
 eq "$(cat /sys/class/thermal/thermal_zone1/temp)" "40000" "core 45：电池温区不动"
@@ -2159,8 +2163,11 @@ printf '380\n'       >/sys/class/power_supply/battery/temp
 eq "$(t42 sh /opt/qc/action.sh json | grep -o '"batt_spoof":"[a-z0-9]*"')" \
    '"batt_spoof":"off"' "默认：电池 NTC 不伪装"
 
-eq "$(t42 sh /opt/qc/action.sh batt 30 2>&1 | grep -c '真实 38')" \
+_o42=$(t42 sh /opt/qc/action.sh batt 30 2>&1)
+eq "$(printf '%s\n' "$_o42" | head -1 | grep -c '真实 38℃')" \
    "1" "batt 30：回显真实温度"
+case "$_o42" in *"功率可能跟着抖"*) ok "batt 回执提示读数固定值的影响" ;;
+    *) bad "batt 回执缺提示：$_o42" ;; esac
 
 eq "$(t42 cat /sys/class/thermal/thermal_zone0/temp)" \
    "30000" "batt 30：温区读到 30℃"
@@ -2492,9 +2499,11 @@ t47c sh -c '. /opt/qc/lib/qc.sh; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
 eq "$(cat /sys/module/oplus_chg/parameters/ignore_screen_state)" "1" "降温后恢复接管（内核参数）"
 rm -rf /sys/module/oplus_chg
 
-# ---------------------------------------------------------------- T47d 降流解除
-# 电流已经正常时不许写 cool_down：写入本身会让 OPlus 重选档。
-# PKB110 实测 ibat 4.3A 时被写 2→0，三秒后 18W 掉到 9.7W 并一路抖到 6W。
+# ------------------------------------------------------- T47d cool_down 只读
+# 3.0~3.1.12 会往 cool_down 写 0（"降流解除"），三次实测全是净损失：
+# PKB110 2→0 掉到 9.7W、PKX110 0→1 掉到 9W、PJD110 3→0 从 33.6W 掉到 2.2W
+# 且 45 分钟没回来（vusb 8V→5.15V、vooc 1→0，只能拔插线）。
+# 3.1.13 起一律只读：任何电流、任何档位都不写。
 D47d=/tmp/qc47d; rm -rf "$D47d"; mkdir -p "$D47d/bl" "$D47d/run"
 printf '200\n' >"$D47d/bl/brightness"
 mkdir -p /sys/class/power_supply/battery /sys/class/oplus_chg/battery
@@ -2507,10 +2516,14 @@ t47d() { env SD_DATA=$D47d SD_MODDIR=/opt/qc SD_NO_DAEMON=1 SD_BL="$D47d/bl" SD_
          SD_CURR_NODES=/sys/class/power_supply/battery/constant_charge_current_max \
          FAKE_PLAT=sm8850 FAKE_SOCMFR=Qualcomm FAKE_HW=qcom "$@"; }
 t47d sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_cool_tick' >/dev/null 2>&1
-eq "$(cat /sys/class/oplus_chg/battery/cool_down)" "2" "电流 4A 已正常：不碰 cool_down"
+eq "$(cat /sys/class/oplus_chg/battery/cool_down)" "2" "电流 4A：不写 cool_down"
 printf '1000000\n' >/sys/class/power_supply/battery/current_now
 t47d sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_cool_tick' >/dev/null 2>&1
-eq "$(cat /sys/class/oplus_chg/battery/cool_down)" "0" "电流 1A 被降流：写 0 解除"
+eq "$(cat /sys/class/oplus_chg/battery/cool_down)" "2" "电流 1A：仍然不写（只读）"
+printf '300000\n' >/sys/class/power_supply/battery/current_now
+printf '7\n'     >/sys/class/oplus_chg/battery/cool_down
+t47d sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_cool_tick' >/dev/null 2>&1
+eq "$(cat /sys/class/oplus_chg/battery/cool_down)" "7" "亮屏 7 档 + 368mA：不写"
 rm -rf /sys/class/oplus_chg
 
 # ---------------------------------------------------------------- T48 节点读取

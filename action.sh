@@ -296,6 +296,10 @@ sd_set_scope() {
         else
             echo "$label 伪装 -> ${v}℃"
         fi
+        # 报这个值不等于"整机就这个温度"：温区是策略的输入，写得越高，
+        # 整机越早进入降频/降流，充电功率也会被一起压。一加 15 那份日志里
+        # 把 33 个核心温区写成 45℃，随后 9 分钟充电一直上不去。
+        [ "$scope" = core ] &&             echo "  提醒：核心温区写得越高，整机越早降频；充电功率可能被一起压。"
         return 0
     fi
     if [ -z "$_sd_zones" ] || { [ "${_sd_spoof_total:-0}" -eq 0 ] && [ "${_sd_spoof_need:-0}" -gt 0 ]; }; then
@@ -355,6 +359,8 @@ sd_set_batt() {
     if sd_spoof_apply batt "$v" >/dev/null 2>&1; then
         sd_info cmd "电池 NTC 伪装 → ${v}℃（真实 ${real}℃）"
         echo "电池 NTC 伪装 -> ${v}℃（真实 ${real}℃；不按温度撤销）"
+        echo "  注意：系统读到的电池温度被钉在 ${v}℃，与真实 ${real}℃ 不一致；"
+        echo "        按温区判档的策略会据此重新算电流，功率可能跟着抖。"
     else
         echo "电池伪装写入失败：本机电池温区没有可挂载的 temp 节点"
         sd_state_set batt_spoof off

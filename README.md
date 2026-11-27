@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`3.1.12`（`versionCode 3011201`），C 版为 `3.1.12-c`
+- 当前版本：`3.1.13`（`versionCode 3011301`），C 版为 `3.1.13-c`
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -37,7 +37,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 这个守护进程每 15 秒读几十个 sysfs 小文件、算一遍目标、偶尔写几个节点。
 用 shell 写它有实打实的代价（每轮 4 次 fork、1.3 ms），但换来三件事：
 
-**能读。** 全部逻辑在 `lib/qc.sh` 一个文件里，3969 行，没有编译产物。想知道"为什么
+**能读。** 全部逻辑在 `lib/qc.sh` 一个文件里，3947 行，没有编译产物。想知道"为什么
 我的手机没效果"，`grep` 一下就能找到判定分支。
 
 **能改。** 现场发现某个机型的温区名字不一样，改一行正则、`action.sh restart` 就生效。
@@ -296,8 +296,10 @@ sh /data/adb/modules/quickcharge/action.sh check
 **范围校验。** 伪装温度必须落在 20 到 33℃ 之间。下限是硬性的：再低不少平台会把
 NTC 判成开路，直接锁 5V/500mA，反而更慢。
 
-**降流解除带电流闸。** `cool_down` 非 0 且实测电流 < 2.5A 时才写 0。已经满速时
-不碰这个节点——写入本身会让 OPlus 重选档，实测 4.3A 时写一下就从 32W 掉到 6W。
+**`cool_down` 只读。** 亮屏 3~13、灭屏 0，这是 OPlus 自己的降流标记，不是开关。
+3.1.13 起模块不往它写 0：写入会让驱动重选档、重走协议协商，一加 12 上从 33.6W
+掉到 2.2W 之后 45 分钟没恢复（`vusb` 8V→5.15V、`vooc` 1→0），只能拔插线。
+日志里的 `cool_down=3（亮屏降流标记，只记录不写入）` 是记录，不是待办。
 
 **退出还原。** 三种退出路径（正常退出、`uninstall.sh`、`restart`）都会：`emul_temp` 归零、
 `umount` 覆盖层、删除临时文件、阶梯解锁的原值写回。
@@ -338,9 +340,9 @@ quickcharge/
 ├── customize.sh          安装：设备检测、生成覆盖层、初始化参数、写 need_reboot
 ├── post-fs-data.sh       开机早期：备份原文件、挂载覆盖层，OTA 后自动重建
 ├── service.sh            开机后期启动守护；channel=c 且带 bin/qcmon 才交给 C 版
-├── action.sh             控制入口：CLI 与交互菜单，601 行
+├── action.sh             控制入口：CLI 与交互菜单，607 行
 ├── uninstall.sh          卸载：停守护、卸挂载、归零、清数据
-├── lib/qc.sh             核心库，3969 行，全部逻辑在这里
+├── lib/qc.sh             核心库，3947 行，全部逻辑在这里
 ├── webroot/index.html    WebUI（纯静态，KernelSU / MMRL / KsuWebUI 加载）
 ├── src/qcmon.c           C 版源码（2676 行，仅仓库内、不打包，已拆到 QuickCharge-C）
 ├── docs/TECH.md          设计细节与踩过的坑（不打包）
@@ -381,19 +383,19 @@ su 0 sh -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 | 仓库 | 当前版本 | 包名 | versionCode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.1.12` | `QuickCharge-v3.1.12.zip` | 3011201 |
-| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.1.12-c` | `QuickCharge-v3.1.12-c.zip` | 3011200 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.1.13` | `QuickCharge-v3.1.13.zip` | 3011301 |
+| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.1.13-c` | `QuickCharge-v3.1.13-c.zip` | 3011300 |
 
 每个仓库的 Release 只附自己那一份模块包，装哪个版本就去哪个仓库下载，不会混。
 
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v3.1.12
-Quick Charge v3.1.12-c
+Quick Charge v3.1.13
+Quick Charge v3.1.13-c
 ```
 
-tag 与标题一致：shell 仓 `v3.1.12`，C 仓 `3.1.12-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v3.1.13`，C 仓 `3.1.13-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
 
 ### 版本号规则（3.0 起）
@@ -411,7 +413,7 @@ tag 与标题一致：shell 仓 `v3.1.12`，C 仓 `3.1.12-c`。历史发行版�
 | 版本 | shell | C |
 |---|---|---|
 | `3.1.10` | `3011001` | `3011000` |
-| `3.1.12` | `3011201` | `3011200` |
+| `3.1.13` | `3011301` | `3011300` |
 | `3.2.0` | `3020001` | `3020000` |
 
 修订占两位（`00`–`99`），所以「修订到 100 进一位」正好对上「次版本 +1」，两条规则不再打架。
@@ -437,9 +439,9 @@ updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/up
 
 ```json
 {
-  "version": "3.1.12",
-  "versionCode": 3011201,
-  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.1.12/QuickCharge-v3.1.12.zip",
+  "version": "3.1.13",
+  "versionCode": 3011301,
+  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.1.13/QuickCharge-v3.1.13.zip",
   "changelog": "https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/RELEASE.md"
 }
 ```

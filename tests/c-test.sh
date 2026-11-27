@@ -365,7 +365,7 @@ case "$(grep '^description=' "$BASE/mod/module.prop")" in
     *) bad "disable 回退：$(grep '^description=' "$BASE/mod/module.prop")" ;;
 esac
 
-echo "[11] 降流解除 cool_down"
+echo "[11] cool_down 只读"
 setup
 state static 30
 screen_on
@@ -375,56 +375,59 @@ BT=$ROOT/sys/class/power_supply/battery/temp
 CAP=$ROOT/sys/class/power_supply/battery/capacity
 CUR=$ROOT/sys/class/power_supply/battery/current_now
 
-# 节点被抬起来就说明驱动已经降过档，此时 ibat 必然不高（fixture 里给 1.5A）
+# 3.0~3.1.12 这里会写 0（"降流解除"）。三次实测都是净损失，最惨的 PJD110
+# 写 3→0 后 33.6W 掉到 2.2W、45 分钟没回来（vusb 8V→5.15V、vooc 1→0）。
+# 3.1.13 起一律只读：下面五种「以前会写」的场景，现在都必须原样不动。
+
 printf '1500000\n' >"$CUR"
 printf '7\n'     >"$COOL"; printf '34000\n' >"$BT"; printf '40\n' >"$CAP"
 run sensor >/dev/null 2>&1
-chk "亮屏 34℃/40% → 0" "$(val "$COOL")" "0"
+chk "亮屏 34℃/40%/1.5A → 不写" "$(val "$COOL")" "7"
 
 printf '7\n' >"$COOL"; printf '46000\n' >"$BT"
 run sensor >/dev/null 2>&1
-chk "电池 46℃ 不再轻度降流 → 0" "$(val "$COOL")" "0"
-
-printf '7\n' >"$COOL"; printf '49000\n' >"$BT"
-run sensor >/dev/null 2>&1
-chk "电池 49℃ 也写 0（不看温度）" "$(val "$COOL")" "0"
+chk "电池 46℃ → 不写" "$(val "$COOL")" "7"
 
 printf '7\n' >"$COOL"; printf '34000\n' >"$BT"; printf '90\n' >"$CAP"
 run sensor >/dev/null 2>&1
-chk "电量 90% 也写 0（写 1 会掉协议）" "$(val "$COOL")" "0"
-
-printf '7\n' >"$COOL"; printf '46000\n' >"$BT"; printf '90\n' >"$CAP"
-run sensor >/dev/null 2>&1
-chk "电量 90% 且 46℃ 仍 0" "$(val "$COOL")" "0"
+chk "电量 90% → 不写" "$(val "$COOL")" "7"
 
 printf '7\n' >"$COOL"; printf '34000\n' >"$BT"; printf '40\n' >"$CAP"
 screen_off
 run sensor >/dev/null 2>&1
-chk "灭屏也解除（驱动本来给 0）" "$(val "$COOL")" "0"
+chk "灭屏 → 不写" "$(val "$COOL")" "7"
 
+printf '368000\n' >"$CUR"
 printf '7\n' >"$COOL"
 screen_on
-printf 'cool_guard=0\n' >>"$BASE/data/state.conf"
 run sensor >/dev/null 2>&1
-chk "残留 cool_guard 键已失效 → 仍写 0" "$(val "$COOL")" "0"
+chk "368mA（一加 15 那种极端低流）→ 不写" "$(val "$COOL")" "7"
 
-# 电流闸：节点非 0 但电流已经满速时不碰它。写入本身会让 OPlus 重选档，
-# 实测 PKB110 4.3A 时被写 2→0，三秒后从 32W 掉到 6W 并一路抖。
 printf '4300000\n' >"$CUR"
 printf '7\n' >"$COOL"
 run sensor >/dev/null 2>&1
-chk "4.3A 充电中 → 不动 cool_down" "$(val "$COOL")" "7"
+chk "4.3A 满速 → 不写" "$(val "$COOL")" "7"
 
-# 报 mA 的机型（3000 = 3A）同样要挡住，不能被当成"3mA 已降流"
-printf '3000\n' >"$CUR"
+# 只读也要留痕：档位变了记一条，同档位不重复刷屏。
+# 日志是追加的，先记下行数，后面只看新增部分。cool_tick 只在 sensor/守护路径里跑。
+printf '3000000\n' >"$CUR"
 printf '7\n' >"$COOL"
 run sensor >/dev/null 2>&1
-chk "报 mA 的机型 3A → 同样不动" "$(val "$COOL")" "7"
-
-printf '2499000\n' >"$CUR"
-printf '7\n' >"$COOL"
+n0=$(wc -l <"$BASE/data/log.txt")
+printf '3\n' >"$COOL"
 run sensor >/dev/null 2>&1
-chk "2499mA（真被降流）→ 写 0" "$(val "$COOL")" "0"
+tail -n +$((n0 + 1)) "$BASE/data/log.txt" >"$BASE/seg.txt"
+has "档位变 3 记进日志" "cool_down=3" "$BASE/seg.txt"
+# 同档位重复刷屏只能用守护验：单次命令每次都是新进程，计数无从谈起
+printf '3\n' >"$COOL"
+printf '3000000\n' >"$CUR"
+n1=$(wc -l <"$BASE/data/log.txt")
+daemon_start
+sleep 12
+daemon_stop
+tail -n +$((n1 + 1)) "$BASE/data/log.txt" >"$BASE/seg.txt"
+cnt=$(grep -ac 'cool_down=3' "$BASE/seg.txt")
+chk "守护跑两轮只记一次（同档位）" "$cnt" "1"
 
 printf '3000000\n' >"$CUR"
 

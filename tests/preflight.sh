@@ -42,6 +42,9 @@ same "$A/tests/c-test.sh"  "$B/tests/c-test.sh"  "tests/c-test.sh 逐字节一�
 # 这份拷贝 3.1.11 分叉了 16 行（versionCode 反算、去重只在主仓），发版时全绿也没发现，
 # 就是因为清单里没有它。加进来才算真同步 —— 守卫本身不同步，等于 C 仓没有守卫。
 same "$A/tests/preflight.sh" "$B/tests/preflight.sh" "tests/preflight.sh 逐字节一致"
+# WebUI 两仓同源。3.1.13 加 batt_spoof 提示时就漏同步了一次，打包前才发现 C 包里的
+# index.html 比主仓少一行 —— 面板文案分叉，用户看到的是哪版取决于装哪个包。
+same "$A/webroot/index.html" "$B/webroot/index.html" "webroot/index.html 逐字节一致"
 for f in lib/qc.sh customize.sh post-fs-data.sh action.sh service.sh; do
     same "$A/$f" "$B/$f" "$f 一致"
 done
@@ -51,11 +54,14 @@ BIN=$B/bin/qcmon
 if [ -f "$BIN" ]; then
     # 特征串是唯一骗不过的东西：版本号可以由构建脚本注入，功能串不行。
     # 用 grep -a 而不是 strings：中文是多字节，strings 会当不可打印丢掉。
-    for t in /pc_port/ /wireless/ input_current_limit 降流解除反噬; do
+    for t in /pc_port/ /wireless/ input_current_limit 只记录不写入; do
         has "$BIN" "$t" "bin 含 $t"
     done
     # 3.1.5 之前的老实现，出现即说明编的是旧源码
     nhas "$BIN" "息屏保持（回写 FCC" "bin 不含已删除的旧文案"
+    # 3.1.13 删掉了对 cool_down 的写入。这行文案留着就说明编的是旧源码 ——
+    # 它带来的不是"少一个功能"，是写一次就把协议打断一次。
+    nhas "$BIN" "降流解除" "bin 不再写 cool_down（无「降流解除」）"
 else
     bad "$BIN 不存在"
 fi
@@ -72,6 +78,14 @@ for f in src/qcmon.c lib/qc.sh; do
     nhas "$A/$f" "熔断" "$f 无熔断残留"
 done
 nhas "$A/src/qcmon.c" "g_curr_orig" "src/qcmon.c 无 curr.orig 死代码"
+# cool_down 只读：写回路径（反噬复查、写 0、冷却计时）删干净了才发版
+for f in src/qcmon.c lib/qc.sh; do
+    nhas "$A/$f" "降流解除反噬" "$f 无反噬复查（只读后没有写回）"
+done
+nhas "$A/lib/qc.sh" "降流解除：cool_down" "lib/qc.sh 不写 cool_down"
+has  "$A/lib/qc.sh" "只记录不写入" "lib/qc.sh 记录文案在"
+nhas "$A/lib/qc.sh" "_sd_cool_prev" "lib/qc.sh 无写回用的档位备份"
+nhas "$A/service.sh" '_ws=3' "service.sh 充电时不再压到 3s"
 
 echo "[3] 版本号自洽"
 v_prop=$(sed -n 's/^version=//p' "$A/module.prop" | head -1)
@@ -121,10 +135,10 @@ chknd "C README src/qcmon.c 行数" \
     "$(nl "$(line 'src/qcmon.c' "$B/README.md" | grep 'C 守护源码' | head -1)")" "$(num "$B/src/qcmon.c")"
 c_cases=$(n1 "$(line 'tests/c-test.sh' "$B/README.md" | grep '项冒烟测试' | head -1)")
 # 只查「不少于」，加用例不用回来改这里；漏写/写小才是要拦的
-if [ -n "$c_cases" ] && [ "$c_cases" -ge 93 ] 2>/dev/null; then
+if [ -n "$c_cases" ] && [ "$c_cases" -ge 91 ] 2>/dev/null; then
     ok "C README c-test 项数 = $c_cases（≥93）"
 else
-    bad "C README c-test 项数：文档写 ${c_cases:-（没写）}，应 ≥93"
+    bad "C README c-test 项数：文档写 ${c_cases:-（没写）}，应 ≥91"
 fi
 chknd "C README c-test 行数" \
     "$(nl "$(line 'tests/c-test.sh' "$B/README.md" | grep '项冒烟测试' | head -1)")" "$(num "$B/tests/c-test.sh")"

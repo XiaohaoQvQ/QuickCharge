@@ -40,81 +40,87 @@ cool() { cat "$ROOT/oplus/battery/cool_down" | tr -d ' \r\n'; }
 setb() { printf '%s\n' "$2" >"$ROOT/ps/battery/$1"; }
 setcool() { printf '%s\n' "$1" >"$ROOT/oplus/battery/cool_down"; }
 
-# 同进程连跑两轮，中间把 current_now 改成 $1：验证「写 0 后复查」那条路。
-run_cool2() {
-    SD_DATA=$BASE/data SD_PS=$ROOT/ps SD_OPLUS_CHG=$ROOT/oplus/battery \
-    SD_BL=$ROOT/bl SD_FB=$ROOT/none MODDIR=$MOD \
-    sh -c '. "$MODDIR/lib/qc.sh"; sd_state_load; _sd_st_loaded=1; _sd_screen_on=1
-           sd_cool_tick
-           _sd_cool_prev_at=$((_sd_cool_prev_at - 60))
-           printf "%s\n" "$1" >"$SD_PS/battery/current_now"
-           sd_cool_tick' _ "$1" 2>/dev/null
-}
-
-echo "[1] 充电中被降流就压回 0（不看温度/电量）"
+echo "[1] 只读：任何电流/温度/电量/屏幕都不改 cool_down"
+# 3.0~3.1.12 这里会写 0（"降流解除"）。三次实测全是净损失，最惨的 PJD110
+# 写 3→0 之后 33.6W 掉到 2.2W、45 分钟没回来（vusb 8V→5.15V、vooc 1→0）。
+# 3.1.13 起只读，下面每个场景都必须原样不动。
 setup; run_cool 1
-chk "34℃/40% → 0" "$(cool)" "0"
+chk "34℃/40% → 不动" "$(cool)" "7"
 
 setup; setb temp 46000; run_cool 1
-chk "46℃ → 0" "$(cool)" "0"
+chk "46℃ → 不动" "$(cool)" "7"
 
 setup; setb temp 49000; run_cool 1
-chk "49℃ 也压 0（不看温度）" "$(cool)" "0"
+chk "49℃ → 不动" "$(cool)" "7"
 
 setup; setb capacity 90; run_cool 1
-chk "90% 也写 0（写 1 会掉协议，见 qcmon.c cool_tick）" "$(cool)" "0"
+chk "90% → 不动" "$(cool)" "7"
 
 setup; setb capacity 90; setb temp 46000; run_cool 1
-chk "90% 且 46℃ → 0" "$(cool)" "0"
+chk "90% 且 46℃ → 不动" "$(cool)" "7"
 
-echo "[1b] 电流闸：已经满速时不要碰这个节点"
-# 实测 PKB110：4.3A 时被写 2→0，三秒后掉到 9.7W 并一路抖到 6W。
-# 写入本身会让 OPlus 重选档，所以只有 ibat < 2.5A 才允许写。
+echo "[1b] 电流高低都不写"
 setup; setb current_now 4300000; run_cool 1
-chk "4.3A 充电中 → 不动节点" "$(cool)" "7"
-
-setup; setb current_now 4300000; setb temp 49000; run_cool 1
-chk "4.3A + 49℃ → 仍不动" "$(cool)" "7"
+chk "4.3A 满速 → 不动" "$(cool)" "7"
 
 setup; setb current_now 1500000; run_cool 1
-chk "1.5A（已降流）→ 写 0" "$(cool)" "0"
+chk "1.5A（看着像被降流）→ 不动" "$(cool)" "7"
 
-setup; setb current_now -4300000; run_cool 1
-chk "电流为负也按绝对值判（4.3A → 不动）" "$(cool)" "7"
-
-setup; setb current_now 2500000; run_cool 1
-chk "正好 2.5A → 不动（边界含在闸内）" "$(cool)" "7"
+setup; setb current_now 368000; run_cool 1
+chk "368mA（一加 15 那种极端低流）→ 不动" "$(cool)" "7"
 
 setup; setb current_now 2499000; run_cool 1
-chk "2499mA → 写 0" "$(cool)" "0"
+chk "2499mA（旧 2.5A 闸的边界）→ 不动" "$(cool)" "7"
 
-echo "[1c] 电流读不到：不知道就别动"
 setup; rm -f "$ROOT/ps/battery/current_now"; run_cool 1
-chk "没有 current_now → 保持 7" "$(cool)" "7"
+chk "没有 current_now → 不动" "$(cool)" "7"
 
-setup; printf 'x\n' >"$ROOT/ps/battery/current_now"; run_cool 1
-chk "current_now 非数字 → 保持 7" "$(cool)" "7"
+echo "[1c] 档位原样保留，一个字节都不写"
+setup; setcool 3; run_cool 1
+chk "档位 3 → 还是 3" "$(cool)" "3"
 
-echo "[1d] 写 0 后复查：电流没升就写回原档位"
-setup; setb current_now 1500000
-run_cool2 1500000
-chk "写 0 后仍是 1.5A → 写回 7" "$(cool)" "7"
+setup; setcool 13; run_cool 1
+chk "档位 13（亮屏上限）→ 还是 13" "$(cool)" "13"
 
-setup; setb current_now 1500000
-run_cool2 3000000
-chk "写 0 后升到 3.0A → 保持 0" "$(cool)" "0"
+setup; setcool 0; run_cool 1
+chk "已经是 0 → 保持 0" "$(cool)" "0"
+
+echo "[1d] 只读也要留痕：档位变了记一条，不变不重复"
+# 只有同一个进程里连跑两轮才看得出「不重复」；单次命令每次都是新进程，
+# 上一档位自然丢，计数没有意义。
+run_seq() {   # $1 = 两轮之间要不要改档位
+    SD_DATA=$BASE/data SD_PS=$ROOT/ps SD_OPLUS_CHG=$ROOT/oplus/battery \
+    SD_BL=$ROOT/bl SD_FB=$ROOT/none MODDIR=$MOD \
+    sh -c '. "$MODDIR/lib/qc.sh"; sd_state_load; _sd_st_loaded=1
+           sd_cool_tick
+           [ -n "$1" ] && printf "%s\n" "$1" >"$SD_OPLUS_CHG/cool_down"
+           sd_cool_tick' _ "$1" 2>/dev/null
+}
+logc() { grep -ac 'cool_down=' "$BASE/data/log.txt" 2>/dev/null || echo 0; }
+
+setup; setcool 7; run_seq ""
+chk "两轮同档位只记 1 条" "$(logc)" "1"
+
+setup; setcool 7; run_seq 3
+chk "档位 7→3 记 2 条" "$(logc)" "2"
+
+setup; setcool 3; run_seq 0
+chk "档位 3→0 也记" "$(logc)" "2"
+
+chk "日志里有档位原文" \
+    "$(grep -a 'cool_down=3（亮屏降流标记，只记录不写入）' "$BASE/data/log.txt" | wc -l | tr -d ' ')" "1"
 
 echo "[2] 不该动的场景"
 setup; run_cool 0
-chk "灭屏也解除（驱动本来给 0，写 0 无副作用）" "$(cool)" "0"
+chk "灭屏同样不动" "$(cool)" "7"
 
 setup; setb status Discharging; run_cool 1
-chk "未充电 → 不干预" "$(cool)" "7"
+chk "未充电 → 不动" "$(cool)" "7"
 
-setup; run_cool 1
+setup
 printf 'cool_guard=0\n' >>"$BASE/data/state.conf"
-setcool 7; run_cool 1
-chk "残留的 cool_guard 键已失效 → 照样压 0" "$(cool)" "0"
+run_cool 1
+chk "残留的 cool_guard 键不影响（写回路径已删）" "$(cool)" "7"
 
 echo "[3] 屏幕判定：任一亮度节点有值就算亮屏"
 run_screen() {

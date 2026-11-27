@@ -192,7 +192,14 @@ sd_dump_env() {
     sd_use_c && cv=$("$MODDIR/bin/qcmon" -v 2>/dev/null | head -1)
     _sd_emit I env "module=${mv:-?} channel=$(sd_channel) daemon=${cv:-shell}"
     sd_plat_resolve
-    _sd_emit I env "soc=${_sd_plat}（${_sd_plat_why}） emul=$_emul_n${_emul_head} shell-temp=$_sh charge-nodes=$(sd_curr_nodes 2>/dev/null | wc -l | tr -d ' ')"
+    # 「存在/候选」两个数一起给：只写一个数时，启动早期那个 0 会被读成
+    # 「这台机器没有电流节点」，3.1.12 的根因报告就是这么误判的。
+    local cn ce
+    ce=$(printf '%s' "$_sd_curr_nodes" | wc -w | tr -d ' ')
+    cn=$(sd_curr_nodes 2>/dev/null | wc -l | tr -d ' ')
+    [ "$ce" -gt 0 ] 2>/dev/null || ce=0
+    _sd_emit I env "soc=${_sd_plat}（${_sd_plat_why}） emul=$_emul_n${_emul_head} shell-temp=$_sh charge-nodes=${cn}/${ce}（存在/候选）"
+    _sd_curr_ex=$cn
     if [ -n "$sentinel" ]; then
         _sd_emit I env "sentinel=$(basename "$sentinel") type=${stype:-?} temp=${stemp:-?}℃"
     else
@@ -934,7 +941,12 @@ _sd_plat=""
 _sd_plat_why=""
 
 sd_plat_resolve() {
-    [ -n "$_sd_plat" ] && return 0
+    # 认出 mtk/qcom 就定死；other 多半是启动早期 getprop 还没就绪，不缓存。
+    # 3.1.12 及以前 `[ -n "$_sd_plat" ]` 把 other 也定死，于是 MTK 那 5 个候选
+    # 节点永远拿不到 —— 这才是真正的"缓存了坏结果"。试满 8 次还是 other 才认命。
+    case "$_sd_plat" in mtk|qcom) return 0 ;; esac
+    [ "${_sd_plat_try:-0}" -ge 8 ] && return 0
+    _sd_plat_try=$(( ${_sd_plat_try:-0} + 1 ))
     local bp sm hw hwline
     bp=$(getprop ro.board.platform 2>/dev/null)
     sm=$(getprop ro.soc.manufacturer 2>/dev/null)
@@ -2336,6 +2348,21 @@ sd_umount_overrides() {
     return 0
 }
 
+# 启动瞬间 sysfs 常常还没就绪，这时探测结果是 0，几秒后就变成 8。
+# 只在启动时打一次的话，日志里只剩那个 0，看日志的人会当成「永久没节点」
+# —— 3.1.12 的根因报告据此写了一条并不存在的 P2。数量变了就补一条。
+_sd_curr_ex=-1
+sd_curr_watch() {
+    local n ce
+    n=$(sd_curr_nodes 2>/dev/null | wc -l | tr -d ' ')
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    [ "$n" = "$_sd_curr_ex" ] && return 0
+    _sd_curr_ex=$n
+    ce=$(printf '%s' "$_sd_curr_nodes" | wc -w | tr -d ' ')
+    [ "$ce" -gt 0 ] 2>/dev/null || ce=0
+    sd_info env "charge-nodes=${n}/${ce}（存在/候选，启动后重新探测）"
+}
+
 sd_curr_nodes() {
     local n
     _sd_curr_prepare
@@ -2769,25 +2796,21 @@ sd_charge_tick() {
     sd_shell_emul "$_sd_last_out"
 }
 
-# ------------------------------------------------------------------ 降流解除
-# ColorOS 16 用 oplus_chg/battery/cool_down 做亮屏降流：灭屏 0，亮屏 7~13，
-# 与温度无关（实测电池 33.8℃ 照样跳到 7）。写 0 后满速立即恢复，驱动不会覆盖，
-# 只在屏幕状态等事件时重算，因此按 tick 复查即可。
+# -------------------------------------------------------------- cool_down 只读
+# ColorOS 16/17 用 oplus_chg/battery/cool_down 做亮屏降流：灭屏 0，亮屏 3~13，
+# 与温度无关（实测电池 33.8℃ 照样跳到 7）。它是「结果」，不是开关。
+#
+# 3.0~3.1.12 这里往它写过 0（"降流解除"），三次实测全是净损失：
+#   PKB110 写 2→0：18W → 9.7W，一路抖到 6W
+#   PKX110 写 0→1：32W → 9W，tech 7→14
+#   PJD110 写 3→0：33.6W → 2.2W，随后 45 分钟没回到 10W 以上
+#     （同一秒 vusb 8V→5.15V、imax 2.00A→0.50A、vooc 1→0、type→Unknown，
+#      也就是写入这个动作让驱动重选档、重走协议协商，只能拔插线恢复）。
+# 对照组在同一分钟里：驱动自己把 cool_down 清到 0 时功率 31.5W 正常 ——
+# 同一个值、同一台机器，差别只在"谁写的"。所以这里只读不写。
 SD_COOL_NODE=""
 _sd_cool_none=0
-_sd_cool_log=""
-# 写 0 之后要复查：写这个动作本身会让 OPlus 重选档，压错了就得写回去。
-_sd_cool_prev=0        # 写 0 之前读到的档位
-_sd_cool_prev_iab=0    # 写 0 之前读到的电流
-_sd_cool_prev_at=0     # 写 0 的时刻（/proc/uptime 秒）
-_sd_cool_hold=0        # 反噬后的冷却截止时刻
-_sd_cool_uptime() {
-    local u=0
-    read -r u _ 2>/dev/null </proc/uptime
-    u=${u%%.*}
-    case "$u" in ''|*[!0-9]*) u=0 ;; esac
-    _sd_rv=$u
-}
+_sd_cool_log=""        # 上一次记下的档位；""=还没记过，none=本机没节点
 
 sd_cool_node() {
     local p
@@ -2802,11 +2825,11 @@ sd_cool_node() {
 }
 
 sd_cool_tick() {
-    local cur iab bt cap now
+    local cur
 
     if ! sd_cool_node; then
         if [ "$_sd_cool_log" != none ]; then
-            sd_warn charge "降流解除：本机没有 cool_down 节点，跳过"
+            sd_warn charge "cool_down：本机没有这个节点，跳过"
             _sd_cool_log=none
         fi
         return 0
@@ -2815,60 +2838,15 @@ sd_cool_tick() {
     sd_batt_status_v
     case "$_sd_rv" in Charging|Full) ;; *) return 0 ;; esac
 
-    _sd_cool_uptime
-    now=$_sd_rv
-
-    # 上一轮写过 0 的，先复查。写动作反噬（PKB110 实测 18W→9.7W）时电流不会上升，
-    # 这时候必须把原档位写回去，否则驱动被反复重选档，功率一路抖到 6W。
-    if [ "$_sd_cool_prev" -gt 0 ]; then
-        [ $((now - _sd_cool_prev_at)) -ge 20 ] || return 0
-        if sd_chg_current_v; then
-            iab=$_sd_rv
-            case "$iab" in ''|*[!0-9-]*) iab="" ;; esac
-            if [ -n "$iab" ]; then
-                [ "$iab" -lt 0 ] && iab=$((-iab))
-                if [ "$iab" -le $((_sd_cool_prev_iab * 6 / 5)) ] && [ "$iab" -lt 2500000 ]; then
-                    printf '%s\n' "$_sd_cool_prev" >"$SD_COOL_NODE" 2>/dev/null
-                    sd_warn charge "降流解除反噬：写 0 后电流 $((iab / 1000))mA 没升，已写回档位 ${_sd_cool_prev}，暂停 5 分钟"
-                    _sd_cool_hold=$((now + 300))
-                    _sd_cool_log=fail
-                fi
-            fi
-        fi
-        _sd_cool_prev=0
-    fi
-    [ "$now" -lt "$_sd_cool_hold" ] && return 0
-
-    # 不看温度、不看电量：节点只要被抬起来就压回 0。
     sd_read1 "$SD_COOL_NODE" || return 0
     cur=$_sd_rv
     case "$cur" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$cur" = 0 ] && return 0
-
-    # 电流已经正常就别碰这个节点：写入本身会让 OPlus 重选档。
-    # 实测 PKB110：ibat 4.3A 时被写 2→0，三秒后掉到 9.7W 并一路抖到 6W；
-    # PKX110：写 0→1 后 tech 7→14、3.6A→1.0A，32W 掉到 9W。
-    # 3.1.3 曾按档位 >=8 放行，等于让「3-4A + 高档位」也每轮写一次；这里收回：
-    # 只按电流判，电流读不到一律不动（以前当成 0，等于无条件写）。
-    sd_chg_current_v || return 0
-    iab=$_sd_rv
-    case "$iab" in ''|*[!0-9-]*) return 0 ;; esac
-    [ "$iab" -lt 0 ] && iab=$((-iab))
-    [ "$iab" -ge 2500000 ] && return 0
-
-    bt=""; sd_batt_temp_v && bt=$_sd_rv
-    cap=""; sd_ps_attr_v capacity && cap=$_sd_rv
-    if printf '0\n' >"$SD_COOL_NODE" 2>/dev/null; then
-        if [ "$_sd_cool_log" != 0 ]; then
-            sd_info charge "降流解除：cool_down ${cur} → 0（电池 ${bt:-?}℃ 电量 ${cap:-?}% 电流 $((iab / 1000))mA）"
-            _sd_cool_log=0
-        fi
-        _sd_cool_prev=$cur
-        _sd_cool_prev_iab=$iab
-        _sd_cool_prev_at=$now
-    elif [ "$_sd_cool_log" != fail ]; then
-        sd_warn charge "降流解除失败：$SD_COOL_NODE 写不进去"
-        _sd_cool_log=fail
+    [ "$cur" = "$_sd_cool_log" ] && return 0
+    _sd_cool_log=$cur
+    if [ "$cur" = 0 ]; then
+        sd_info charge "cool_down=0（当前没被降流）"
+    else
+        sd_info charge "cool_down=$cur（亮屏降流标记，只记录不写入）"
     fi
 }
 

@@ -156,6 +156,9 @@ sd_daemon() {
 
         sd_screen_tick
 
+        # 电流节点在启动早期可能还没就绪，数量变了补一条（见 sd_curr_watch）
+        if [ $((cnt % 4)) -eq 1 ]; then sd_curr_watch; fi
+
         # 屏幕判定只影响日志与轮询间隔，不再影响是否解除降流。
         # 但判错了会影响读数，所以每轮守护启动记一次，排查时一眼能看出。
         if [ "$_sd_scr_log" != 1 ]; then
@@ -174,14 +177,6 @@ sd_daemon() {
         sd_cool_tick
         sd_unlock_tick
         sd_chg_snapshot "$_sd_chg"
-
-        # 充电时压到 3s：cool_down 被驱动抬高后要尽快清零，慢一拍就白等一轮。
-        # 以前只在亮屏时压，但有的机型屏幕判定靠不住，干脆充电即压。
-        if [ "$_sd_chg" = 1 ]; then
-            _ws=3
-        else
-            _ws=$tick
-        fi
 
         sd_spoof_pending
         sd_batt_sp_guard
@@ -219,6 +214,20 @@ sd_daemon() {
                 _sd_last_out=0
                 ;;
         esac
+
+        # 以前充电时压到 3s，为的是尽快把 cool_down 清零。3.1.13 起 cool_down
+        # 只读（写它会让 OPlus 重选档），3 秒一次只剩耗电，所以改回按配置走。
+        # 但「有东西在位」时必须留一个短周期：拔电、改模式要尽快还原，
+        # 不能因为用户把 tick 设成 60 就干等一分钟。
+        # 这一段必须放在模式处理之后 —— 刚启动时 _sd_last_out 还是空的，
+        # 放在前面会让第一轮就睡满 tick，拔电要等到一分钟以后才发现。
+        _ws=$tick
+        if [ "$_ws" -gt 10 ]; then
+            if { [ -n "$_sd_last_out" ] && [ "$_sd_last_out" != 0 ]; } ||
+               [ -f "$SD_UNLOCK_ORIG" ]; then
+                _ws=10
+            fi
+        fi
 
         sd_telemetry_sample
         sd_hb_write

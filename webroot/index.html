@@ -670,7 +670,7 @@
       ? "系统读到 " + bsp + "℃" +
         (d.batt_real !== null && d.batt_real !== undefined
           ? " · 真实 " + d.batt_real + "℃" : " · 真实温度读不到") +
-        "；不按真实温度撤销"
+        "；不按真实温度撤销，按温区判档的策略会据此重算电流，功率可能跟着抖"
       : "电池温度保持真实；开启后才改写";
     $("unlockBtn").className = d.unlock === true ? "bigbtn on" : "bigbtn";
     $("unlockBtn").textContent = d.unlock === true
