@@ -151,7 +151,7 @@ static void on_usr1(int s) { (void)s; g_reload = 1; }
 static void sync_desc(void);
 /* 壳温写入带缓存，模式切换时要能重置 */
 static void shell_emul_reset(void);
-/* 降流解除要读电池电流，定义在快照段 */
+/* cool_down 记日志要读电池电流，定义在快照段 */
 static long chg_current(void);
 
 /* 静态二进制拿不到 Android 的时区库（没有 /usr/share/zoneinfo），
