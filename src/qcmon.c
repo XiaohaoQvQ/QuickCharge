@@ -82,6 +82,8 @@ static char g_log[320];
 static char g_log_old[320];
 static char g_run[300];
 static char g_moddir[MAXPATH] = "";
+static char g_service_sh[MAXPATH + 16] = "";
+static int g_had_service_sh = 0;
 static char g_sys[128] = "";       /* 测试用：把 / 换成别的根，真机留空 */
 
 static char g_ps[MAXPATH];
@@ -387,15 +389,23 @@ static int state_set(const char *k, const char *v)
         tmpk[kl] = 0;
         int w = (kl < len && !strcmp(tmpk, k));
         if (w) {
-            o += snprintf(out + o, sizeof out - o, "%s=%s\n", k, v);
+            int n = snprintf(out + o, sizeof out - o, "%s=%s\n", k, v);
+            if (n < 0 || (size_t)n >= sizeof out - o) return -1;
+            o += (size_t)n;
             found = 1;
         } else {
-            if (o + len < sizeof out) { memcpy(out + o, p, len); o += len; }
+            if (len >= sizeof out - o) return -1;
+            memcpy(out + o, p, len);
+            o += len;
         }
         if (!nl) break;
         p = nl + 1;
     }
-    if (!found) o += snprintf(out + o, sizeof out - o, "%s=%s\n", k, v);
+    if (!found) {
+        int n = snprintf(out + o, sizeof out - o, "%s=%s\n", k, v);
+        if (n < 0 || (size_t)n >= sizeof out - o) return -1;
+        o += (size_t)n;
+    }
     out[o] = 0;
 
     snprintf(tmp, sizeof tmp, "%s.t.%d", g_state, (int)getpid());
@@ -1192,8 +1202,6 @@ static int scr_apply(void)
     return 0;
 }
 
-static long g_scr_fail_at = 0;      /* 上一次记「本机不支持」的时刻 */
-
 static void scr_tick(void)
 {
     static char logged[16] = "";
@@ -1209,13 +1217,7 @@ static void scr_tick(void)
 
     char st[32];
     batt_status(st, sizeof st);
-    if (!strcmp(st, "Full")) {
-        /* 满电时系统自己就在收电流，接管/解除都没意义；也不能算「本机不支持」，
-         * 否则插着线满电放一夜，日志被这条 W 淹掉。 */
-        if (scr_active()) { scr_release(); logged[0] = 0; }
-        return;
-    }
-    if (strcmp(st, "Charging")) {
+    if (strcmp(st, "Charging") && strcmp(st, "Full")) {
         if (scr_active()) { scr_release(); logged[0] = 0; }
         return;
     }
@@ -1234,7 +1236,6 @@ static void scr_tick(void)
 
     switch (scr_apply()) {
         case 0: {
-            g_scr_fail_at = 0;      /* 这次成功，下次失败要立刻记 */
             if (strcmp(g_scr_way_s, logged)) {
                 if (!strcmp(g_scr_way_s, "kernel"))
                     log_msg("I", "charge", "亮屏快充：已接管（内核 ignore_screen_state）");
@@ -1259,14 +1260,9 @@ static void scr_tick(void)
             /* 息屏时失败不落「本机不支持」：节点偶尔读不到，落盘后要等重启才恢复 */
             if (scr_active()) scr_release();
             if (g_screen_on) {
-                /* 状态变了记一条；一直不支持就每 30 分钟兜底一条 ——
-                 * 按轮记会把日志占满（实测 78 条），只记一次又会让后来的人
-                 * 以为这事早就过去了。 */
-                long now = (long)time(NULL);
-                if (strcmp(logged, "fail") || now - g_scr_fail_at >= 1800) {
+                if (strcmp(logged, "fail")) {
                     log_msg("W", "charge", "亮屏快充：本机不支持（无屏幕状态参数，FCC 也写不进去）");
                     snprintf(logged, sizeof logged, "fail");
-                    g_scr_fail_at = now;
                 }
                 write_str(g_scr_fail, "1\n");
             }
@@ -1336,14 +1332,7 @@ static void cool_tick(void)
     if (strcmp(st, "Charging") && strcmp(st, "Full")) return;
 
     int cur = 0;
-    if (read_int(node, &cur) < 0) {
-        /* 节点在、读不到：以前是静默 return，日志里看不出「根本没在管」 */
-        if (g_cool_logged != -2) {
-            log_msg("W", "charge", "cool_down 节点存在但读不到（%s），降流状态未知", node);
-            g_cool_logged = -2;
-        }
-        return;
-    }
+    if (read_int(node, &cur) < 0) return;
     if (cur == g_cool_logged) return;
 
     if (cur > 0)
@@ -1723,9 +1712,7 @@ static void chg_snapshot(int charging)
     char line[384], sig[384], st[32] = "?";
     long now = (long)time(NULL);
 
-    /* 1 级是「事件」：插电/停充/每 10 分钟的快照本来就属于事件，锁在 2 级
-     * 等于用户默认配置下日志里完全没有功率（3.1.13 的 PLG110 那份 [chg] 为 0）。 */
-    if (g_c.log_level < 1) return;
+    if (g_c.log_level < 2) return;
     /* 没充电时降频，省得空跑读一堆节点 */
     if (!charging && now - g_chg_scan < 30) return;
     g_chg_scan = now;
@@ -2176,31 +2163,6 @@ static void desc_build(char *out, size_t n)
     else snprintf(out, n, "✅ 运行中 · %s%s · 配置未挂载", gear, shape);
 }
 
-/* module.prop 里某个键的值。只在启动时读一次，目前用于通道闸。 */
-static int prop_key(const char *key, char *out, size_t n)
-{
-    if (!g_moddir[0]) return -1;
-    char p[MAXPATH + 32];
-    snprintf(p, sizeof p, "%s/module.prop", g_moddir);
-    FILE *f = fopen(p, "r");
-    if (!f) return -1;
-
-    size_t kl = strlen(key);
-    char line[MAXLINE];
-    int rc = -1;
-    while (fgets(line, sizeof line, f)) {
-        if (strncmp(line, key, kl) || line[kl] != '=') continue;
-        char *v = line + kl + 1;
-        char *e = v + strlen(v);
-        while (e > v && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ')) *--e = 0;
-        snprintf(out, n, "%s", v);
-        rc = 0;
-        break;
-    }
-    fclose(f);
-    return rc;
-}
-
 static void sync_desc(void)
 {
     if (!g_moddir[0]) return;
@@ -2216,15 +2178,17 @@ static void sync_desc(void)
     char line[MAXLINE], buf[8192];
     size_t o = 0;
     while (fgets(line, sizeof line, f)) {
+        int n;
         if (!strncmp(line, "description=", 12)) {
             char *e = line + strlen(line);
             while (e > line && (e[-1] == '\n' || e[-1] == '\r')) *--e = 0;
             snprintf(cur, sizeof cur, "%s", line + 12);
-            o += snprintf(buf + o, sizeof buf - o, "description=%s\n", want);
+            n = snprintf(buf + o, sizeof buf - o, "description=%s\n", want);
         } else {
-            o += snprintf(buf + o, sizeof buf - o, "%s", line);
+            n = snprintf(buf + o, sizeof buf - o, "%s", line);
         }
-        if (o >= sizeof buf - MAXLINE) break;
+        if (n < 0 || (size_t)n >= sizeof buf - o) { fclose(f); return; }
+        o += (size_t)n;
     }
     fclose(f);
     if (!strcmp(cur, want)) return;
@@ -2267,6 +2231,26 @@ static void spoof_pending(void)
 
 static char g_lock[340];
 
+/* 校验持锁 PID 是否仍为本守护（防异常重启后 PID 被无关进程复用） */
+static int pid_is_daemon(int pid)
+{
+    if (pid <= 1 || pid == (int)getpid() || kill(pid, 0) != 0) return 0;
+
+    char cp[64], cmd[256];
+    snprintf(cp, sizeof cp, "/proc/%d/cmdline", pid);
+    int fd = open(cp, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return (errno == ENOENT || errno == ESRCH) ? 0 : 1;
+
+    ssize_t r = read(fd, cmd, sizeof cmd - 1);
+    close(fd);
+    if (r <= 0) return 0;
+    for (ssize_t i = 0; i < r; i++) {
+        if (cmd[i] == '\0') cmd[i] = ' ';
+    }
+    cmd[r] = 0;
+    return strstr(cmd, "qcmon") != NULL || strstr(cmd, "service.sh") != NULL;
+}
+
 static void lock_acquire(void)
 {
     snprintf(g_lock, sizeof g_lock, "%s/daemon.lock", g_run);
@@ -2276,7 +2260,7 @@ static void lock_acquire(void)
         snprintf(p, sizeof p, "%s/pid", g_lock);
         if (read_line(p, b, sizeof b) == 0) {
             int pid = atoi(b);
-            if (pid > 1 && pid != (int)getpid() && kill(pid, 0) == 0) {
+            if (pid_is_daemon(pid)) {
                 fprintf(stderr, "qcmon: 已有实例 pid=%d\n", pid);
                 exit(0);
             }
@@ -2285,7 +2269,10 @@ static void lock_acquire(void)
         snprintf(q, sizeof q, "%s/pid", g_lock);
         unlink(q);
         rmdir(g_lock);
-        if (mkdir(g_lock, 0755) < 0) return;
+        if (mkdir(g_lock, 0755) < 0) {
+            fprintf(stderr, "qcmon: 获取锁失败（errno=%d）\n", errno);
+            exit(0);
+        }
     }
     char p[400], b[32];
     snprintf(p, sizeof p, "%s/pid", g_lock);
@@ -2587,38 +2574,11 @@ static void log_env(void)
          * 只写「存在数」又会把启动早期那个 0 读成永久状态。 */
         int ex = curr_existing();
         if (ex > 0)
-            log_msg("I", "env", "charge nodes=%d/%d（存在/候选）", ex, g_curr_n);
+            log_msg("I", "env", "charge nodes=%d/%d（存在/候选） first=%s",
+                    ex, g_curr_n, g_curr_nodes[0]);
         else
             log_msg("W", "env", "charge nodes=0/%d（候选都在、文件还没出现，每轮重新探测）", g_curr_n);
         g_curr_ex = ex;
-
-        /* 到底是哪几个节点在：只给数量时「fcc 节点=none」是一句没法追查的结论。
-         * 打全路径（去掉测试用 sysroot 前缀），重名的 battery/current_max 与
-         * usb/current_max 才分得开。 */
-        if (ex > 0) {
-            char hits[400];
-            size_t o = 0, sl = strlen(g_sys);
-            hits[0] = 0;
-            for (int i = 0; i < g_curr_n && o < sizeof hits - 90; i++) {
-                if (access(g_curr_nodes[i], F_OK) != 0) continue;
-                const char *pp = g_curr_nodes[i];
-                if (sl && !strncmp(pp, g_sys, sl)) pp += sl;
-                o += snprintf(hits + o, sizeof hits - o, "%s%s", o ? " " : "", pp);
-            }
-            if (o) log_msg("I", "env", "charge nodes 命中=%s", hits);
-        }
-    }
-
-    /* cool_down 在不在、读不读得到：只读它，但状态得先记清楚 */
-    {
-        char cn[MAXPATH];
-        if (cool_node(cn, sizeof cn) == 0) {
-            int v = 0;
-            if (read_int(cn, &v) == 0) log_msg("I", "env", "cool_down=%d（%s）", v, cn);
-            else log_msg("W", "env", "cool_down 节点存在但读不到（%s）", cn);
-        } else {
-            log_msg("I", "env", "cool_down=none（本机没有这个节点，不算失败）");
-        }
     }
 }
 
@@ -2709,21 +2669,6 @@ int main(int argc, char **argv)
         }
     }
 
-    /* 通道闸：qcmon 只属于 channel=c 的包。shell 包里出现 qcmon 一定是残留
-     * （旧包没删干净、C 包刷回 shell 包、手动执行过）。两个守护共用 run/ 下的
-     * scr.orig / fcc.norm / unlock.orig，会互相覆盖备份；≤3.1.12 的 qcmon 还会
-     * 写 cool_down，能把 VOOC 直接打到 2W 档 —— 3.1.13 的 PLG110 日志里那两套
-     * 「熄屏/亮屏」就是双守护的证据。 */
-    {
-        char ch[16] = "";
-        if (prop_key("channel", ch, sizeof ch) != 0 || strcmp(ch, "c")) {
-            log_msg("E", "daemon",
-                    "channel=%s 不是 c，qcmon 拒绝启动（避免与 shell 守护双写日志与备份）",
-                    ch[0] ? ch : "缺失");
-            return 0;
-        }
-    }
-
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_term;
@@ -2741,7 +2686,16 @@ int main(int argc, char **argv)
     log_msg("I", "daemon", "qcmon %s 启动：tick=%ds mode=%s", VER, g_c.tick, g_c.temp_mode);
     if (g_c.log_level >= 1) log_env();
 
+    if (g_moddir[0]) {
+        snprintf(g_service_sh, sizeof g_service_sh, "%s/service.sh", g_moddir);
+        g_had_service_sh = (access(g_service_sh, F_OK) == 0);
+    }
+
     while (!g_stop) {
+        if (g_had_service_sh && access(g_service_sh, F_OK) != 0) {
+            log_msg("I", "daemon", "模块目录已移除，守护退出");
+            break;
+        }
         int changed = 0;
         int sec = loop_once(&changed);
         if (changed) sync_desc();

@@ -22,14 +22,14 @@ export SD_PHASE=post-fs-data
 
 sd_log_reset
 rm -f "$SD_RUN/hb" "$SD_RUN/sensor" 2>/dev/null
+sd_state_load
 if [ -d "$SD_RUN/daemon.lock" ] || [ -f "$SD_RUN/daemon.pid" ]; then
-    sd_stale_clean && echo "QC: 清理上一轮残留的守护锁(旧 pid=${_sd_stale_pid:-?})" >&2
-fi
-if [ -d "$SD_RUN/daemon.lock" ] || [ -f "$SD_RUN/daemon.pid" ]; then
-    sd_stale_clean && sd_info boot "清理上一轮残留的守护锁(旧 pid=${_sd_stale_pid:-?})"
+    if sd_stale_clean; then
+        echo "QC: 清理上一轮残留的守护锁(旧 pid=${_sd_stale_pid:-?})" >&2
+        sd_info boot "清理上一轮残留的守护锁(旧 pid=${_sd_stale_pid:-?})"
+    fi
 fi
 
-sd_state_load
 # 3.0.8 删掉了 horae 开关（它只管性能/亮度，与充电无关）。老用户若把它停在 0，
 # 这里恢复系统默认并把状态行清掉，否则入口没了，horae 会一直停着。
 if [ -f "$SD_STATE" ] && grep -q '^horae=' "$SD_STATE" 2>/dev/null; then
