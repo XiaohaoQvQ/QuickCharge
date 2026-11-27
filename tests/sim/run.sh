@@ -2660,6 +2660,86 @@ eq "$(cat "$B52/thermal_charging")" "0" "HAL 写回 1：下一轮再压 0"
 eq "$(grep -c '^chg_unlock=1' "$D52/state.conf" 2>/dev/null)" "1" "状态位仍是 1"
 rm -rf "$D52"
 
+# ---------------------------------------------------------------- T53 日志里要有功率
+# 3.1.13 的 PLG110 日志是 log_level=1，[chg] 计 0 条 —— 用户说「10–20W」，
+# 日志里连「在不在充」都没有。快照属于事件，1 级就该记。
+D53=/tmp/qc53; rm -rf "$D53"; mkdir -p "$D53/bl/panel0-backlight"
+printf '200\n' >"$D53/bl/panel0-backlight/actual_brightness"
+t53() { env SD_DATA=$D53 SD_MODDIR=/opt/qc SD_NO_DAEMON=1 SD_BL="$D53/bl" SD_FB=/nonexistent \
+        SD_CURR_NODES=/sys/class/power_supply/usb/current_max \
+        FAKE_PLAT=sm8850 FAKE_SOCMFR=Qualcomm FAKE_HW=qcom "$@"; }
+
+rm -rf /sys/class/oplus_chg
+mkdir -p /sys/class/power_supply/battery /sys/class/power_supply/usb
+printf 'Charging\n'  >/sys/class/power_supply/battery/status
+printf '380\n'       >/sys/class/power_supply/battery/temp
+printf '60\n'        >/sys/class/power_supply/battery/capacity
+printf '4000000\n'   >/sys/class/power_supply/battery/current_now
+printf '4219000\n'   >/sys/class/power_supply/battery/voltage_now
+printf '8850000\n'   >/sys/class/power_supply/usb/voltage_now
+printf '2000000\n'   >/sys/class/power_supply/usb/current_max
+printf 'USB_DCP\n'   >/sys/class/power_supply/usb/type
+
+printf 'temp_mode=off\nshell_temp=28\ntick=5\nlog_level=1\ndefrev=3\n' >"$D53/state.conf"
+SD_DATA=$D53 SD_MODDIR=/opt/qc SD_BL="$D53/bl" SD_FB=/nonexistent \
+    sh /opt/qc/service.sh --daemon >/tmp/t53.log 2>&1 &
+D53P=$!
+wait_grep "$D53/log.txt" '\[chg\]' 8 "1 级日志也有充电快照"
+has "$(cat "$D53/log.txt" 2>/dev/null)" "vusb=" "快照里带 vusb（功率的输入）"
+has "$(cat "$D53/log.txt" 2>/dev/null)" "ibat=" "快照里带 ibat"
+
+# 两个主人共用一个变量时，「屏幕 判定」会每轮记一条（3.1.13 实测 77 条）
+sleep 8
+eq "$(grep -c '屏幕 判定' "$D53/log.txt")" "1" "屏幕 判定只记一次"
+has "$(cat "$D53/log.txt" 2>/dev/null)" "代码指纹 service.sh=" "启动日志带代码指纹"
+has "$(cat "$D53/log.txt" 2>/dev/null)" "lib/qc.sh=" "指纹带 lib/qc.sh"
+kill -TERM "$D53P" 2>/dev/null; wait_dead "$D53P"
+
+# ------------------------------------------------------- T53b 满电不算「本机不支持」
+# 3.1.13 把 Full 也走同一条分支：插着线满电放一夜，日志被这条 W 占满，
+# 而且这 78 条反被当成「当时在充电」的证据。
+: >"$D53/log.txt"
+printf 'Full\n' >/sys/class/power_supply/battery/status
+t53 sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode charge; _sd_screen_on=1; sd_scr_tick' >/dev/null 2>&1
+hasnt "$(cat "$D53/log.txt" 2>/dev/null)" "本机不支持" "满电：不刷「本机不支持」"
+
+# 充电但确实没节点：状态变化记一条，后面同状态不再记
+printf 'Charging\n' >/sys/class/power_supply/battery/status
+: >"$D53/log.txt"
+t53 sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode charge; _sd_screen_on=1
+           sd_scr_tick; sd_scr_tick; sd_scr_tick' >/dev/null 2>&1
+eq "$(grep -c '本机不支持' "$D53/log.txt")" "1" "三轮同状态只记一条"
+
+# 一直不支持要留心跳：同一进程里把上次记录时刻往前推 30 分钟，下一轮必须再记
+# （单次命令每次都是新进程，计数没有意义，所以两轮必须写在一个 sh -c 里）
+: >"$D53/log.txt"
+t53 sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode charge; _sd_screen_on=1
+           sd_scr_tick; sd_scr_tick
+           _sd_scr_fail_at=$(( $(date +%s) - 1801 )); sd_scr_tick' >/dev/null 2>&1
+eq "$(grep -c '本机不支持' "$D53/log.txt")" "2" "两轮一条，满 30 分钟再记一条"
+
+# env 行：存在/候选两个数都要对。3.1.13 写的是 1/0 —— ce 在 sd_curr_nodes
+# 之前就算，拿到的是还没填的空候选表，第二位永远是 0。
+: >"$D53/log.txt"
+t53 sh /opt/qc/action.sh temp static 28 >/dev/null 2>&1
+t53 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_dump_env' >/dev/null 2>&1
+_cn=$(sed -n 's/.*charge-nodes=\([0-9][0-9]*\)\/\([0-9][0-9]*\).*/\1 \2/p' "$D53/log.txt" | head -1)
+case "${_cn#* }" in
+    ''|0) ng "env 候选数恒 0（cn/ce 顺序错）：$_cn" ;;
+    *)    ok "env 报 存在/候选 = $_cn" ;;
+esac
+has "$(cat "$D53/log.txt" 2>/dev/null)" "charge nodes 命中=/sys/class/power_supply/usb/current_max" \
+    "env 命中清单带全路径"
+
+# cool_down 节点在、读不到：以前静默，日志里看不出「根本没在管」
+# 用目录占位：root 无视权限位，但读目录一定失败，正好模拟「节点在、读不到」
+mkdir -p /sys/class/oplus_chg/battery/cool_down
+: >"$D53/log.txt"
+t53 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_cool_tick; sd_cool_tick' >/dev/null 2>&1
+has "$(cat "$D53/log.txt" 2>/dev/null)" "cool_down 节点存在但读不到" "读不到就记一条"
+eq "$(grep -c '读不到' "$D53/log.txt")" "1" "同进程两轮只记一次"
+rm -rf /sys/class/oplus_chg
+
 # 失败清单放在最后统一列一遍：滚动日志里翻不到的那几条，这里能一次看全
 if [ "$FAIL" -gt 0 ]; then
     printf '\n===== 失败清单 =====\n%s' "$FAILED"

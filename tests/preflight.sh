@@ -87,6 +87,24 @@ has  "$A/lib/qc.sh" "只记录不写入" "lib/qc.sh 记录文案在"
 nhas "$A/lib/qc.sh" "_sd_cool_prev" "lib/qc.sh 无写回用的档位备份"
 nhas "$A/service.sh" '_ws=3' "service.sh 充电时不再压到 3s"
 
+# 3.1.14：日志里得有功率。快照锁在 2 级时，用户默认（1 级）的日志 [chg] 为 0，
+# PLG110 那份「10–20W」的反馈就是这么变成无解的 —— 缺的正好是功率本身。
+has  "$A/lib/qc.sh" "_sd_chg_emit" "lib/qc.sh 快照在 1 级降级为 I"
+nhas "$A/lib/qc.sh" '${_sd_lv:-0}" -ge 2 ] || return 0' "快照门禁不再卡在 2 级"
+# 双守护：qcmon 自己校验通道，shell 侧收掉并存的 qcmon，两边都要在
+has  "$A/src/qcmon.c" "拒绝启动" "qcmon 校验 channel"
+has  "$BIN" "不是 c" "bin 带通道闸"
+has  "$A/service.sh" "收掉并存的 qcmon" "service.sh 清理残留 qcmon"
+# 一个变量两个主人：service.sh 当开关、sd_scr_tick 当状态，每轮互相踩出两条日志
+has  "$A/service.sh" "_sd_scr_once" "service.sh 的开关独立成 _sd_scr_once"
+nhas "$A/service.sh" '_sd_scr_log=1' "service.sh 不再改 sd_scr_tick 的状态"
+# 混合安装（module.prop 新、脚本旧）只能靠节拍反推，指纹要写进启动日志
+has  "$A/lib/qc.sh" "sd_file_sum" "有代码指纹函数"
+has  "$A/service.sh" "代码指纹 service.sh=" "启动日志记 service.sh/lib 指纹"
+# 只给数量时「fcc 节点=none」追不下去，命中清单与 cool_down 可读性都要记
+has  "$A/lib/qc.sh" "charge nodes 命中" "env 记命中的电流节点"
+has  "$A/lib/qc.sh" "cool_down 节点存在但读不到" "cool_down 读不到不静默"
+
 echo "[3] 版本号自洽"
 v_prop=$(sed -n 's/^version=//p' "$A/module.prop" | head -1)
 vc_prop=$(sed -n 's/^versionCode=//p' "$A/module.prop" | head -1)
@@ -140,10 +158,10 @@ chknd "C README src/qcmon.c 行数" \
     "$(nl "$(line 'src/qcmon.c' "$B/README.md" | grep 'C 守护源码' | head -1)")" "$(num "$B/src/qcmon.c")"
 c_cases=$(n1 "$(line 'tests/c-test.sh' "$B/README.md" | grep '项冒烟测试' | head -1)")
 # 只查「不少于」，加用例不用回来改这里；漏写/写小才是要拦的
-if [ -n "$c_cases" ] && [ "$c_cases" -ge 91 ] 2>/dev/null; then
-    ok "C README c-test 项数 = $c_cases（≥93）"
+if [ -n "$c_cases" ] && [ "$c_cases" -ge 100 ] 2>/dev/null; then
+    ok "C README c-test 项数 = $c_cases（≥100）"
 else
-    bad "C README c-test 项数：文档写 ${c_cases:-（没写）}，应 ≥91"
+    bad "C README c-test 项数：文档写 ${c_cases:-（没写）}，应 ≥100"
 fi
 chknd "C README c-test 行数" \
     "$(nl "$(line 'tests/c-test.sh' "$B/README.md" | grep '项冒烟测试' | head -1)")" "$(num "$B/tests/c-test.sh")"

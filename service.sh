@@ -74,7 +74,7 @@ sd_apply_state() {
 sd_daemon() {
     local lock="$SD_RUN/daemon.lock" holder tick
     local mode last_mode="" cnt=0 _hzr=0 _hz_n=0 _sd_chg=0 _ws=0
-    local _log_out="" _log_cnt=0
+    local _log_out="" _log_cnt=0 _sd_scr_once=0 _pid=""
     local _bst=""
     _sd_sp=""
     _sd_reload=0
@@ -100,6 +100,20 @@ sd_daemon() {
             exec "$MODDIR/bin/qcmon"
         fi
         sd_warn daemon "bin/qcmon 无法执行，回退 shell 守护"
+    fi
+
+    # 非 C 通道却有个 qcmon 在跑（旧包残留、C 包装过又刷回 shell 包、手动执行过）：
+    # 两个守护共用 run/ 下的 scr.orig / fcc.norm / unlock.orig 备份，会互相覆盖；
+    # ≤3.1.12 的 qcmon 还会写 cool_down，能把 VOOC 直接打到 2W 档。
+    if [ "$(sd_channel)" != c ] || [ "${SD_SHELL_DAEMON:-0}" = 1 ]; then
+        for _p in /proc/[0-9]*; do
+            _pid=${_p#/proc/}
+            [ "$_pid" = "$$" ] && continue
+            grep -qa 'bin/qcmon' "$_p/cmdline" 2>/dev/null || continue
+            if kill "$_pid" 2>/dev/null; then
+                sd_warn daemon "收掉并存的 qcmon(pid=$_pid)：channel=$(sd_channel)，不该跑 C 守护"
+            fi
+        done
     fi
 
     if ! mkdir "$lock" 2>/dev/null; then
@@ -129,6 +143,9 @@ sd_daemon() {
 
     tick=$(sd_state_int tick 15 5 300)
     sd_info daemon "循环参数: tick=${tick}s temp=$(sd_state_get temp_mode off) shell=$(sd_state_int shell_temp 30 20 33)℃ channel=$(sd_channel)"
+    # 混合安装（module.prop 是新的、service.sh 是旧的）在日志里只能靠节拍猜，
+    # 把两个文件的指纹写下来，以后一眼能看出跑的是不是包里的那份。
+    sd_info daemon "代码指纹 service.sh=$(sd_file_sum "$MODDIR/service.sh") lib/qc.sh=$(sd_file_sum "$MODDIR/lib/qc.sh")"
 
     _sd_pause() {
         sleep "$1" & _sd_sp=$!
@@ -161,8 +178,11 @@ sd_daemon() {
 
         # 屏幕判定只影响日志与轮询间隔，不再影响是否解除降流。
         # 但判错了会影响读数，所以每轮守护启动记一次，排查时一眼能看出。
-        if [ "$_sd_scr_log" != 1 ]; then
-            _sd_scr_log=1
+        # 这个开关以前叫 _sd_scr_log，和 sd_scr_tick 的「上次记过的状态」共用一个
+        # 变量，两边每轮互相踩：这里记一条、把它置 1，那边发现 1≠fail 又记一条。
+        # 3.1.13 的 PLG110 日志里「屏幕 判定」77 条就是这么刷出来的。
+        if [ "$_sd_scr_once" != 1 ]; then
+            _sd_scr_once=1
             if [ -n "${_sd_bl_nodes# }" ]; then
                 sd_info daemon "屏幕 判定=$([ "$_sd_screen_on" = 1 ] && echo 亮 || echo 灭) 节点=[${_sd_bl_nodes# }]"
             else

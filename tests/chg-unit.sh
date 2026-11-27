@@ -72,10 +72,17 @@ chk "电压变化追加一条" "$(cnt)" "2"
 grep -q 'vusb=5.00V' "$BASE/data/log.txt" && ok "新值落进日志" || bad "日志没更新"
 
 echo "[3] 日志级别"
+# 1 级是「事件」：插电/停充/每 10 分钟的快照本来就属于事件。锁在 2 级的话，
+# 用户默认（log_level=1）的日志里完全没有功率 —— 3.1.13 的 PLG110 就是这样。
 setup
 sed -i 's/log_level=3/log_level=1/' "$BASE/data/state.conf"
 run_sh 'sd_chg_snapshot 1'
-chk "log_level=1 不写快照" "$(cnt)" "0"
+chk "log_level=1 也写快照" "$(cnt)" "1"
+
+setup
+sed -i 's/log_level=3/log_level=0/' "$BASE/data/state.conf"
+run_sh 'sd_chg_snapshot 1'
+chk "log_level=0 不写快照" "$(cnt)" "0"
 
 setup
 sed -i 's/log_level=3/log_level=2/' "$BASE/data/state.conf"
@@ -223,7 +230,7 @@ setup
 sed -i 's/log_level=3/log_level=1/' "$BASE/data/state.conf"
 run_sh 'sd_info log "事件应出现"; sd_chg_snapshot 1'
 grep -q '事件应出现' "$BASE/data/log.txt" && ok "级别 1 写事件" || bad "级别 1 丢了事件"
-chk "级别 1 不写快照" "$(cnt)" "0"
+chk "级别 1 写快照" "$(cnt)" "1"
 
 echo
 echo "结果：通过 $PASS，失败 $FAIL"

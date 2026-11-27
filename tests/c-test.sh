@@ -73,6 +73,10 @@ setup() {
     [ -f "$MP" ] || MP="$(dirname "$0")/../quickcharge/module.prop"
     cp "$MP" "$BASE/mod/module.prop" 2>/dev/null || \
         printf 'id=quickcharge\nname=Quick Charge\nversion=2.9.44\nversionCode=29440\ndescription=QC\n' >"$BASE/mod/module.prop"
+    # qcmon 3.1.14 起校验通道：不是 c 就拒绝启动（防 shell 包里跑 C 守护双写）。
+    # 这份用例跑的是 C 守护，通道必须是 c —— 主仓 module.prop 写的是 shell。
+    sed -i 's/^channel=.*/channel=c/' "$BASE/mod/module.prop" 2>/dev/null
+    grep -q '^channel=' "$BASE/mod/module.prop" 2>/dev/null || printf 'channel=c\n' >>"$BASE/mod/module.prop"
 }
 
 # 基础 state.conf
@@ -349,7 +353,7 @@ esac
 mkdir -p "$BASE/adb/modules/meta-magic_mount"
 : >"$BASE/data/mounts.list"
 seq 1 37 | sed 's|^|system/vendor/etc/f|' >"$BASE/data/nm.list"
-printf 'description=QC\n' >"$BASE/mod/module.prop"
+printf 'description=QC\nchannel=c\n' >"$BASE/mod/module.prop"
 run sensor >/dev/null
 case "$(grep '^description=' "$BASE/mod/module.prop")" in
     *"配置 37 项"*) ok "元模块读 nm.list 计数 37" ;;
@@ -358,7 +362,7 @@ esac
 
 : >"$BASE/adb/modules/meta-magic_mount/disable"
 seq 1 12 | sed 's|^|/vendor/etc/g|' >"$BASE/data/mounts.list"
-printf 'description=QC\n' >"$BASE/mod/module.prop"
+printf 'description=QC\nchannel=c\n' >"$BASE/mod/module.prop"
 run sensor >/dev/null
 case "$(grep '^description=' "$BASE/mod/module.prop")" in
     *"配置 12 项"*) ok "元模块被 disable 时回退 mounts.list" ;;
@@ -426,7 +430,7 @@ daemon_start
 sleep 12
 daemon_stop
 tail -n +$((n1 + 1)) "$BASE/data/log.txt" >"$BASE/seg.txt"
-cnt=$(grep -ac 'cool_down=3' "$BASE/seg.txt")
+cnt=$(grep -ac 'cool_down=3（亮屏降流标记' "$BASE/seg.txt")
 chk "守护跑两轮只记一次（同档位）" "$cnt" "1"
 
 printf '3000000\n' >"$CUR"
@@ -562,6 +566,55 @@ run bench 1 >/dev/null 2>&1
 n=$(grep -c '\[chg\]' "$BASE/data/log.txt" 2>/dev/null)
 case "$n" in ''|*[!0-9]*) n=0 ;; esac
 chk "级别 4 落首帧" "$n" "1"
+
+# 1 级是「事件」，插电/停充/每 10 分钟的快照就属于事件。锁在 2 级的话，
+# 用户默认配置下日志里完全没有功率 —— 3.1.13 的 PLG110 日志 [chg] 计 0 条。
+setup
+state static 30
+sed -i 's/^log_level=.*/log_level=1/' "$BASE/data/state.conf"
+run bench 1 >/dev/null 2>&1
+n=$(grep -c '\[chg\]' "$BASE/data/log.txt" 2>/dev/null)
+case "$n" in ''|*[!0-9]*) n=0 ;; esac
+chk "级别 1 也落首帧" "$n" "1"
+
+echo "[19] 通道闸：channel≠c 时 qcmon 拒绝启动"
+# 两个守护共用 run/ 下的备份文件，还会各写一份日志；≤3.1.12 的 qcmon 更会写
+# cool_down。所以 shell 包里出现 qcmon 一定是残留，必须自己退出。
+setup
+state static 30
+sed -i 's/^channel=.*/channel=shell/' "$BASE/mod/module.prop"
+daemon_start
+sleep 3
+if kill -0 "$DPID" 2>/dev/null; then
+    bad "channel=shell 时仍在跑"
+    daemon_stop
+else
+    ok "channel=shell：启动即退出"
+fi
+has "拒绝启动并写明通道" "channel=shell 不是 c" "$BASE/data/log.txt"
+has "拒绝理由写进日志" "拒绝启动" "$BASE/data/log.txt"
+
+echo "[20] 环境行：节点命中 / 候选数 / cool_down"
+# 3.1.13 的日志是 charge-nodes=1/0：cn/ce 两行写反，候选数取了还没填的空表。
+# 只给数量又让人追不下去，所以命中路径和 cool_down 可读性也一起记。
+setup
+state static 30
+sed -i 's/^log_level=.*/log_level=1/' "$BASE/data/state.conf"
+screen_on
+daemon_start
+sleep 4
+daemon_stop
+L="$BASE/data/log.txt"
+has "存在/候选两个数都在" "charge nodes=3/8" "$L"
+_cn=$(sed -n 's/.*charge nodes=\([0-9][0-9]*\)\/\([0-9][0-9]*\).*/\1 \2/p' "$L" | head -1)
+case "${_cn#* }" in
+    ''|0) bad "候选数恒 0（cn/ce 顺序错）：$_cn" ;;
+    *)    ok "候选数不是 0：${_cn}" ;;
+esac
+has "记下命中的节点名" "charge nodes 命中=" "$L"
+has "命中清单带路径（battery/... 与 usb/... 分得开）" \
+    "命中=/sys/class/power_supply/battery/constant_charge_current_max" "$L"
+has "cool_down 记了值与路径" "cool_down=7（" "$L"
 
 echo
 echo "结果：通过 $PASS，失败 $FAIL"

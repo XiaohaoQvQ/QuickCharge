@@ -79,10 +79,29 @@ _sd_emit() {
     return 0
 }
 
+# 充电快照在 2 级是 S（现场），1 级降成 I。用户默认就是 1 级，把「插电/停充/
+# 每 10 分钟」锁在 2 级，等于每份功率反馈的日志里都没有功率 —— 3.1.13 的 PLG110
+# 那份日志 [chg] 计 0 条，连「在不在充」都判不了，就是这么来的。
+_sd_chg_emit() {
+    if [ "${_sd_lv:-0}" -ge 2 ]; then _sd_emit S chg "$1"; else _sd_emit I chg "$1"; fi
+}
+
 sd_dbg()  { _sd_emit D "$@"; }
 sd_info() { _sd_emit I "$@"; }
 sd_warn() { _sd_emit W "$@"; }
 sd_err()  { _sd_emit E "$@"; }
+
+# 代码指纹：md5 前 8 位 @ mtime。3.1.13 那次「包是对的、跑的不是包里那份」
+# 只能靠 3 秒节拍反推出来，把指纹写进启动日志，下次一眼可查。
+sd_file_sum() {
+    local f="$1" h="" m=""
+    [ -f "$f" ] || { printf '缺失'; return 0; }
+    h=$(md5sum "$f" 2>/dev/null | cut -c1-8)
+    [ -n "$h" ] || h=$(cksum "$f" 2>/dev/null | awk '{printf "%08x", $1}')
+    m=$(date -r "$f" '+%m-%d %H:%M' 2>/dev/null)
+    [ -n "$m" ] || m=$(stat -c %y "$f" 2>/dev/null | cut -c6-16)
+    printf '%s@%s' "${h:-?}" "${m:-?}"
+}
 
 _sd_uptime() {
     local u="" rest=""
@@ -138,7 +157,7 @@ sd_set_log() {
     sd_session log "日志开启 level=$v"
     sd_dump_env
     # C 守护下一拍就会打首帧，shell 再打一条只会在同一秒里重复一遍
-    if [ "$v" -ge 2 ] && ! sd_daemon_is_c; then
+    if [ "$v" -ge 1 ] && ! sd_daemon_is_c; then
         sd_chg_snapshot 1
     fi
     return 0
@@ -195,11 +214,31 @@ sd_dump_env() {
     # 「存在/候选」两个数一起给：只写一个数时，启动早期那个 0 会被读成
     # 「这台机器没有电流节点」，3.1.12 的根因报告就是这么误判的。
     local cn ce
-    ce=$(printf '%s' "$_sd_curr_nodes" | wc -w | tr -d ' ')
+    # 候选表必须在本进程里填：sd_curr_nodes 跑在 $(...) 子 shell 里，
+    # 它内部 _sd_curr_prepare 填的 _sd_curr_nodes 出了子 shell 就没了。
+    # 只把两行顺序调过来没用 —— 3.1.13 的日志一直是 1/0，根因在这里。
+    _sd_curr_prepare
     cn=$(sd_curr_nodes 2>/dev/null | wc -l | tr -d ' ')
+    ce=$(printf '%s' "$_sd_curr_nodes" | wc -w | tr -d ' ')
     [ "$ce" -gt 0 ] 2>/dev/null || ce=0
     _sd_emit I env "soc=${_sd_plat}（${_sd_plat_why}） emul=$_emul_n${_emul_head} shell-temp=$_sh charge-nodes=${cn}/${ce}（存在/候选）"
     _sd_curr_ex=$cn
+    # 只给数量，"fcc 节点=none" 就是一句没法追查的结论：到底是哪个节点在、
+    # cool_down 能不能读，都在下面两行里。
+    if [ "$cn" -gt 0 ] 2>/dev/null; then
+        # 打全路径：只打文件名的话 battery/current_max 与 usb/current_max 分不开，
+        # 而「输入侧节点」与「电池侧节点」正是接管成败的分界线。
+        _sd_emit I env "charge nodes 命中=$(sd_curr_nodes 2>/dev/null | tr '\n' ' ')"
+    fi
+    if sd_cool_node; then
+        if sd_read1 "$SD_COOL_NODE"; then
+            _sd_emit I env "cool_down=${_sd_rv}（${SD_COOL_NODE}）"
+        else
+            _sd_emit W env "cool_down 节点存在但读不到（${SD_COOL_NODE}）"
+        fi
+    else
+        _sd_emit I env "cool_down=none（本机没有这个节点，不算失败）"
+    fi
     if [ -n "$sentinel" ]; then
         _sd_emit I env "sentinel=$(basename "$sentinel") type=${stype:-?} temp=${stemp:-?}℃"
     else
@@ -2338,7 +2377,8 @@ sd_umount_overrides() {
     if [ -n "$left" ]; then
         printf '%s\n' "$left" >"$SD_MOUNTS"
         n=$(printf '%s\n' "$left" | wc -l | tr -d ' ')
-        sd_warn mount "$n 条未卸净，清单已保留待下次重试"
+        # 带路径：只说"N 条"，看日志的人既不知道该重试哪，也看不出是不是双层挂载
+        sd_warn mount "$n 条未卸净（$(printf '%s' "$left" | tr '\n' ' ' | sed 's/ *$//')），清单已保留待下次重试"
     else
         : >"$SD_MOUNTS"
         sd_nm_active || sd_info mount "配置覆盖已全部卸载"
@@ -2354,6 +2394,7 @@ sd_umount_overrides() {
 _sd_curr_ex=-1
 sd_curr_watch() {
     local n ce
+    _sd_curr_prepare
     n=$(sd_curr_nodes 2>/dev/null | wc -l | tr -d ' ')
     case "$n" in ''|*[!0-9]*) n=0 ;; esac
     [ "$n" = "$_sd_curr_ex" ] && return 0
@@ -2668,7 +2709,7 @@ sd_scr_state() {
 }
 
 sd_scr_tick() {
-    local mode bt rc key hot_lim
+    local mode bt rc key hot_lim now
     [ "$_sd_st_loaded" = 1 ] || sd_state_load
     mode=$(sd_state_get temp_mode off)
 
@@ -2683,7 +2724,13 @@ sd_scr_tick() {
 
     sd_batt_status_v
     case "$_sd_rv" in
-        Charging|Full) ;;
+        Charging) ;;
+        Full)
+            # 满电时系统自己就在收电流，「亮屏快充」接管或解除都没有意义。
+            # 也不能算「本机不支持」：插着线满电放一夜，日志会被这条 W 淹掉
+            # （3.1.13 的 PLG110 那 78 条里就混着满电态的）。
+            if sd_scr_active; then sd_scr_release; _sd_scr_log=""; fi
+            return 0 ;;
         *) if sd_scr_active; then sd_scr_release; _sd_scr_log=""; fi
            return 0 ;;
     esac
@@ -2708,6 +2755,7 @@ sd_scr_tick() {
     key=$_sd_scr_way
     case "$rc" in
         0)
+            _sd_scr_fail_at=0          # 这次成功了，下次失败要立刻记，不用等兜底
             if [ "$key" != "$_sd_scr_log" ]; then
                 case "$_sd_scr_way" in
                     kernel) sd_info charge "亮屏快充：已接管（内核 ignore_screen_state）" ;;
@@ -2725,9 +2773,15 @@ sd_scr_tick() {
             # 落盘后要等重启才恢复，亮屏那次才是可信的判定。
             sd_scr_active && sd_scr_release
             if [ "$_sd_screen_on" = 1 ]; then
-                if [ "$_sd_scr_log" != "fail" ]; then
+                # 状态变了记一条；一直不支持就每 30 分钟兜底一条。
+                # 按轮记会把日志占满（3.1.13 实测 78 条），按「只记一次」又会
+                # 让后来看日志的人以为这事早就过去了。
+                now=$(date +%s)
+                if [ "$_sd_scr_log" != "fail" ] || \
+                   [ $((now - ${_sd_scr_fail_at:-0})) -ge 1800 ]; then
                     sd_warn charge "亮屏快充：本机不支持（无屏幕状态参数，也没有电池侧电流节点）"
                     _sd_scr_log=fail
+                    _sd_scr_fail_at=$now
                 fi
                 printf '1\n' >"$SD_SCR_FAIL" 2>/dev/null
             fi ;;
@@ -2838,7 +2892,13 @@ sd_cool_tick() {
     sd_batt_status_v
     case "$_sd_rv" in Charging|Full) ;; *) return 0 ;; esac
 
-    sd_read1 "$SD_COOL_NODE" || return 0
+    if ! sd_read1 "$SD_COOL_NODE"; then
+        if [ "$_sd_cool_log" != readfail ]; then
+            sd_warn charge "cool_down 节点存在但读不到（$SD_COOL_NODE），本机降流状态未知"
+            _sd_cool_log=readfail
+        fi
+        return 0
+    fi
     cur=$_sd_rv
     case "$cur" in ''|*[!0-9]*) return 0 ;; esac
     [ "$cur" = "$_sd_cool_log" ] && return 0
@@ -2859,7 +2919,7 @@ sd_cool_tick() {
 # 刻意不碰两处：
 #   - usb/current_max：输入侧能力上限，写它会打断 PD/VOOC 协商（3.0.4 的教训）；
 #   - cool_down：写它会让 OPlus 重选档。PKB110 实测 ibat 4.3A 时写 2→0，
-#     三秒后 18W 掉到 9.7W；交给 sd_cool_tick 只在真被降流时写。
+#     三秒后 18W 掉到 9.7W；3.1.13 起 sd_cool_tick 只读，一个字节都不写。
 SD_UNLOCK_ORIG="$SD_RUN/unlock.orig"
 _sd_unlock_log=""
 _sd_unlock_at=0
@@ -3165,7 +3225,7 @@ sd_tier_report() {
 
 sd_chg_snapshot() {
     local charging="${1:-0}" line st now why key
-    [ "${_sd_lv:-0}" -ge 2 ] || return 0
+    [ "${_sd_lv:-0}" -ge 1 ] || return 0
     now=$(date +%s)
     # 插拔的瞬间必须记下来，只有"状态没变"时才按 30s 节流
     if [ "$charging" = "${_sd_chg_last_chg:-x}" ] && [ "$charging" != 1 ] && \
@@ -3191,12 +3251,12 @@ sd_chg_snapshot() {
 
     if [ "$key" = "$_sd_chg_key" ]; then
         if [ "$charging" = 1 ] && [ $((now - _sd_chg_at)) -ge 600 ]; then
-            _sd_emit S chg "定时 $line"
+            _sd_chg_emit "定时 $line"
             _sd_chg_at=$now
         fi
         return 0
     fi
-    _sd_emit S chg "$why $line"
+    _sd_chg_emit "$why $line"
     _sd_chg_key=$key
     _sd_chg_last=$line
     _sd_chg_at=$now

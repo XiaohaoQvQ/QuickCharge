@@ -202,6 +202,12 @@ case "$(sd_state_get temp_mode off)" in
 esac
 
 [ -f "$MODPATH/bin/qcmon" ] && chmod 755 "$MODPATH/bin/qcmon" 2>/dev/null
+# 从 C 版刷回 shell 版时，Magisk 只覆盖同名文件，旧包的 bin/qcmon 会留在模块目录里。
+# 那个二进制不校验通道（≤3.1.12 的还会写 cool_down），被任何东西拉起来就会和
+# shell 守护双写同一份日志与 run/ 备份。shell 包里不该有 bin，直接删掉。
+if [ "$(sed -n 's/^channel=//p' "$MODPATH/module.prop" 2>/dev/null | head -1)" != c ]; then
+    rm -rf "$MODPATH/bin" 2>/dev/null
+fi
 
 printf '%s\n' "$MODDIR" 2>/dev/null >"$SD_DATA/moddir"
 
