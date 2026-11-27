@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`3.1.6`（`versionCode 301601`），C 版为 `3.1.6-c`
+- 当前版本：`3.1.7`（`versionCode 301701`），C 版为 `3.1.7-c`
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -148,7 +148,7 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 |---|---|---|
 | `off` | 完全不伪装，只保留配置改写 | 想验证配置改写本身是否生效 |
 | `charge` | **仅插电时**伪装，拔电还原真实读数 | 默认，日常使用 |
-| `static` | 一直伪装到 `shell_temp`（默认 25℃） | 游戏、长时间高负载 |
+| `static` | 一直伪装到 `shell_temp`（默认 30℃） | 游戏、长时间高负载 |
 
 `charge` 是默认值，也是最"无感"的：温度只在充电时被改写，平时系统看到的是真实值，
 不会影响调度和风扇策略。
@@ -167,7 +167,7 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 | 参数 | 默认 | 范围 | 说明 |
 |---|---|---|---|
 | `temp_mode` | `charge` | off / charge / static | 温度模式 |
-| `shell_temp` | `25` | 20 到 33 | 伪装温度（恒定上报这个值） |
+| `shell_temp` | `30` | 20 到 33 | 伪装温度（恒定上报这个值） |
 | `core_temp` | `off` | off / 20 到 100 | CPU / GPU / DDR 固定伪装 |
 | `noncore_temp` | `off` | off / 20 到 100 | 其它温区固定伪装 |
 | `hz` | `off` | 60 到 185 / off | 刷新率 |
@@ -177,6 +177,8 @@ sh /data/adb/modules/quickcharge/action.sh temp off
 | `curve_offset` | `120` | 0 到 300 | 充电曲线偏移，0.1℃ 单位（120 = +12℃） |
 | `power_scale` | `100` | 50 到 200 | 电流读数校准 % |
 | `cells_mode` | `auto` | auto / 1 / 2 | 电芯数 |
+| `overrides_off` | `0` | 0 / 1 | 1 = 关闭配置改写（只停覆盖层，温度伪装照常） |
+| `overrides_manual` | `0` | 0 / 1 | 你动过 `overrides` 开关的标记；升级时按它判断，不再看版本号 |
 
 `wall`、`aggr`、`curr_max`、`curr_edge`、`fast_cap`、`battery_limit`、`sentinel_limit`、
 `cool_guard` 这八个键在 3.1.0 全部删除，升级时由 `customize.sh` 从 `state.conf` 里清掉；
@@ -241,6 +243,7 @@ ACTION=/data/adb/modules/quickcharge/action.sh
 | 命令 | 作用 |
 |---|---|
 | `mount` / `umount` | 手动挂载 / 卸载配置覆盖层 |
+| `overrides <on\|off>` | 关闭 / 开启配置改写（关闭只停覆盖层，温度伪装照常）；会记进 `state.conf`，升级时按它判断你的意图 |
 | `rebuild` | 重新生成并挂载（OTA 后一般不用） |
 | `reboot-safe` | 退出安全模式并立即重挂 |
 | `restart` | 重启守护进程，改完参数强制生效 |
@@ -378,19 +381,19 @@ su 0 sh -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 | 仓库 | 当前版本 | 包名 | versionCode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.1.6` | `QuickCharge-v3.1.6.zip` | 301601 |
-| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.1.6-c` | `QuickCharge-v3.1.6-c.zip` | 301600 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.1.7` | `QuickCharge-v3.1.7.zip` | 301701 |
+| [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.1.7-c` | `QuickCharge-v3.1.7-c.zip` | 301700 |
 
 每个仓库的 Release 只附自己那一份模块包，装哪个版本就去哪个仓库下载，不会混。
 
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v3.1.6
-Quick Charge v3.1.6-c
+Quick Charge v3.1.7
+Quick Charge v3.1.7-c
 ```
 
-tag 与标题一致：shell 仓 `v3.1.6`，C 仓 `3.1.6-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v3.1.7`，C 仓 `3.1.7-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
 
 ### 版本号规则（3.0 起）
@@ -423,9 +426,9 @@ updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/up
 
 ```json
 {
-  "version": "3.1.6",
-  "versionCode": 301601,
-  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.1.6/QuickCharge-v3.1.6.zip",
+  "version": "3.1.7",
+  "versionCode": 301701,
+  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.1.7/QuickCharge-v3.1.7.zip",
   "changelog": "https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/RELEASE.md"
 }
 ```

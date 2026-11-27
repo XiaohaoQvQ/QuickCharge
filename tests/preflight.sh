@@ -69,6 +69,15 @@ case "$(grep -o '"zipUrl": *"[^"]*"' "$A/update.json")" in
     *) bad "zipUrl 没跟着改：$(grep -o '"zipUrl": *"[^"]*"' "$A/update.json")" ;;
 esac
 
+# README 不在打包范围，升级时最容易被忘掉。它写错版本，用户照着复制 zipUrl
+# 就会拿到上一版 —— 3.1.7 就这么漏过一次，所以并进版本检查一起看。
+v_readme=$(sed -n 's/^- 当前版本：`\([^`]*\)`.*/\1/p' "$A/README.md" | head -1)
+[ "$v_readme" = "$v_prop" ] && ok "README 当前版本 = $v_readme" \
+    || bad "README 当前版本写 ${v_readme:-（没写）}，module.prop 是 $v_prop"
+v_doc=$(grep -o '"version": *"[^"]*"' "$A/README.md" | sed 's/.*"\([^"]*\)"$/\1/' | head -1)
+[ "$v_doc" = "$v_prop" ] && ok "README 里 update.json 示例 = $v_doc" \
+    || bad "README 的 update.json 示例写 ${v_doc:-（没写）}，实际 $v_prop"
+
 # 文档里的行数已经在三轮里漂移过两次，靠人眼看不住，直接和 wc -l 比。
 echo "[4] 文档数字与代码一致"
 chknd "README lib/qc.sh 行数" \
@@ -90,6 +99,11 @@ chknd "C README c-test 行数" \
     "$(nl "$(line 'tests/c-test.sh' "$B/README.md" | grep '项冒烟测试' | head -1)")" "$(num "$B/tests/c-test.sh")"
 chknd "C README lib/qc.sh 行数" \
     "$(nl "$(line 'shell 版核心库' "$B/README.md" | head -1)")" "$(num "$B/lib/qc.sh")"
+# 参数表里的默认值和代码里的 SD_DEFAULTS 对不上，比版本号写错更容易坑人：
+# 用户会以为自己的 30 是被人改过的，调参也从错的那头开始试。
+d_doc=$(grep -F '| `shell_temp` |' "$A/README.md" | grep -o '`[0-9][0-9]*`' | head -1 | tr -d '`')
+d_code=$(sed -n 's/^shell_temp=//p' "$A/customize.sh" | head -1)
+chknd "README shell_temp 默认值" "$d_doc" "$d_code"
 
 # 用例数静态数不出来（循环里的断言只算一行代码），要跑一遍才准。
 if [ "$FULL" = 1 ]; then
