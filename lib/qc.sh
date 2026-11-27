@@ -324,7 +324,7 @@ sd_check() {
     fi
 
     if [ "$ok" -eq 0 ]; then
-        grade=D; note="温区读不到，伪装与熔断都没有依据"
+        grade=D; note="温区读不到，伪装没有依据"
     elif [ "$temp_ok" = 1 ] && [ "$cfg" -gt 0 ]; then
         grade=A; note="全功能可用"
     elif [ "$temp_ok" = 1 ]; then
@@ -337,9 +337,9 @@ sd_check() {
     printf '结论: %s（%s）\n' "$note" "$grade"
     case "$_sd_plat:$_sd_proto" in
         mtk:vooc)
-            printf '建议: MTK + 私有快充由内核 charger-manager 独立限温，温度墙设 40-42℃ 更稳\n' ;;
+            printf '建议: MTK + 私有快充由内核 charger-manager 独立限温；模块不设温度墙，热量交给系统与硬件保护\n' ;;
         mtk:*)
-            printf '建议: MTK 温度编码与命名都已归一，若限流不生效先确认 constant_charge_current_max\n' ;;
+            printf '建议: MTK 温度编码与命名都已归一；unlock 不生效时先确认 constant_charge_current_max\n' ;;
     esac
     return 0
 }
@@ -1336,7 +1336,7 @@ sd_sentinel_temp_v() {
 
 # 电池类温区优先级：0 = 电芯本体，1 = 其它 batt*，2 = 连接器/充电侧。
 # 一加/OPPO 上 batt-therm 挂在电池连接器旁，比电芯 NTC 高 8~12℃，
-# 直接当电池用会让 real 虚高、壳温目标算高，还容易顶到温度墙熔断。
+# 直接当电池用会让 real 虚高、壳温目标算高，还容易顶到系统温度墙。
 sd_batt_rank() {
     case "$1" in
         battery|batt|BATTERY|BATT) printf '0' ;;
@@ -1408,7 +1408,7 @@ sd_shell_target() {
     [ "$_sd_st_loaded" = 1 ] || sd_state_load
 
     # 极速模式：恒定写同一个伪装温度。不看真实读数、不设温度墙、
-    # 不设熔断线、不按电量退出——插着电就一直让系统以为电池很凉。
+    # 不按电量退出——插着电就一直让系统以为电池很凉。
     # 下限 20℃：再低不少平台会把 NTC 判成开路，反而锁 5V/500mA。
     v=${_st_shell_temp:-30}
     case "$v" in ''|*[!0-9]*) v=30 ;; esac
@@ -2441,7 +2441,7 @@ sd_screen_tick() {
 # 按优先级做两件事：
 #   1) 有 ignore_screen_state → 置 1，让驱动忽略屏幕状态
 #   2) 没有 → 记住息屏充电时的 FCC，亮屏被压低后写回
-# 只在「充电中 + 开关开 + 未限流 + 未熔断 + 电池不烫」时接管，退出即还原。
+# 只在「充电中 + 开关开 + 温度模式不是关闭」时接管，退出即还原。
 
 SD_SCR_NODE=""
 SD_SCR_ORIG="$SD_RUN/scr.orig"
@@ -2618,7 +2618,7 @@ sd_scr_apply() {
 # 只靠 _sd_scr_on 会让"关开关"这一下落在新进程里判成没接管过。
 sd_scr_active() { [ "$_sd_scr_on" = 1 ] || [ -f "$SD_SCR_ORIG" ]; }
 
-# 退出（拔线/关模式/熔断/高温）时按原值还原。息屏时 FCC 路径根本不写，
+# 退出（拔线/关模式）时按原值还原。息屏时 FCC 路径根本不写，
 # 内核参数路径才在这里还原，避免把「永远忽略屏幕」留到下次。
 sd_scr_release() {
     local p v now

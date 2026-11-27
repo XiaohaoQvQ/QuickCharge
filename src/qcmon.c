@@ -5,7 +5,7 @@
  *
  * 与 lib/qc.sh 的 sd_daemon 一一对应，覆盖同样的热路径：
  *   温区扫描 → 屏幕状态 → 电流墙 → 亮屏快充 → 伪装补齐 → 电池伪装
- *   → 熔断/冷却恢复 → 温度模式（壳温动态上报 / 仅充电 / 关闭）
+ *   → 温度模式（壳温动态上报 / 仅充电 / 关闭）
  *   → 遥测 → 高刷补写 → 描述同步
  *
  * 状态文件名、日志格式、节点单位判定与 shell 版完全一致，两版可以互换，
@@ -95,7 +95,6 @@ static char g_shellproc[MAXPATH];
 /* 运行时状态文件，命名与 shell 版一致 */
 static char g_scr_orig[320], g_scr_way[320], g_scr_fail[320], g_fcc_norm[320];
 static char g_unlock_orig[320];
-static char g_curr_orig[320], g_curr_want[320];
 static char g_spoof_flag[320];
 static char g_sensor[320];
 static char g_hb[320];
@@ -118,8 +117,6 @@ static char g_tl_lim[16] = "";
 static char g_tl_zone[64] = "";
 static char g_tl_out[16] = "";
 static int g_emul_ok = -1;
-
-/* 熔断 */
 
 /* 上次成功应用的 core / noncore 目标，-1 表示未应用 */
 static int g_core_last = -1, g_nc_last = -1;
@@ -150,7 +147,7 @@ static int g_log_rot = 0;
 static void on_term(int s) { (void)s; g_stop = 1; }
 static void on_usr1(int s) { (void)s; g_reload = 1; }
 
-/* 清理/熔断恢复会回写 module.prop 描述，先声明 */
+/* 清理/退出恢复会回写 module.prop 描述，先声明 */
 static void sync_desc(void);
 /* 壳温写入带缓存，模式切换时要能重置 */
 static void shell_emul_reset(void);
@@ -607,7 +604,7 @@ static int batt_temp_ps(void)
 
 /* 电池类温区分三档：0 = 电芯本体，1 = 其它 batt*，2 = 连接器/充电侧。
  * 一加/OPPO 上 batt-therm 挂在电池连接器旁，比电芯 NTC 高 8~12℃，
- * 直接当电池用会让 real 虚高、壳温目标算高，还容易顶到温度墙熔断。 */
+ * 直接当电池用会让 real 虚高、壳温目标算高，还容易顶到系统温度墙。 */
 static int batt_rank(const char *t)
 {
     if (!t || !*t) return 9;
@@ -704,7 +701,6 @@ static int sentinel_temp(int zi, int *out)
     return 0;
 }
 
-/* 熔断读数入口：电池类取两源较高值，其余温区只有一个源 *//* 与 sd_limit_for_type_v 一致：-1 表示关闭 */
 /* ------------------------------------------------------------------ 伪装 */
 
 static char g_spoof_dir[MAXPATH] = "/dev/qc";
@@ -960,30 +956,6 @@ static void curr_prepare(void)
     }
 }
 
-/* 单位：读出值 >100000 视为 µA；路径特征兜底 *//* 目标电流：curr_max 按温度阶梯打折，逻辑同 sd_curr_target_v */
-/* curr.orig 里已经记过这个节点就不重复记 */static void curr_restore(void)
-{
-    FILE *f = fopen(g_curr_orig, "r");
-    int n = 0;
-    if (f) {
-        char line[400];
-        while (fgets(line, sizeof line, f)) {
-            char *bar = strchr(line, '|');
-            if (!bar) continue;
-            *bar = 0;
-            char *val = bar + 1;
-            char *e = val + strlen(val);
-            while (e > val && (e[-1] == '\n' || e[-1] == '\r')) *--e = 0;
-            if (!line[0] || !val[0]) continue;
-            if (write_str(line, val) == 0) n++;
-        }
-        fclose(f);
-        unlink(g_curr_orig);
-    }
-    unlink(g_curr_want);
-    if (n) log_msg("I", "charge", "限流已关闭，还原 %d 个节点", n);
-}
-
 /* ------------------------------------------------------------------ 亮屏快充 */
 
 static int scr_node(char *out, size_t n)
@@ -1070,7 +1042,7 @@ static void scr_learn(void)
     }
 }
 
-/* 0=有目标 2=还没基准 3=电池偏热 */
+/* 0=有目标 2=还没基准 */
 static int scr_target(int *tgt)
 {
     char b[32];
@@ -1085,7 +1057,7 @@ static int scr_target(int *tgt)
 
 static void scr_release(void)
 {
-    /* 退出（拔线/关模式/熔断/高温）时按原值还原。
+    /* 退出（拔线/关模式）时按原值还原。
      * 电流类节点先看现状：驱动已经放宽（息屏边界/温控回收）就别拿旧值压回去，
      * 与 shell 的 sd_scr_release 一致；开关型参数（ignore_screen_state 的 0/1）照常还原。 */
     FILE *f = fopen(g_scr_orig, "r");
@@ -1256,13 +1228,6 @@ static void scr_tick(void)
             if (g_screen_on && strcmp(logged, "wait")) {
                 log_msg("I", "charge", "亮屏快充：还没有基准值，先息屏充一次再亮屏");
                 snprintf(logged, sizeof logged, "wait");
-            }
-            break;
-        case 3:
-            if (scr_active()) scr_release();
-            if (g_screen_on && strcmp(logged, "hot")) {
-                log_msg("I", "charge", "亮屏快充：电池偏热，本轮不接管");
-                snprintf(logged, sizeof logged, "hot");
             }
             break;
         default:
@@ -1881,10 +1846,6 @@ static void screen_tick(void)
         log_msg("I", "screen", "%s（节点数=%d）", g_screen_on ? "亮屏" : "熄屏", g_bl_cnt);
 }
 
-/* ------------------------------------------------------------------ 熔断 */
-
-/* xo-therm 或电池类才算熔断来源，与 sd_zone_is_guard_src 一致 */
-/* 回差 3℃ 才恢复，且读不到温度时保持熔断（不猜安全） */
 /* ------------------------------------------------------------------ 电池伪装 */
 
 static void batt_sp_off(void)
@@ -1978,7 +1939,7 @@ static int shell_target(void)
         g_temp_fail++;
     }
 
-    /* 极速模式：恒定伪装，不看真实温度、不设温度墙、不设熔断线。
+    /* 极速模式：恒定伪装，不看真实温度、不设温度墙。
      * 下限 20℃：再低不少平台判 NTC 开路，反而锁 5V/500mA，比不伪装更慢。 */
     if (base < 20) base = 20;
     if (base > 33) base = 33;
@@ -2328,10 +2289,9 @@ static void restore_all(void)
     spoof_clear();
     shell_emul(0);
     scr_release();
-    curr_restore();
     unlock_restore();
     g_batt_sp_on = 0;
-    log_msg("I", "daemon", "收到退出信号，伪装/限流/屏幕/阶梯状态已还原");
+    log_msg("I", "daemon", "收到退出信号，伪装/屏幕/阶梯状态已还原");
 }
 
 /* ------------------------------------------------------------------ 主循环 */
@@ -2378,8 +2338,6 @@ static void paths_init(void)
     snprintf(g_scr_fail, sizeof g_scr_fail, "%s/scr.fail", g_run);
     snprintf(g_fcc_norm, sizeof g_fcc_norm, "%s/fcc.norm", g_run);
     snprintf(g_unlock_orig, sizeof g_unlock_orig, "%s/unlock.orig", g_run);
-    snprintf(g_curr_orig, sizeof g_curr_orig, "%s/curr.orig", g_run);
-    snprintf(g_curr_want, sizeof g_curr_want, "%s/curr.want", g_run);
     snprintf(g_spoof_flag, sizeof g_spoof_flag, "%s/spoof.pending", g_run);
     snprintf(g_sensor, sizeof g_sensor, "%s/sensor", g_run);
     snprintf(g_hb, sizeof g_hb, "%s/hb", g_run);

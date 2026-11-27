@@ -61,6 +61,13 @@ fi
 # 3.1.3 之前的温度闸里。都在 bin 之外，preflight 原来拦不到。
 nhas "$A/webroot/index.html" "≥46℃ 撤销" "WebUI 静态文案不承诺 46℃ 撤销"
 nhas "$A/lib/qc.sh" "电池偏热" "不再有「电池偏热」分支文案"
+# C 侧同源的残留：3.1.0 删熔断、3.1.3 删亮屏温度闸、3.1.8 删 curr 备份，
+# 函数体删了注释和分支还留着，上轮只查了 lib/qc.sh，C 里的一直没进视野。
+for f in src/qcmon.c lib/qc.sh; do
+    nhas "$A/$f" "电池偏热" "$f 无「电池偏热」分支"
+    nhas "$A/$f" "熔断" "$f 无熔断残留"
+done
+nhas "$A/src/qcmon.c" "g_curr_orig" "src/qcmon.c 无 curr.orig 死代码"
 
 echo "[3] 版本号自洽"
 v_prop=$(sed -n 's/^version=//p' "$A/module.prop" | head -1)
