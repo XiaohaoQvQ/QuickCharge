@@ -605,7 +605,9 @@ daemon_start
 sleep 4
 daemon_stop
 L="$BASE/data/log.txt"
-has "存在/候选两个数都在" "charge nodes=3/8" "$L"
+# 候选表与 shell 同序同数：基础 10（含 oplus_chg 的 class 链接与 virtual 实名两条）
+# + MTK 5 = 15。C 侧原来只有 8 个、MAXCURR 还卡在 12，日志两边永远对不上。
+has "存在/候选两个数都在" "charge nodes=3/10" "$L"
 _cn=$(sed -n 's/.*charge nodes=\([0-9][0-9]*\)\/\([0-9][0-9]*\).*/\1 \2/p' "$L" | head -1)
 case "${_cn#* }" in
     ''|0) bad "候选数恒 0（cn/ce 顺序错）：$_cn" ;;
@@ -615,6 +617,31 @@ has "记下命中的节点名" "charge nodes 命中=" "$L"
 has "命中清单带路径（battery/... 与 usb/... 分得开）" \
     "命中=/sys/class/power_supply/battery/constant_charge_current_max" "$L"
 has "cool_down 记了值与路径" "cool_down=7（" "$L"
+
+echo "[21] MTK 候选表：15 个（与 shell 一致，不再被 MAXCURR 截断）"
+setup
+state static 30
+sed -i 's/^log_level=.*/log_level=1/' "$BASE/data/state.conf"
+mkdir -p "$BASE/fakebin"
+cat >"$BASE/fakebin/getprop" <<'EOS'
+#!/bin/sh
+case "$1" in
+  ro.soc.manufacturer) echo MediaTek ;;
+  ro.board.platform)   echo mt6993 ;;
+  *) echo "" ;;
+esac
+EOS
+chmod +x "$BASE/fakebin/getprop"
+_save_path=$PATH
+PATH="$BASE/fakebin:$PATH"
+daemon_start
+sleep 4
+daemon_stop
+PATH=$_save_path
+L="$BASE/data/log.txt"
+has "MTK：候选数 15" "charge nodes=3/15" "$L"
+# 平台判定写在 [env] 里，日志能自己解释这 15 个是怎么来的
+has "MTK：平台判定有依据" "soc=?(mtk)" "$L"
 
 echo
 echo "结果：通过 $PASS，失败 $FAIL"

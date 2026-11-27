@@ -97,6 +97,8 @@ sd_daemon() {
             [ -n "$SD_TZ" ] && export SD_TZ
             sd_info daemon "切换到 C 守护 qcmon（shell 版本仍可用 SD_SHELL_DAEMON=1 强制）"
             rm -rf "$lock" 2>/dev/null
+            # 指纹先落地再 exec：下一轮 boot 段靠它判断跑的是不是这份代码
+            sd_code_ver >"$SD_RUN/daemon.ver" 2>/dev/null
             exec "$MODDIR/bin/qcmon"
         fi
         sd_warn daemon "bin/qcmon 无法执行，回退 shell 守护"
@@ -126,6 +128,8 @@ sd_daemon() {
         rm -rf "$lock" 2>/dev/null
         mkdir "$lock" 2>/dev/null || exit 0
     fi
+    # 先写指纹再写 pid：看到 pid 就一定能看到它对应哪份代码
+    sd_code_ver >"$SD_RUN/daemon.ver" 2>/dev/null
     printf '%s\n' "$$" >"$lock/pid"
     printf '%s\n' "$$" >"$SD_RUN/daemon.pid"
     sd_hb_write
@@ -135,7 +139,7 @@ sd_daemon() {
     sd_session daemon "守护启动"
     sd_info daemon "守护启动 pid=$$"
 
-    trap 'sd_info daemon "收到 TERM，退出"; rm -rf "$SD_RUN/daemon.lock"; rm -f "$SD_RUN/daemon.pid"; exit 0' TERM INT
+    trap 'sd_info daemon "收到 TERM，退出"; rm -rf "$SD_RUN/daemon.lock"; rm -f "$SD_RUN/daemon.pid" "$SD_RUN/daemon.ver"; exit 0' TERM INT
 
     trap 'sd_info daemon "收到重载信号，立即刷新参数"; [ -n "${_sd_sp:-}" ] && kill "$_sd_sp" 2>/dev/null; _sd_reload=1' USR1
 
@@ -143,9 +147,10 @@ sd_daemon() {
 
     tick=$(sd_state_int tick 15 5 300)
     sd_info daemon "循环参数: tick=${tick}s temp=$(sd_state_get temp_mode off) shell=$(sd_state_int shell_temp 30 20 33)℃ channel=$(sd_channel)"
-    # 混合安装（module.prop 是新的、service.sh 是旧的）在日志里只能靠节拍猜，
-    # 把两个文件的指纹写下来，以后一眼能看出跑的是不是包里的那份。
-    sd_info daemon "代码指纹 service.sh=$(sd_file_sum "$MODDIR/service.sh") lib/qc.sh=$(sd_file_sum "$MODDIR/lib/qc.sh")"
+    # 这行是「本进程加载了哪份代码」的自我记录；sd_dump_env 里那行是「磁盘上是
+    # 哪份」。两份都留：只有前者的日志（守护重启过、boot 段没重跑）也能对时间线；
+    # 只有后者的日志（boot 段跳过了守护）才抓得到「新瓶装旧酒」。
+    sd_info daemon "代码指纹 $(sd_code_ver)"
 
     _sd_pause() {
         sleep "$1" & _sd_sp=$!
@@ -270,7 +275,7 @@ sd_daemon() {
         _sd_pause "$_ws"
     done
 
-    rm -rf "$SD_RUN/daemon.lock" "$SD_RUN/daemon.pid"
+    rm -rf "$SD_RUN/daemon.lock" "$SD_RUN/daemon.pid" "$SD_RUN/daemon.ver"
     sd_info daemon "守护已停止"
 }
 
@@ -297,6 +302,10 @@ sd_apply_state
 if [ -d "$SD_RUN/daemon.lock" ] || [ -f "$SD_RUN/daemon.pid" ]; then
     sd_stale_clean && sd_warn boot "清理上一轮残留的守护锁(旧 pid=${_sd_stale_pid:-?})"
 fi
+
+# 覆盖文件不会重启已经起来的进程：跑的是旧代码就让它让位。
+# 这条必须在「守护已在运行，跳过」之前 —— 那句话正是旧代码得以继续跑的挡箭牌。
+sd_daemon_ver_chk
 
 if sd_daemon_pid >/dev/null; then
     sd_info boot "守护已在运行，跳过"

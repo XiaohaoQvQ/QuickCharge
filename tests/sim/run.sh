@@ -1046,7 +1046,11 @@ printf 'Charging\n' >/sys/class/power_supply/battery/status
 printf '50\n'     >/sys/class/power_supply/battery/capacity
 SD_DATA=$SDD SD_MODDIR=/opt/qc sh /opt/qc/service.sh >/tmp/d16c.log 2>&1 &
 wait_eq "/sys/class/thermal/thermal_zone0/emul_temp" "28000" 3 "开机即伪装：不等 tick"
-[ -f "$SDD/run/daemon.pid" ] && kill -TERM "$(cat "$SDD/run/daemon.pid")" 2>/dev/null
+# 这一步以前是「读 pid 文件再 kill」：emul 是 sd_apply_state 写的，写在启动守护之前，
+# 抢在这中间时 pid 文件还不存在，kill 落空 → 旧守护活着 → 下面的 --daemon 直接
+# 退出「已有守护在运行」，tick=60 的用例要等满一个 30s 周期才看到写入。
+# 改走 sd_daemon_stop：它按「谁是守护」找进程并清锁，不依赖文件何时出现。
+SD_DATA=$SDD SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_daemon_stop' >/dev/null 2>&1
 sleep 1
 
 # tick 很大时，仅充电档也必须尽快感知拔电（内部周期固定 10 秒，不受 tick 拖累）
@@ -2739,6 +2743,84 @@ t53 sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_cool_tick; sd_cool_tick' >/dev
 has "$(cat "$D53/log.txt" 2>/dev/null)" "cool_down 节点存在但读不到" "读不到就记一条"
 eq "$(grep -c '读不到' "$D53/log.txt")" "1" "同进程两轮只记一次"
 rm -rf /sys/class/oplus_chg
+
+# ---------------------------------------------------------------- T54 收掉并存的 qcmon
+# C 包装过又刷回 shell 包、旧包残留、用户手跑过一次：run/ 下的 scr.orig / fcc.norm /
+# unlock.orig 是共用的，两个守护会互相覆盖；≤3.1.12 的 qcmon 还会写 cool_down。
+# 3.1.14 之前 preflight 只断言「收掉并存的 qcmon」这行文字在，行为没人测。
+D54=/tmp/qc54; rm -rf "$D54" /tmp/qc54b; mkdir -p "$D54" /tmp/qc54b/bin
+printf 'temp_mode=off\nlog_level=1\ntick=5\n' >"$D54/state.conf"
+# 假 qcmon 不能用 exec：exec 会把 cmdline 换成被执行的命令，grep bin/qcmon 就落空了，
+# 用例会「假绿」—— 代码没清掉进程，测试也看不见。
+cat >/tmp/qc54b/bin/qcmon <<'EOS'
+#!/bin/sh
+while :; do sleep 1; done
+EOS
+chmod +x /tmp/qc54b/bin/qcmon
+/tmp/qc54b/bin/qcmon &
+F54=$!
+sleep 0.3
+# 清理分支只对非 C 通道生效；C 仓副本跑这套仿真时 module.prop 是 channel=c，
+# 这里临时改成 shell，跑完原样写回。
+_oc54=$(sed -n 's/^channel=//p' /opt/qc/module.prop 2>/dev/null | head -1)
+sed -i 's/^channel=.*/channel=shell/' /opt/qc/module.prop 2>/dev/null
+SD_DATA=$D54 SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/t54.log 2>&1 &
+D54P=$!
+wait_grep "$D54/log.txt" '收掉并存的 qcmon' 8 "启动时收掉并存的 qcmon"
+wait_dead "$F54" 3
+kill -0 "$F54" 2>/dev/null && ng "并存的 qcmon 还活着(pid=$F54)" || ok "并存的 qcmon 已退出"
+kill -TERM "$D54P" 2>/dev/null; wait_dead "$D54P"
+sed -i "s/^channel=.*/channel=${_oc54:-shell}/" /opt/qc/module.prop 2>/dev/null
+
+# ---------------------------------------------------------------- T55 旧守护让位
+# 覆盖模块文件不会重启已经起来的进程。3.1.14 的 PLG110 现场就是「装的 3.1.14、
+# 跑的是 3.1.11」：boot 段看到 cmdline 里有 service.sh 就跳过，修了三个版本的东西
+# 一条没生效，用户对着旧行为报了半个月的「功率上不去」。
+D55=/data/adb/qc-g55; rm -rf "$D55"; mkdir -p "$D55"
+printf 'temp_mode=off\nlog_level=1\ntick=5\ndefrev=3\n' >"$D55/state.conf"
+SD_DATA=$D55 SD_MODDIR=/opt/qc sh /opt/qc/service.sh --daemon >/tmp/t55a.log 2>&1 &
+P55=$!
+_i=0; while [ ! -s "$D55/run/daemon.pid" ] && [ "$_i" -lt 60 ]; do sleep 0.1; _i=$((_i + 1)); done
+[ -s "$D55/run/daemon.ver" ] && ok "守护启动时写下 daemon.ver" || ng "没有 daemon.ver（无法判断跑的是不是这份）"
+# pid 文件在 wait_boot 之前就写了，指纹行在之后 —— 要等，不能立刻断言
+wait_grep "$D55/log.txt" "代码指纹 service.sh=" 10 "守护启动日志带指纹"
+
+# 指纹一致时不能误杀：boot 段重跑一遍，旧守护必须继续活着
+# （boot 段的 sd_dump_env 才是「包是哪份」的那条，也是旧版缺失的那条）
+SD_DATA=$D55 SD_MODDIR=/opt/qc sh /opt/qc/service.sh >/tmp/t55b.log 2>&1
+sleep 0.3
+wait_grep "$D55/log.txt" 'env\] 代码指纹' 5 "boot 段的 env 里也有指纹"
+kill -0 "$P55" 2>/dev/null && ok "指纹一致时不动守护" || ng "指纹一致却把守护杀了"
+hasnt "$(cat "$D55/log.txt" 2>/dev/null)" "跑的不是磁盘上这份代码" "一致时不报换人"
+
+# 没有 daemon.ver = 那份守护是 3.1.14 或更早起的，按旧代码处理：换掉、重新拉起
+rm -f "$D55/run/daemon.ver"
+SD_DATA=$D55 SD_MODDIR=/opt/qc sh /opt/qc/service.sh >/tmp/t55c.log 2>&1
+wait_dead "$P55" 6
+kill -0 "$P55" 2>/dev/null && ng "旧守护没让位(pid=$P55)" || ok "旧守护已让位"
+has "$(cat "$D55/log.txt" 2>/dev/null)" "跑的不是磁盘上这份代码" "日志写明换人的理由"
+_new55=$(cat "$D55/run/daemon.pid" 2>/dev/null)
+if [ -n "$_new55" ] && [ "$_new55" != "$P55" ]; then
+    ok "已拉起新守护(pid=$_new55)"
+else
+    ng "旧守护走了，新的没起来(pid=${_new55:-空})"
+fi
+[ -s "$D55/run/daemon.ver" ] && ok "新守护重新写下 daemon.ver" || ng "新守护没写 daemon.ver"
+[ -n "$_new55" ] && { kill -TERM "$_new55" 2>/dev/null; wait_dead "$_new55"; }
+
+# ---------------------------------------------------------------- T56 平台认对后候选表重算
+# _sd_curr_prepare 只填一次，第一次填的时候 plat 若还是 other，MTK 那 5 个候选
+# 就永久缺失 —— 8 次重试看着在，实际被缓存让成了空转。
+_pl56=$(SD_DATA=/tmp/qc56 SD_MODDIR=/opt/qc sh -c '
+getprop() { case "$1" in *) echo "" ;; esac; }
+. /opt/qc/lib/qc.sh
+sd_plat_resolve; _sd_curr_prepare
+a=$(printf "%s" "$_sd_curr_nodes" | wc -w | tr -d " ")
+getprop() { case "$1" in ro.soc.manufacturer) echo MediaTek ;; ro.board.platform) echo mt6993 ;; ro.hardware) echo mt6993 ;; *) echo "" ;; esac; }
+sd_plat_resolve; _sd_curr_prepare
+b=$(printf "%s" "$_sd_curr_nodes" | wc -w | tr -d " ")
+printf "%s %s" "$a" "$b"' 2>/dev/null)
+eq "${_pl56#* }" "15" "平台从 other 认成 MTK 后候选表重算（10 → 15）"
 
 # 失败清单放在最后统一列一遍：滚动日志里翻不到的那几条，这里能一次看全
 if [ "$FAIL" -gt 0 ]; then

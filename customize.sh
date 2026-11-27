@@ -202,10 +202,17 @@ case "$(sd_state_get temp_mode off)" in
 esac
 
 [ -f "$MODPATH/bin/qcmon" ] && chmod 755 "$MODPATH/bin/qcmon" 2>/dev/null
-# 从 C 版刷回 shell 版时，Magisk 只覆盖同名文件，旧包的 bin/qcmon 会留在模块目录里。
-# 那个二进制不校验通道（≤3.1.12 的还会写 cool_down），被任何东西拉起来就会和
-# shell 守护双写同一份日志与 run/ 备份。shell 包里不该有 bin，直接删掉。
-if [ "$(sed -n 's/^channel=//p' "$MODPATH/module.prop" 2>/dev/null | head -1)" != c ]; then
+# 从 C 版刷回 shell 版时，旧包的 bin/qcmon 会留在模块目录里（Magisk 只覆盖同名
+# 文件）。那个二进制不校验通道（≤3.1.12 的还会写 cool_down），被拉起来就会和
+# shell 守护双写日志与 run/ 备份。shell 包里不该有 bin，直接删掉。
+#
+# 注意这条只是兜底：标准安装流程解压到 modules_update/<id>（新目录，本来就没
+# bin），真正拦住旧 qcmon 的是 service.sh 的运行时清理和 qcmon 自己的通道闸。
+#
+# 读不到 module.prop 时不能删：C 包若缺这个文件（Magisk 会拒装，第三方管理器
+# 不一定），空 ≠ c 会把 C 包自己的 bin 删掉，装完就没有守护了。
+if [ -f "$MODPATH/module.prop" ] &&
+   [ "$(sed -n 's/^channel=//p' "$MODPATH/module.prop" 2>/dev/null | head -1)" != c ]; then
     rm -rf "$MODPATH/bin" 2>/dev/null
 fi
 

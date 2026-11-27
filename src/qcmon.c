@@ -897,10 +897,13 @@ static void shell_emul(int celsius)
 
 /* ------------------------------------------------------------------ 电流墙 */
 
-#define MAXCURR 12
+/* 候选表：基础 8 个 + MTK 5 个 = 13。12 会静默截掉最后一个（mtk-battery），
+ * 而 shell 侧是 10+5=15 —— 两边数量对不上时，日志没法互相印证。 */
+#define MAXCURR 16
 static char g_curr_nodes[MAXCURR][MAXPATH];
 static int g_curr_n = 0;
 static int g_curr_ex = -1;      /* 上一次数到的存在个数，-1 = 还没数过 */
+static char g_curr_plat[16];    /* 建表时的平台判定；other/空 = 这张表可能是早产的 */
 
 static void plat_resolve(void)
 {
@@ -928,6 +931,12 @@ static void plat_resolve(void)
 /* 节点顺序与 _sd_curr_prepare 一致 */
 static void curr_prepare(void)
 {
+    plat_resolve();
+    /* 平台从 other 认对之后要重算：表只填一次，第一次填在启动早期会漏掉 MTK
+     * 那 5 个节点，之后认对也不补 —— 8 次重试等于空转。与 shell 侧一致。 */
+    if (g_curr_n && strcmp(g_curr_plat, g_plat) && strcmp(g_plat, "other")) {
+        if (!g_curr_plat[0] || !strcmp(g_curr_plat, "other")) g_curr_n = 0;
+    }
     if (g_curr_n) return;
     const char *base[] = {
         "battery/constant_charge_current_max",
@@ -938,7 +947,7 @@ static void curr_prepare(void)
         "usb/current_max",
         NULL
     };
-    for (int i = 0; base[i] && g_curr_n < MAXCURR - 6; i++)
+    for (int i = 0; base[i] && g_curr_n < MAXCURR - 7; i++)
         snprintf(g_curr_nodes[g_curr_n++], MAXPATH, "%s/%s", g_ps, base[i]);
     {
         char p[MAXPATH];
@@ -946,8 +955,14 @@ static void curr_prepare(void)
         snprintf(g_curr_nodes[g_curr_n++], MAXPATH, "%s", p);
         snprintf(p, sizeof p, "%s/current_max", g_oplus);
         snprintf(g_curr_nodes[g_curr_n++], MAXPATH, "%s", p);
+        /* 与 shell 的候选表同序：oplus_chg 走 class 链接与 virtual 实名两条路径，
+         * 少这两条时 C 侧永远比 shell 少 2 个候选，两份日志的 x/y 对不上。 */
+        snprintf(g_curr_nodes[g_curr_n++], MAXPATH,
+                 "/sys/devices/virtual/oplus_chg/battery/chg_current_max");
+        snprintf(g_curr_nodes[g_curr_n++], MAXPATH,
+                 "/sys/devices/virtual/oplus_chg/battery/current_max");
     }
-    plat_resolve();
+    snprintf(g_curr_plat, sizeof g_curr_plat, "%s", g_plat);
     if (!strcmp(g_plat, "mtk")) {
         const char *mtk[] = {
             "battery/input_current_limit",
@@ -1541,8 +1556,8 @@ static long bcc_current(void)
 /* 电池电流，统一 µA：bcc 优先，再回退 current_now / bms / current_avg。
  * bcc 绝对值小于 50mA 视为噪声（有的机型第 9 段不是总电流），继续往下找更大的值。 */
 /* 有的机型 current_now 报 mA、有的报 µA，判据与 shell 侧 sd_uv_norm 一致：
- * 0 < |v| < 20000 一定是 mA。不归一的话 cool_tick 的 2.5A 闸在报 mA 的机型上
- * 永远放行（3000 < 2500000），4A 正常充电也会被当成"已降流"去写 0。 */
+ * 0 < |v| < 20000 一定是 mA。不归一的话 4000mA 会被当成 4000µA=4mA，
+ * 功率算成 0.03W、判重也全错 —— 报 mA 的机型上电流读数等于没有。 */
 static long ua_norm(long v)
 {
     long a = v < 0 ? -v : v;
@@ -2434,8 +2449,10 @@ static int loop_once(int *mode_changed)
     }
 
     /* 启动瞬间 sysfs 常常还没就绪，那一次 charge nodes=0 会被读成「永久没节点」。
-     * 这里隔一阵重新数一次，数量变了才记一条 —— 缓存的是候选路径，不是空结果。 */
-    if (g_tick_n % 20 == 1) {
+     * 这里隔一阵重新数一次，数量变了才记一条 —— 缓存的是候选路径，不是空结果。
+     * 周期与 shell 的 service.sh（cnt % 4）对齐：两边不同步时，排查同一个问题
+     * 会看到 1 分钟和 5 分钟两种延迟，很容易误判成"版本不同"。 */
+    if (g_tick_n % 4 == 1) {
         curr_prepare();
         int ex = curr_existing();
         if (g_curr_ex >= 0 && ex != g_curr_ex)

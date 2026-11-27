@@ -103,6 +103,17 @@ sd_file_sum() {
     printf '%s@%s' "${h:-?}" "${m:-?}"
 }
 
+# 一份可比较的代码身份：守护启动时写进 run/daemon.ver，之后随时拿磁盘上的
+# 现算值来比。bin/qcmon 也算进去 —— C 包有只重编二进制的版本，光比脚本会漏。
+sd_code_ver() {
+    local m s
+    m="${MODDIR:-${SD_MODDIR:-}}"
+    [ -n "$m" ] && [ -f "$m/service.sh" ] || { printf 'unknown'; return 0; }
+    s="service.sh=$(sd_file_sum "$m/service.sh") lib/qc.sh=$(sd_file_sum "$m/lib/qc.sh")"
+    [ -f "$m/bin/qcmon" ] && s="$s bin/qcmon=$(sd_file_sum "$m/bin/qcmon")"
+    printf '%s' "$s"
+}
+
 _sd_uptime() {
     local u="" rest=""
     read -r u rest 2>/dev/null </proc/uptime || u=""
@@ -174,7 +185,7 @@ sd_session() {
 }
 
 sd_dump_env() {
-    local dev rom kver zones emul sentinel stype stemp slim _e _sh _emul_n _emul_head
+    local dev rom kver zones emul sentinel stype stemp _e _sh _emul_n _emul_head
     dev="$(getprop ro.product.odm.manufacturer 2>/dev/null) $(getprop ro.product.model 2>/dev/null)"
     dev=$(printf '%s' "$dev" | sed 's/^ *//; s/ *$//')
     rom=$(getprop ro.build.display.id 2>/dev/null)
@@ -201,7 +212,6 @@ sd_dump_env() {
         sentinel=$_sd_rv
         stype=$_sd_sent_type
         sd_sentinel_temp_v "$sentinel" && stemp=$_sd_rv
-        sd_limit_for_type_v "$stype"; slim=$_sd_rv
     fi
 
     _sd_emit I env "device=${dev:-?} rom=${rom:-?} kernel=${kver:-?}"
@@ -210,6 +220,10 @@ sd_dump_env() {
     cv=""
     sd_use_c && cv=$("$MODDIR/bin/qcmon" -v 2>/dev/null | head -1)
     _sd_emit I env "module=${mv:-?} channel=$(sd_channel) daemon=${cv:-shell}"
+    # 代码指纹放在 env 里，因为这里是 boot 段每次必跑的。以前它打在 sd_daemon
+    # 的启动日志里，而「守护已在运行，跳过」那条分支根本进不到 sd_daemon ——
+    # 3.1.14 的 PLG110 日志（装的 3.1.14、跑的是 3.1.11）就是这么被藏的。
+    _sd_emit I env "代码指纹 $(sd_code_ver)"
     sd_plat_resolve
     # 「存在/候选」两个数一起给：只写一个数时，启动早期那个 0 会被读成
     # 「这台机器没有电流节点」，3.1.12 的根因报告就是这么误判的。
@@ -708,13 +722,44 @@ sd_stale_clean() {
     sd_pid_is_daemon "$l" && return 1
     _sd_stale_pid="${l:-$h}"
     rm -rf "$SD_RUN/daemon.lock" 2>/dev/null
-    rm -f "$SD_RUN/daemon.pid" "$SD_RUN/hb" "$SD_RUN/sensor" "$SD_PWR_HIST" 2>/dev/null
+    rm -f "$SD_RUN/daemon.pid" "$SD_RUN/daemon.ver" "$SD_RUN/hb" "$SD_RUN/sensor" "$SD_PWR_HIST" 2>/dev/null
+    return 0
+}
+
+# 守护跑的是不是磁盘上这份代码。
+# 3.1.14 的 PLG110 现场：装的 3.1.14、跑的是 3.1.11 —— 覆盖文件不会动已经起来的
+# 进程，boot 段看到「cmdline 里有 service.sh」就跳过，于是 3.1.13/3.1.14 的修复
+# 一条都没生效，用户对着旧行为报了半个月的「功率上不去」。
+# sd_pid_is_daemon 只认「是不是守护」，认不出「是不是这一份」，所以这里比指纹：
+# 守护启动时写 run/daemon.ver，不一致就 TERM 旧的、清锁，让调用方重新拉起。
+# 没有 daemon.ver 说明那份守护是 3.1.14 或更早起的，按旧代码处理。
+sd_daemon_ver_chk() {
+    local pid old now i=0
+    [ "${_sd_st_loaded:-0}" = 1 ] || sd_state_load
+    pid=$(sd_daemon_pid 2>/dev/null) || return 1
+    now=$(sd_code_ver)
+    case "$now" in unknown*) return 1 ;; esac
+    old=""
+    [ -f "$SD_RUN/daemon.ver" ] && old=$(cat "$SD_RUN/daemon.ver" 2>/dev/null)
+    _sd_ver_old="${old:-无指纹（≤3.1.14 启动）}"
+    [ "$old" = "$now" ] && return 1
+    sd_warn daemon "守护(pid=$pid)跑的不是磁盘上这份代码：$_sd_ver_old → $now，收掉重起"
+    kill -TERM "$pid" 2>/dev/null
+    while sd_pid_alive "$pid" && [ "$i" -lt 20 ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+    sd_pid_alive "$pid" && kill -KILL "$pid" 2>/dev/null
+    rm -rf "$SD_RUN/daemon.lock" 2>/dev/null
+    rm -f "$SD_RUN/daemon.pid" "$SD_RUN/daemon.ver" "$SD_RUN/hb" 2>/dev/null
     return 0
 }
 
 sd_daemon_launch() {
     local i=0 round=0 h="" m="${MODDIR:-${SD_MODDIR:-}}"
     [ -n "$m" ] && [ -f "$m/service.sh" ] || return 1
+    # 版本换了就地换人：action.sh 的 start/restart 与 boot 段都走这里
+    sd_daemon_ver_chk >/dev/null 2>&1
     sd_daemon_pid >/dev/null && return 0
     mkdir -p "$SD_RUN" 2>/dev/null
     sd_stale_clean && sd_info daemon "清理残留锁(旧 pid=${_sd_stale_pid:-?})，重新拉起"
@@ -750,7 +795,7 @@ sd_daemon_stop() {
         done
         sd_pid_alive "$pid" && kill -KILL "$pid" 2>/dev/null
     fi
-    rm -rf "$SD_RUN/daemon.lock" "$SD_RUN/daemon.pid" "$SD_RUN/hb" "$SD_RUN/sensor"
+    rm -rf "$SD_RUN/daemon.lock" "$SD_RUN/daemon.pid" "$SD_RUN/daemon.ver" "$SD_RUN/hb" "$SD_RUN/sensor"
 }
 
 sd_telemetry_write() {
@@ -980,6 +1025,21 @@ _sd_plat=""
 _sd_plat_why=""
 
 sd_plat_resolve() {
+    _sd_plat_probe
+    # 平台从 other 认对之后，候选表要重算。_sd_curr_prepare 只填一次，第一次
+    # 填的时候 plat 若还是 other，MTK 那 5 个候选（input_current_limit、
+    # charger/current_max、mtk-master/slave-charger、mtk-battery）就永久缺失，
+    # 之后认对也不补 —— 8 次重试看起来在、实际被缓存让成了空转。
+    # 只在「建表时 plat 是 other/未知」时重算，SD_CURR_NODES 覆盖的表不动。
+    [ -n "$_sd_curr_nodes" ] || return 0
+    [ "$_sd_plat" = other ] && return 0
+    case "$_sd_curr_plat" in
+        other|"") _sd_curr_nodes=""; _sd_curr_plat="" ;;
+    esac
+    return 0
+}
+
+_sd_plat_probe() {
     # 认出 mtk/qcom 就定死；other 多半是启动早期 getprop 还没就绪，不缓存。
     # 3.1.12 及以前 `[ -n "$_sd_plat" ]` 把 other 也定死，于是 MTK 那 5 个候选
     # 节点永远拿不到 —— 这才是真正的"缓存了坏结果"。试满 8 次还是 other 才认命。
@@ -2791,6 +2851,7 @@ sd_scr_tick() {
 
 
 _sd_curr_nodes=""
+_sd_curr_plat=""      # 建表时的平台判定；other/空 说明这张表可能是早产的
 
 _sd_curr_unit() {
     local p="$1" cur="${2:-}"
@@ -2808,7 +2869,11 @@ _sd_curr_prepare() {
     [ -n "$_sd_curr_nodes" ] && return 0
     if [ -n "${SD_CURR_NODES:-}" ]; then
         _sd_curr_nodes=$(printf '%s' "$SD_CURR_NODES" | tr ',' ' ')
+        _sd_curr_plat=override
     else
+        # 先定平台再建表：sd_plat_resolve 会在平台从 other 认对时把旧表清掉，
+        # 建完再调它等于刚填好就被清空（_sd_curr_plat 那时还是空）。
+        sd_plat_resolve
         _sd_curr_nodes="$SD_PS/battery/constant_charge_current_max \
 $SD_PS/battery/constant_charge_current \
 $SD_PS/battery/current_max \
@@ -2819,7 +2884,6 @@ $SD_OPLUS_CHG/chg_current_max \
 $SD_OPLUS_CHG/current_max \
 /sys/devices/virtual/oplus_chg/battery/chg_current_max \
 /sys/devices/virtual/oplus_chg/battery/current_max"
-        sd_plat_resolve
         if [ "$_sd_plat" = mtk ]; then
             _sd_curr_nodes="$SD_PS/battery/input_current_limit \
 $SD_PS/charger/current_max \
@@ -2828,6 +2892,7 @@ $SD_PS/mtk-slave-charger/current_max \
 $SD_PS/mtk-battery/current_max \
 $_sd_curr_nodes"
         fi
+        _sd_curr_plat=$_sd_plat
     fi
     return 0
 }

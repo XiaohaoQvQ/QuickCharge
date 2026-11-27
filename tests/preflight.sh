@@ -36,12 +36,24 @@ if [ ! -d "$B" ]; then
     exit 1
 fi
 
+# 在 C 仓里跑这份脚本的人，很容易写成「A=C 仓、B=主仓」。那样 [1] 全绿，[2] 却报
+# 「bin/qcmon 不存在」「bin 带通道闸」——看着像二进制坏了，其实是参数反了。
+# 按 module.prop 的 channel 认出来，换回来再跑。
+if [ "$(sed -n 's/^channel=//p' "$A/module.prop" 2>/dev/null | head -1)" = c ] &&
+   [ "$(sed -n 's/^channel=//p' "$B/module.prop" 2>/dev/null | head -1)" = shell ]; then
+    _swap=$A; A=$B; B=$_swap
+    echo "（参数顺序反了：按 module.prop 的 channel 换成 主仓=$A / C 仓=$B）"
+fi
+
 echo "[1] 两仓源码与测试一致"
 same "$A/src/qcmon.c"      "$B/src/qcmon.c"      "src/qcmon.c 逐字节一致"
 same "$A/tests/c-test.sh"  "$B/tests/c-test.sh"  "tests/c-test.sh 逐字节一致"
 # 这份拷贝 3.1.11 分叉了 16 行（versionCode 反算、去重只在主仓），发版时全绿也没发现，
 # 就是因为清单里没有它。加进来才算真同步 —— 守卫本身不同步，等于 C 仓没有守卫。
 same "$A/tests/preflight.sh" "$B/tests/preflight.sh" "tests/preflight.sh 逐字节一致"
+# 3.1.14 验收：C 仓的仿真还停在 3.1.12，实跑 610/3，而 C 仓 preflight 报「全绿」——
+# 因为清单里没有它。这套仿真在 C 仓里等于没有守卫：跑红了没人看，不跑也没人知道。
+same "$A/tests/sim/run.sh" "$B/tests/sim/run.sh" "tests/sim/run.sh 逐字节一致"
 # WebUI 两仓同源。3.1.13 加 batt_spoof 提示时就漏同步了一次，打包前才发现 C 包里的
 # index.html 比主仓少一行 —— 面板文案分叉，用户看到的是哪版取决于装哪个包。
 same "$A/webroot/index.html" "$B/webroot/index.html" "webroot/index.html 逐字节一致"
@@ -100,10 +112,33 @@ has  "$A/service.sh" "_sd_scr_once" "service.sh 的开关独立成 _sd_scr_once"
 nhas "$A/service.sh" '_sd_scr_log=1' "service.sh 不再改 sd_scr_tick 的状态"
 # 混合安装（module.prop 新、脚本旧）只能靠节拍反推，指纹要写进启动日志
 has  "$A/lib/qc.sh" "sd_file_sum" "有代码指纹函数"
-has  "$A/service.sh" "代码指纹 service.sh=" "启动日志记 service.sh/lib 指纹"
+has  "$A/service.sh" 'sd_info daemon "代码指纹 $(sd_code_ver)"' "启动日志记代码指纹"
 # 只给数量时「fcc 节点=none」追不下去，命中清单与 cool_down 可读性都要记
 has  "$A/lib/qc.sh" "charge nodes 命中" "env 记命中的电流节点"
 has  "$A/lib/qc.sh" "cool_down 节点存在但读不到" "cool_down 读不到不静默"
+
+# 3.1.15：覆盖文件不会重启已经起来的进程。3.1.14 的 PLG110 现场就是「装的 3.1.14、
+# 跑的是 3.1.11」——三版修复一条没生效，用户却在评价旧行为。
+has  "$A/lib/qc.sh" "sd_daemon_ver_chk" "有「守护跑的是不是这份代码」的校验"
+has  "$A/lib/qc.sh" "跑的不是磁盘上这份代码" "换人时写明理由"
+has  "$A/service.sh" 'daemon.ver' "守护启动时把指纹落盘"
+# 位置也是内容：校验必须在「守护已在运行，跳过」之前，否则那句话会继续挡住换人
+_l_vchk=$(grep -n 'sd_daemon_ver_chk' "$A/service.sh" 2>/dev/null | head -1 | cut -d: -f1)
+_l_skip=$(grep -n 'sd_info boot "守护已在运行，跳过"' "$A/service.sh" 2>/dev/null | head -1 | cut -d: -f1)
+if [ -n "$_l_vchk" ] && [ -n "$_l_skip" ] && [ "$_l_vchk" -lt "$_l_skip" ]; then
+    ok "版本校验在「守护已在运行，跳过」之前（第 $_l_vchk 行 < $_l_skip 行）"
+else
+    bad "版本校验位置不对：$_l_vchk vs 跳过行 $_l_skip"
+fi
+# 平台从 other 认对之后候选表要重算，否则 8 次重试被第一次的缓存让成空转
+has  "$A/lib/qc.sh" "_sd_curr_plat" "候选表记住建表时的平台"
+has  "$A/src/qcmon.c" "g_curr_plat" "C 侧同样重算"
+# 3.1.0 就删掉的函数，3.1.14 还在 sd_dump_env 里被调用：每次 dump 一条
+# 「command not found」到 stderr，久了会把「stderr 有杂音」当成正常
+nhas "$A/lib/qc.sh" "sd_limit_for_type_v" "无已删函数的孤儿调用"
+# 3.1.13 起 cool_tick 只读，注释里不该再讲「2.5A 闸」「去写 0」
+nhas "$A/src/qcmon.c" "2.5A 闸" "注释不再引用已删的降流闸"
+nhas "$A/src/qcmon.c" "g_tick_n % 20 == 1" "C 侧重探周期与 shell 对齐（每 4 轮）"
 
 echo "[3] 版本号自洽"
 v_prop=$(sed -n 's/^version=//p' "$A/module.prop" | head -1)
