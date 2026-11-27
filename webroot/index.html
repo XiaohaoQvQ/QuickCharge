@@ -329,6 +329,13 @@
   var SEQ = 0;
   function num(v) { return (v === null || v === undefined || v === "") ? 0 : (Number(v) || 0); }
   function str(v) { return (v === null || v === undefined) ? "" : String(v); }
+  function escHtml(v) {
+    return str(v).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+  function shQuote(v) {
+    return "'" + str(v).replace(/'/g, "'\\''") + "'";
+  }
   function unpack(v) {
     if (typeof v === "string") { try { v = JSON.parse(v); } catch (e) {} }
     if (v && typeof v === "object" && v.errno !== undefined) {
@@ -524,10 +531,11 @@
   }
   function run(arg, cb) {
     if (!MOD) { cb({ code: -1, out: "", err: "模块路径未探测到" }); return; }
-    var q = SH + ' "' + MOD + '/action.sh" ' + arg;
+    var script = shQuote(MOD + "/action.sh");
+    var q = SH + " " + script + " " + arg;
     exec(q, function (r) {
       if (r.code === -1 && /not found|No such file|ENOENT/i.test(r.err)) {
-        exec('sh "' + MOD + '/action.sh" ' + arg, cb);
+        exec("sh " + script + " " + arg, cb);
       } else {
         cb(r);
       }
@@ -592,16 +600,16 @@
   function summary(d) {
     var r = (d.real === null || d.real === undefined) ? null : d.real;
     if (!d.daemon) return "守护未运行";
-    if (d.mode === "off") return r === null ? "未改写" : "未改写 · 真实 <b>" + r + "℃</b>";
+    if (d.mode === "off") return r === null ? "未改写" : "未改写 · 真实 <b>" + escHtml(r) + "℃</b>";
     if (d.mode === "charge" && !d.charging) return "待机中 · 插电后接管";
     if (rewritten(d)) {
       if (d.emul_ok === 0) return "写入失败 · 系统仍读真实温度";
-      return "系统看到 <b>" + d.target + "℃</b>" +
-        (r === null ? "" : " · 真实 " + r + "℃");
+      return "系统看到 <b>" + escHtml(d.target) + "℃</b>" +
+        (r === null ? "" : " · 真实 " + escHtml(r) + "℃");
     }
     if (r === null)
-      return "读不到真实温度" + (d.real_why ? " · <b>" + d.real_why + "</b>" : "");
-    return "未改写 · 真实 <b>" + r + "℃</b>";
+      return "读不到真实温度" + (d.real_why ? " · <b>" + escHtml(d.real_why) + "</b>" : "");
+    return "未改写 · 真实 <b>" + escHtml(r) + "℃</b>";
   }
   function render(d) {
     $("ver").textContent = "v" + (d.version || "—");
@@ -1059,7 +1067,7 @@
     bindFold("foldLog", "qc.fold.log", false);
   }
   function openUrl(u) {
-    exec("am start -a android.intent.action.VIEW -d '" + u + "'", function (r) {
+    exec("am start -a android.intent.action.VIEW -d " + shQuote(u), function (r) {
       if (r && r.code === 0) return;
       var w = null;
       try { w = window.open(u, "_blank"); } catch (e) {}

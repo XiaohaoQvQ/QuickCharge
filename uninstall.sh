@@ -23,7 +23,7 @@ case "$pid" in
     ''|*[!0-9]*) ;;
     *)
         if [ "$pid" -gt 1 ] && kill -0 "$pid" 2>/dev/null; then
-            if [ -r "/proc/$pid/cmdline" ] && ! grep -q "service\.sh" "/proc/$pid/cmdline" 2>/dev/null; then
+            if [ -r "/proc/$pid/cmdline" ] && ! grep -qE 'service\.sh|qcmon' "/proc/$pid/cmdline" 2>/dev/null; then
                 :
             else
                 kill -TERM "$pid" 2>/dev/null
@@ -74,13 +74,8 @@ for d in /dev/qc "${SD_SPOOF_DIR:-}"; do
     rmdir "$d" 2>/dev/null
 done
 
-if [ -e /proc/shell-temp ]; then
-    t=0
-    while [ "$t" -le 9 ]; do
-        printf '%s 0\n' "$t" 2>/dev/null >/proc/shell-temp
-        t=$((t + 1))
-    done
-fi
+# /proc/shell-temp 没有「写 0 = 关闭模拟」的语义：写 0 会被读成 0℃，
+# 触发低温保护（5V/500mA）。停掉守护并归零 emul_temp 后交还驱动自行更新即可。
 
 if [ -d /data/adb/modules/meta-nomount ] || [ -d /data/adb/modules/nomount ]; then
     for b in \

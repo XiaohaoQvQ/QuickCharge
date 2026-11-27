@@ -567,6 +567,9 @@ case "$1" in
         sd_daemon_stop
         sd_spoof_clear
         sd_shell_emul 0
+        sd_scr_release
+        sd_unlock_restore
+        sd_hz_restore
         sd_umount_overrides purge
         printf '0\n' 2>/dev/null >"$SD_DATA/boot.count"
         rm -f "$SD_STATE"
@@ -595,12 +598,12 @@ esac
 
 _rc=$?
 case "$_CMD" in
-    temp|shell|core|noncore|base|unlock|level|hz|hzguard)
+    temp|shell|core|noncore|base|batt|unlock|level|hz|hzguard)
         sd_ensure_daemon >/dev/null 2>&1
         sd_daemon_kick ;;
 esac
 case "$_CMD" in
-    temp|shell|core|noncore|base|unlock|level|hz|hzguard|\
+    temp|shell|core|noncore|base|batt|unlock|level|hz|hzguard|overrides|\
     mount|umount|rebuild|reboot-safe|reset)
         [ "$_rc" = "0" ] && sd_sync_desc ;;
 esac
