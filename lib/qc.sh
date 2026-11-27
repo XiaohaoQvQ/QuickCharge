@@ -930,15 +930,6 @@ sd_batt_real_v() {
     sd_temp_norm "$_sd_rv"
 }
 
-_sd_batt_spoof_on() {
-    local v
-    v=$(sd_state_get batt_spoof off)
-    case "$v" in ''|off|0) return 1 ;; esac
-    case "$v" in *[!0-9]*) return 1 ;; esac
-    [ "$v" -ge 20 ] && [ "$v" -le 45 ] || return 1
-    return 0
-}
-
 _sd_plat=""
 _sd_plat_why=""
 
@@ -1343,15 +1334,6 @@ sd_batt_rank() {
         *therm*|*Therm*|*conn*|*Conn*|*chg*|*Chg*) printf '2' ;;
         *) printf '1' ;;
     esac
-}
-
-sd_zone_type_of() {
-    local e
-    _sd_zones_ready
-    for e in $_sd_zones; do
-        [ "${e%%:*}" = "$1" ] && { printf '%s' "${e#*:}"; return 0; }
-    done
-    return 1
 }
 
 sd_pick_batt_zone_v() {
@@ -3980,8 +3962,8 @@ sd_diag() {
 
     printf '\n采样结束，文件: %s\n' "$f"
     printf '判读要点:\n'
-    printf '  1. 电池温度远低于墙、限流却已 <100%% → 档位触发点太靠前\n'
-    printf '  2. 电流一次次掉到同一档再爬回 → 温度在阈值上来回跨档（缺回差）\n'
+    printf '  1. 电池远低于墙、电流却比同电量的平时低 → 跑 tiers，看是 thermal HAL 还是 cool_down 在压\n'
+    printf '  2. 电流隔几秒掉一截再爬回 → 对照 board 里的 charger-therm，多半是充电 IC 自己收的\n'
     printf '  3. core 全是固定值且充电时电流持续偏低 → 核心伪装让系统放开 CPU，真实功耗抢了充电功率\n'
     printf '  4. board 里 charger-therm 接近 80-85℃ 而电池才 35℃ → 降档来自充电 IC 自身保护，不是温度墙\n'
 }

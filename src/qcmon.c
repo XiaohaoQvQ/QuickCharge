@@ -2544,7 +2544,7 @@ static void log_env(void)
     if (g_curr_n > 0)
         log_msg("I", "env", "charge nodes=%d first=%s", g_curr_n, g_curr_nodes[0]);
     else
-        log_msg("I", "env", "charge nodes=0（找不到电流节点，限流/亮屏快充都用不了）");
+        log_msg("I", "env", "charge nodes=0（找不到电流节点，亮屏快充用不了）");
 }
 
 int main(int argc, char **argv)

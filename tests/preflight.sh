@@ -60,9 +60,10 @@ fi
 # 首帧仍会闪，JS 抛错就一直显示；日志里那句「电池偏热」对应的分支也只活在
 # 3.1.3 之前的温度闸里。都在 bin 之外，preflight 原来拦不到。
 nhas "$A/webroot/index.html" "≥46℃ 撤销" "WebUI 静态文案不承诺 46℃ 撤销"
-nhas "$A/lib/qc.sh" "电池偏热" "不再有「电池偏热」分支文案"
 # C 侧同源的残留：3.1.0 删熔断、3.1.3 删亮屏温度闸、3.1.8 删 curr 备份，
 # 函数体删了注释和分支还留着，上轮只查了 lib/qc.sh，C 里的一直没进视野。
+# 3.1.10 验收发现这里和上面那条重复查了 lib/qc.sh 的「电池偏热」，多打一条同样的 ok，
+# 循环覆盖两个文件就够了，单条已删。
 for f in src/qcmon.c lib/qc.sh; do
     nhas "$A/$f" "电池偏热" "$f 无「电池偏热」分支"
     nhas "$A/$f" "熔断" "$f 无熔断残留"
@@ -76,6 +77,21 @@ v_upd=$(grep -o '"version": *"[^"]*"' "$A/update.json" | sed 's/.*"\([^"]*\)"$/\
 vc_upd=$(grep -o '"versionCode": *[0-9]*' "$A/update.json" | grep -o '[0-9]*$')
 [ "$v_prop" = "$v_upd" ] && ok "update.json version=$v_upd" || bad "update.json version=$v_upd ≠ module.prop $v_prop"
 [ "$vc_prop" = "$vc_upd" ] && ok "update.json versionCode=$vc_upd" || bad "versionCode $vc_upd ≠ $vc_prop"
+
+# versionCode 在 3.1.10 换了第三代编码。旧公式 `(主×100+次)×1000+修订×2+通道` 到这一步
+# 会算出 301021 —— 比 3.1.9 的 301901 还小，管理器当降级，卡片连「更新」都不显示；
+# 这种错不报错、不崩，只是静默推不动，所以从 version 反算，人算错立刻红。
+vcmaj=${v_prop%%.*}; _rest=${v_prop#*.}
+vcmin=${_rest%%.*}; vcrev=${_rest#*.}; vcrev=${vcrev%%-*}
+vcch=$(sed -n 's/^channel=//p' "$A/module.prop" | head -1)
+if [ "$vcch" = c ]; then vcbit=0; else vcbit=1; fi
+vc_calc=$(( ${vcmaj:-0} * 1000000 + ${vcmin:-0} * 10000 + ${vcrev:-0} * 100 + vcbit ))
+# 3.1.10 之前的号是历史编码（3.0.12=300025、3.1.9=301901），不回溯重算，老 tag 上跑不误报
+if [ "$vc_calc" -ge 3011001 ]; then
+    chknd "versionCode 反算（$v_prop → $vc_calc）" "$vc_prop" "$vc_calc"
+else
+    ok "versionCode 反算跳过：$v_prop 早于 3.1.10 的 7 位编码"
+fi
 case "$(grep -o '"zipUrl": *"[^"]*"' "$A/update.json")" in
     *"$v_prop"*) ok "zipUrl 指向 $v_prop" ;;
     *) bad "zipUrl 没跟着改：$(grep -o '"zipUrl": *"[^"]*"' "$A/update.json")" ;;
