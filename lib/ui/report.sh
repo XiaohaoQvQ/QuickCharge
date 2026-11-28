@@ -53,7 +53,8 @@ sd_dump_env() {
     cn=$(sd_curr_nodes 2>/dev/null | wc -l | tr -d ' ')
     ce=$(printf '%s' "$_sd_curr_nodes" | wc -w | tr -d ' ')
     [ "$ce" -gt 0 ] 2>/dev/null || ce=0
-    _sd_emit I env "soc=${_sd_plat}（${_sd_plat_why}） emul=$_emul_n${_emul_head} shell-temp=$_sh charge-nodes=${cn}/${ce}（存在/候选）"
+    sd_shell_scan
+    _sd_emit I env "soc=${_sd_plat}（${_sd_plat_why}） emul=$_emul_n${_emul_head} shell-temp=$_sh shell-zone=$_sd_sh_n charge-nodes=${cn}/${ce}（存在/候选）"
     _sd_curr_ex=$cn
     # 只给数量，"fcc 节点=none" 就是一句没法追查的结论：到底是哪个节点在、
     # cool_down 能不能读，都在下面两行里。
@@ -64,7 +65,9 @@ sd_dump_env() {
     fi
     if sd_cool_node; then
         if sd_read1 "$SD_COOL_NODE"; then
-            _sd_emit I env "cool_down=${_sd_rv}（${SD_COOL_NODE}）"
+            sd_pwr_cause "$_sd_rv"
+            sd_shell_state_get >/dev/null 2>&1
+            _sd_emit I env "cool_down=${_sd_rv}（${SD_COOL_NODE}） cause=${_sd_pwr_cause} shell=$(sd_state_get shell_temp 30)/${_sd_sh_st_max:--} why=${_sd_sh_st_why:--}"
         else
             _sd_emit W env "cool_down 节点存在但读不到（${SD_COOL_NODE}）"
         fi

@@ -6,7 +6,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 > C 版见独立仓库 [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)：把同一个守护逻辑用 C 重写，每 tick 从 1.3 ms 降到 0.14 ms。
 > 两版功能等价，可以随时互换，详见 [第 3 节](#3-与-c-版的对比)。
 
-- 当前版本：`3.2.0`（`versionCode 3020001`）；C 版仍是 `3.1.18-c`，等 shell 侧稳定后跟进
+- 当前版本：`3.2.1`（`versionCode 3020101`）；C 版仍是 `3.1.18-c`，等 shell 侧稳定后跟进
 - 模块 ID：`quickcharge`
 - 数据目录：`/data/adb/quickcharge`
 - 适用：Magisk / KernelSU / APatch
@@ -37,7 +37,7 @@ ColorOS / RealmeUI 的温控与充电策略改写模块。纯 shell 实现，安
 这个守护进程每 15 秒读几十个 sysfs 小文件、算一遍目标、偶尔写几个节点。
 用 shell 写它有实打实的代价（每轮 4 次 fork、1.3 ms），但换来三件事：
 
-**能读。** 逻辑在 `lib/` 下按域拆成 14 个文件，合计 4419 行，没有编译产物。想知道"为什么
+**能读。** 逻辑在 `lib/` 下按域拆成 15 个文件，合计 4773 行，没有编译产物。想知道"为什么
 我的手机没效果"，`grep` 一下就能找到判定分支。
 
 **能改。** 现场发现某个机型的温区名字不一样，改一行正则、`action.sh restart` 就生效。
@@ -344,7 +344,7 @@ quickcharge/
 ├── uninstall.sh          卸载：停守护、卸挂载、归零、清数据
 ├── lib/qc.sh             聚合入口：按序 source 下面各域，60 行
 ├── lib/core/             日志（分级+补写）/ 状态（schema+校验）/ 时钟与文件工具
-├── lib/plat/             平台、协议、温区探测
+├── lib/plat/             平台、协议、温区探测；shell.sh 管壳温（ColorOS 降流看它）
 ├── lib/thermal/          温度伪装（emul_temp / 假 temp 文件）
 ├── lib/cfg/              配置改写（7 类文件）与覆盖层挂载
 ├── lib/daemon/           守护启停、判活、代码指纹
@@ -353,6 +353,7 @@ quickcharge/
 ├── webroot/index.html    WebUI（纯静态，KernelSU / MMRL / KsuWebUI 加载）
 ├── src/qcmon.c           C 版源码（2869 行，仅仓库内、不打包，已拆到 QuickCharge-C）
 ├── docs/TECH.md          设计细节与踩过的坑（不打包）
+├── docs/COLOROS-CHARGING.md  ColorOS 充电降流链路与证据来源（不打包）
 ├── tests/                冒烟测试：c-test / chg-unit / cool-unit / state-unit / sim
 └── META-INF/...
 ```
@@ -391,7 +392,7 @@ su 0 sh -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 
 | 仓库 | 当前版本 | 包名 | versionCode |
 |---|---|---|---|
-| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.2.0` | `QuickCharge-v3.2.0.zip` | 3020001 |
+| [QuickCharge](https://github.com/XiaohaoQvQ/QuickCharge)（shell） | `3.2.1` | `QuickCharge-v3.2.1.zip` | 3020101 |
 | [QuickCharge-C](https://github.com/XiaohaoQvQ/QuickCharge-C)（C 守护） | `3.1.18-c` | `QuickCharge-v3.1.18-c.zip` | 3011800 |
 
 每个仓库的 Release 只附自己那一份模块包，装哪个版本就去哪个仓库下载，不会混。
@@ -399,11 +400,11 @@ su 0 sh -c 'sh /data/adb/modules/quickcharge/uninstall.sh'
 发行版标题统一为「产品全名 + 版本号」，不带摘要：
 
 ```
-Quick Charge v3.2.0
+Quick Charge v3.2.1
 Quick Charge v3.1.18-c
 ```
 
-tag 与标题一致：shell 仓 `v3.2.0`，C 仓 `3.1.18-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
+tag 与标题一致：shell 仓 `v3.2.1`，C 仓 `3.1.18-c`。历史发行版从 2.9.49 起全部按这个规则重建过，
 更早的版本只统一了标题，正文保持原样。
 
 ### 版本号规则（3.0 起）
@@ -422,7 +423,7 @@ tag 与标题一致：shell 仓 `v3.2.0`，C 仓 `3.1.18-c`。历史发行版从
 |---|---|---|
 | `3.1.10` | `3011001` | `3011000` |
 | `3.1.18` | `3011801` | `3011800` |
-| `3.2.0` | `3020001` | —（C 仓待迁移） |
+| `3.2.1` | `3020101` | —（C 仓待迁移） |
 
 修订占两位（`00`–`99`），所以「修订到 100 进一位」正好对上「次版本 +1」，两条规则不再打架。
 
@@ -447,9 +448,9 @@ updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/up
 
 ```json
 {
-  "version": "3.2.0",
-  "versionCode": 3020001,
-  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.2.0/QuickCharge-v3.2.0.zip",
+  "version": "3.2.1",
+  "versionCode": 3020101,
+  "zipUrl": "https://github.com/XiaohaoQvQ/QuickCharge/releases/download/v3.2.1/QuickCharge-v3.2.1.zip",
   "changelog": "https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/RELEASE.md"
 }
 ```
@@ -474,4 +475,5 @@ updateJson=https://github.com/XiaohaoQvQ/QuickCharge/releases/latest/download/up
 
 本文只讲怎么用。想看每条策略为什么这么定——配置改写的具体范围、温区分类规则、
 温度伪装的取值边界、平台差异（高通 / MTK / 欧加真）、各版本踩过的坑，
-见 [docs/TECH.md](docs/TECH.md)。
+见 [docs/TECH.md](docs/TECH.md)。ColorOS 为什么按壳温降流、`cool_down` 各档什么意思，
+见 [docs/COLOROS-CHARGING.md](docs/COLOROS-CHARGING.md)。

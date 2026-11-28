@@ -186,49 +186,15 @@ _sd_emul_ok=-1
 
 _sd_guard_paused=0
 
+# 壳温总入口的薄封装：真正的实现在 plat/shell.sh（三路径写入 + 回读校验）。
+# 保留这个名字，是为了 action.sh / service.sh / feat/charge.sh 的调用点不用动。
+# _sd_emul_ok 维持老语义「写动作是否成功」：1 = 至少一条主路径写进去了，
+# 0 = 一条都没写进。是否真的压住了看 _sd_sh_ok / _sd_sh_why（回读结论）。
 sd_shell_emul() {
-    local celsius="$1" ms e z t n=0 ps=0
-    _sd_zones_ready
-    case "$celsius" in ''|*[!0-9]*) return 1 ;; esac
-    if [ "$celsius" -ne 0 ] && { [ "$celsius" -lt 20 ] || [ "$celsius" -gt 100 ]; }; then
-        sd_err thermal "壳温超出合理范围(20-100℃): $celsius，忽略"
-        return 1
-    fi
-    [ "$celsius" = "$_sd_emul_last" ] && return 0
-    _sd_emul_last=$celsius
-    ms=$((celsius * 1000))
-
-    for e in $_sd_zones; do
-        z=${e%%:*}
-        t=${e#*:}
-        sd_zone_is_shell "$t" || continue
-        [ -e "$z/emul_temp" ] || continue
-        printf '%s\n' "$ms" 2>/dev/null >"$z/emul_temp" && n=$((n + 1))
-    done
-
-    # /proc/shell-temp 是欧加自定义 proc 接口，没有 emul_temp 那种「写 0 = 关闭
-    # 模拟」的语义：写 0 会被读成 0℃，插电头几秒进低温保护（锁 5V/500mA）。
-    # 但也不能像 3.1.4 那样在关闭时写死 30℃ —— 那会让这个节点永久停在假值，
-    # 和「关闭」的语义相反。关闭时干脆不写，把它交还驱动自己更新。
-    if [ "$celsius" -ne 0 ] && [ -e "$SD_SHELL_TEMP" ]; then
-        t=0
-        while [ "$t" -le 9 ]; do
-            printf '%s %s\n' "$t" "$ms" 2>/dev/null >"$SD_SHELL_TEMP" && ps=1
-            t=$((t + 1))
-        done
-    fi
-
-    if [ "$celsius" -eq 0 ]; then
-        _sd_emul_ok=1
-        sd_dbg thermal "关闭壳温模拟：emul_temp 归零，shell-temp 交还驱动"
-    elif [ "$n" -gt 0 ] || [ "$ps" = 1 ]; then
-        _sd_emul_ok=1
-        sd_dbg thermal "壳温写 ${celsius}℃ 到 $n 个节点"
-    else
-        _sd_emul_ok=0
-        sd_warn thermal "壳温节点不可写（无 emul_temp 或权限被拒），目标 ${celsius}℃"
-    fi
-    return 0
+    local rc
+    sd_shell_apply "$1"; rc=$?
+    case "$rc" in 0) _sd_emul_ok=1 ;; *) _sd_emul_ok=0 ;; esac
+    return $rc
 }
 
 _sd_batt_sp_last=""

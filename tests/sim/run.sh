@@ -2943,6 +2943,84 @@ SD_DATA="$_v59/e" SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_log_reset' >/
 [ -f "$_v59/e/log.up" ] && ok "日志：reset 写下 log.up 标记" || ng "日志：没有 log.up 标记"
 rm -rf "$_v59"
 
+# ---------------------------------------------------------------- T60 壳温链路
+# 5-10W 的根因链：ColorOS 按壳温（shell_front/frame/back 拟合）分级下发
+# cool_down，壳温 36℃ 就进第 6 档。这一组把「压壳温 -> 回读确认 -> 归因」
+# 三步钉死，任何一步回退都会立刻红。
+echo
+echo "===== T60 壳温：三路径 + 回读 + 归因 ====="
+_v60=$(mktemp -d)
+for _x in front back frame; do
+    mkdir -p "$_v60/z/shell_$_x"
+    printf 'shell_%s\n' "$_x" >"$_v60/z/shell_$_x/type"
+    printf '38000\n' >"$_v60/z/shell_$_x/temp"
+    : >"$_v60/z/shell_$_x/emul_temp"
+done
+
+# (1) 格式自适应：从 /proc/shell-temp 原文反推，不硬编码
+printf 'shell_back:38000\nshell_front:37000\n' >"$_v60/st"
+eq "$(V60="$_v60" SD_MODDIR=/opt/qc SD_DATA="$_v60/d" SD_ZONE_GLOB="$_v60/z/*" SD_SHELL_TEMP="$_v60/st" sh -c '. /opt/qc/lib/qc.sh; sd_zone_scan; sd_shell_fmt_detect; printf %s "$_sd_sh_fmt"')" \
+   "name" "壳温格式：shell_back:38000 认成 name"
+
+# (2) 写进 emul_temp 但 temp 没变 -> 必须报 no_effect，不能报生效
+O=$(V60="$_v60" SD_MODDIR=/opt/qc SD_DATA="$_v60/d" SD_ZONE_GLOB="$_v60/z/*" SD_SHELL_TEMP="$_v60/st" sh -c '
+. /opt/qc/lib/qc.sh
+sd_zone_scan
+sd_shell_apply 30 >/dev/null 2>&1
+echo "ok=$_sd_sh_ok why=$_sd_sh_why emul=$(cat "$V60/z/shell_front/emul_temp" 2>/dev/null) proc=$(tail -1 "$SD_SHELL_TEMP" 2>/dev/null)"' 2>/dev/null)
+case "$O" in
+    *"ok=0 why=no_effect emul=30000"*) ok "回读不符报 no_effect（写到 emul_temp 不算生效）" ;;
+    *) ng "回读判定错：$O" ;;
+esac
+case "$O" in
+    *"proc=shell_back:30000"*) ok "壳温按 name 格式写回 shell-temp" ;;
+    *) ng "shell-temp 写回格式错：$O" ;;
+esac
+
+# (3) temp 跟着变 -> 报生效
+for _x in front back frame; do printf '30000\n' >"$_v60/z/shell_$_x/temp"; done
+O=$(V60="$_v60" SD_MODDIR=/opt/qc SD_DATA="$_v60/d" SD_ZONE_GLOB="$_v60/z/*" SD_SHELL_TEMP="$_v60/st" sh -c '
+. /opt/qc/lib/qc.sh; sd_zone_scan; sd_shell_apply 30 >/dev/null 2>&1; echo "ok=$_sd_sh_ok why=$_sd_sh_why"' 2>/dev/null)
+case "$O" in *"ok=1"*) ok "回读一致报生效" ;; *) ng "压住了却报没生效：$O" ;; esac
+
+# (4) 归因四态 + 未开伪装
+O=$(V60="$_v60" SD_MODDIR=/opt/qc SD_DATA="$_v60/d" SD_ZONE_GLOB="$_v60/z/*" SD_SHELL_TEMP="$_v60/st" sh -c '
+. /opt/qc/lib/qc.sh
+sd_state_set temp_mode static; sd_state_load
+sd_shell_apply 30 >/dev/null 2>&1
+sd_pwr_cause 6; printf "c6=%s " "$_sd_pwr_cause"
+sd_pwr_cause 1; printf "c1=%s " "$_sd_pwr_cause"
+sd_pwr_cause 0; printf "c0=%s" "$_sd_pwr_cause"' 2>/dev/null)
+case "$O" in
+    *"c6=thermal"*)  ok "归因：壳温压住仍降流 = thermal" ;;
+    *) ng "归因 thermal 错：$O" ;;
+esac
+case "$O" in
+    *"c1=low_power"*) ok "归因：cool_down=1 = 仅 10W 开关" ;;
+    *) ng "归因 low_power 错：$O" ;;
+esac
+case "$O" in
+    *"c0=ok"*) ok "归因：cool_down=0 = 没被降流" ;;
+    *) ng "归因 ok 错：$O" ;;
+esac
+
+# (5) 壳温没压住 + 有降流 -> spoof_failed（这是 5-10W 最常见的一支）
+for _x in front back frame; do printf '39000\n' >"$_v60/z/shell_$_x/temp"; done
+eq "$(V60="$_v60" SD_MODDIR=/opt/qc SD_DATA="$_v60/d" SD_ZONE_GLOB="$_v60/z/*" SD_SHELL_TEMP="$_v60/st" sh -c '. /opt/qc/lib/qc.sh; sd_zone_scan; sd_shell_apply 30 >/dev/null 2>&1; sd_pwr_cause 6; printf %s "$_sd_pwr_cause"')" \
+   "spoof_failed" "归因：壳温没压住 = spoof_failed"
+
+# (6) 伪装关闭时归因为 spoof_off，不误报
+eq "$(V60="$_v60" SD_MODDIR=/opt/qc SD_DATA="$_v60/e" SD_ZONE_GLOB="$_v60/z/*" sh -c '. /opt/qc/lib/qc.sh; sd_state_set temp_mode off; sd_state_load; sd_pwr_cause 6; printf %s "$_sd_pwr_cause"')" \
+   "spoof_off" "归因：伪装关闭 = spoof_off"
+
+# (7) 连字符命名（shell-back）也要认：真机和测试构造都出现过两种写法
+mkdir -p "$_v60/z2/x"
+printf 'shell-back\n' >"$_v60/z2/x/type"
+printf '38000\n' >"$_v60/z2/x/temp"
+eq "$(SD_MODDIR=/opt/qc SD_DATA="$_v60/d2" SD_ZONE_GLOB="$_v60/z2/*" sh -c '. /opt/qc/lib/qc.sh; sd_zone_scan; sd_shell_scan; printf %s "$_sd_sh_n"')" \
+   "1" "壳温：shell-back 连字符也认得出"
+rm -rf "$_v60"
+
 
 if [ "$FAIL" -gt 0 ]; then
     printf '\n===== 失败清单 =====\n%s' "$FAILED"

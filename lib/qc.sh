@@ -71,7 +71,7 @@ _sd_lv=0
 _sd_rot=0
 
 for _qc_m in core/util.sh core/log.sh core/state.sh plat/probe.sh plat/zones.sh \
-             thermal/spoof.sh cfg/transform.sh cfg/mount.sh daemon/ctl.sh \
+             plat/shell.sh thermal/spoof.sh cfg/transform.sh cfg/mount.sh daemon/ctl.sh \
              feat/scr.sh feat/hz.sh feat/charge.sh ui/report.sh; do
     . "$QC_LIBDIR/lib/$_qc_m"
 done

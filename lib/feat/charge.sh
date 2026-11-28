@@ -35,6 +35,51 @@ sd_charge_tick() {
 SD_COOL_NODE=""
 _sd_cool_none=0
 _sd_cool_log=""        # 上一次记下的档位；""=还没记过，none=本机没节点
+_sd_pwr_log=""         # 上一次的归因，归因变了也要记一条
+_sd_pwr_cause=""
+
+# ---------------------------------------------------------------- 功率归因
+# 5-10W 有五种来源，日志里必须能分开，否则只能靠猜：
+#   spoof_failed  壳温没压住 -> thermalcontrol 按真实壳温降流（最常见）
+#   thermal       壳温压住了仍降流 -> 来源不是壳温（电池温度 / HAL / 手动）
+#   low_power     cool_down=1：ColorOS 的「仅 10W 充电」开关被打开
+#   ok            cool_down=0，当前没被降流
+#   spoof_off     温度伪装没开，本来就不干预
+# 依据：LineageOS android_hardware_oplus 的 charger-cool-down 实现与
+# sys_thermal_control_config.xml 的档位表（36℃ 进第 6 档），以及
+# /sys/class/oplus_chg/battery/cool_down 的实际取值。
+sd_pwr_cause() {
+    local cool="${1:-}" mode
+    _sd_pwr_cause=""
+    mode=$(sd_state_get temp_mode off)
+    case "$mode" in off|'') _sd_pwr_cause=spoof_off; return 0 ;; esac
+    case "$cool" in
+        ''|*[!0-9]*) _sd_pwr_cause=unknown; return 0 ;;
+    esac
+    if [ "$cool" = 0 ]; then
+        _sd_pwr_cause=ok
+        return 0
+    fi
+    if [ "$cool" = 1 ]; then
+        _sd_pwr_cause=low_power
+        return 0
+    fi
+    sd_shell_state_get >/dev/null 2>&1
+    if [ "${_sd_sh_st_ok:-0}" != 1 ]; then
+        _sd_pwr_cause=spoof_failed
+    else
+        _sd_pwr_cause=thermal
+    fi
+    return 0
+}
+
+# 归因一行：[chg] cool=6 cause=spoof_failed shell=30/38
+sd_pwr_brief() {
+    local cool="${1:-?}"
+    printf 'cool=%s cause=%s shell=%s/%s' \
+        "$cool" "${_sd_pwr_cause:-?}" \
+        "$(sd_state_get shell_temp 30)" "${_sd_sh_st_max:-${_sd_sh_max:-?}}"
+}
 
 sd_cool_tick() {
     local cur
@@ -59,13 +104,25 @@ sd_cool_tick() {
     fi
     cur=$_sd_rv
     case "$cur" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$cur" = "$_sd_cool_log" ] && return 0
+
+    sd_pwr_cause "$cur"
+    # 档位没变、归因也没变：不重复记
+    [ "$cur" = "$_sd_cool_log" ] && [ "$_sd_pwr_cause" = "$_sd_pwr_log" ] && return 0
     _sd_cool_log=$cur
+    _sd_pwr_log=$_sd_pwr_cause
+
     if [ "$cur" = 0 ]; then
-        sd_info charge "cool_down=0（当前没被降流）"
+        sd_info charge "$(sd_pwr_brief "$cur")（当前没被降流）"
     else
-        sd_info charge "cool_down=$cur（亮屏降流标记，只记录不写入）"
+        sd_info charge "$(sd_pwr_brief "$cur")（亮屏降流档位，只记录不写入）"
     fi
+    case "$_sd_pwr_cause" in
+        spoof_failed)
+            sd_warn charge "壳温没压住，降流是它触发的：target=$(sd_state_get shell_temp 30)℃ 实测=${_sd_sh_st_max:-?}℃ reason=${_sd_sh_st_why:-?}" ;;
+        low_power)
+            sd_warn charge "cool_down=1 = ColorOS 的「仅 10W 充电」开关被打开，与温度无关；关掉它才会恢复" ;;
+    esac
+    return 0
 }
 
 # ---------------------------------------------------------------- 充电阶梯解锁

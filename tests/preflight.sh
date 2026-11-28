@@ -138,6 +138,18 @@ hasq "$A/lib" "cool_down 节点存在但读不到" "cool_down 读不到不静默
 # 3.1.15：覆盖文件不会重启已经起来的进程。3.1.14 的 PLG110 现场就是「装的 3.1.14、
 # 跑的是 3.1.11」——三版修复一条没生效，用户却在评价旧行为。
 hasq "$A/lib" "sd_daemon_ver_chk" "有「守护跑的是不是这份代码」的校验"
+
+# 3.2.1：5-10W 的根因是「ColorOS 按壳温分级降流，而壳温伪装写了不校验」。
+# 守卫盯三件事：写壳温必须回读、没压住必须报 no_effect、cool_down 必须归因。
+hasq "$A/lib" "sd_shell_verify" "壳温写完要回读校验"
+hasq "$A/lib" "no_effect" "壳温没压住要报 no_effect"
+hasq "$A/lib" "sd_pwr_cause" "cool_down 要给出归因"
+hasq "$A/lib" "spoof_failed" "归因含 spoof_failed 分支"
+hasq "$A/lib" "sd_shell_fmt_detect" "shell-temp 格式自适应"
+nhasq "$A/lib" "亮屏降流标记" "旧的「只读标记」文案已替换"
+# shell-temp 直接写死的猜测格式（t 从 0 数到 9 那种）不能回到 spoof.sh：
+# 它绕过了格式探测，再出现就是回退。
+nhasq "$A/lib/thermal/spoof.sh" 't=0' "spoof.sh 不再硬编码 shell-temp 通道循环"
 hasq "$A/lib" "跑的不是磁盘上这份代码" "换人时写明理由"
 has  "$A/service.sh" 'daemon.ver' "守护启动时把指纹落盘"
 # 位置也是内容：校验必须在「守护已在运行，跳过」之前，否则那句话会继续挡住换人
