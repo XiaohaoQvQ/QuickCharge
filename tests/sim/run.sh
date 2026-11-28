@@ -6,6 +6,11 @@ PASS=0; FAIL=0; T0=$(date +%s); FAILED=""
 SD_SPOOF_DIR="${SD_SPOOF_DIR:-/tmp/qc-sim-spoof}"
 export SD_SPOOF_DIR
 
+# lib 已按域拆成多个文件，聚合入口要用「模块根」找 lib/*。
+# 个别用例会临时把 MODDIR 指到只放 module.prop 的目录，那里没有 lib，
+# 所以加载根单独用 SD_MODDIR 指定，不被那些用例带偏。
+export SD_MODDIR="${SD_MODDIR:-/opt/qc}"
+
 # 仿真环境没开 SELinux，ls -Z 只返回 "?"。给一个固定上下文，模拟真机
 # /vendor/etc 下配置文件的标签，否则 chcon 兜底路径永远走失败分支。
 export SD_CTX_OVERRIDE="u:object_r:vendor_configs_file:s0"
@@ -2883,6 +2888,60 @@ SD_MODDIR=/opt/qc SD_DATA="$_d58" sh /opt/qc/post-fs-data.sh >/dev/null 2>&1
 has "$(cat "$_d58/log.txt" 2>/dev/null)" "清理上一轮残留的守护锁" "残留锁清理进日志"
 pkill -f 'service[.]sh --daemon' 2>/dev/null
 sleep 1
+
+# ---------------------------------------------------------------- T59 3.2.0 重构的四个契约
+# 钉住这次重构改掉的东西：日志不再静默丢弃、开机判据用单调时钟、
+# 覆盖层判活分三态、reset 留开机标记。任何一项回退，用户侧就会重现
+# 「日志里什么都没有」「重启后不重建」「只挂上一半却显示已生效」。
+_up59=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+case "$_up59" in ''|*[!0-9]*) _up59=100 ;; esac
+_v59=/data/adb/qc-t59
+
+# (1) 级别未就绪时写的行，读完 state 后必须补写进去
+rm -rf "$_v59"; mkdir -p "$_v59/a"
+SD_DATA="$_v59/a" SD_MODDIR=/opt/qc sh -c '
+    . /opt/qc/lib/qc.sh
+    sd_info boot "load 之前的一条"
+    sd_warn boot "load 之前的另一条"
+    sd_state_load
+    sd_info boot "load 之后的一条"' >/dev/null 2>&1
+_l59=$(cat "$_v59/a/log.txt" 2>/dev/null)
+has "$_l59" "load 之前的一条" "日志：load 之前的 I 级不丢"
+has "$_l59" "load 之前的另一条" "日志：load 之前的 W 级不丢"
+has "$_l59" "load 之后的一条" "日志：load 之后正常写"
+
+# (2) 级别 0 时 I 级仍然不能落盘（补写不能把关闭状态也写出来）
+rm -rf "$_v59/b"; mkdir -p "$_v59/b"
+printf 'log_level=0\n' >"$_v59/b/state.conf"
+SD_DATA="$_v59/b" SD_MODDIR=/opt/qc sh -c '
+    . /opt/qc/lib/qc.sh
+    sd_info boot "级别 0 的 I 级"
+    sd_state_load
+    sd_info boot "load 之后的 I 级"' >/dev/null 2>&1
+hasnt "$(cat "$_v59/b/log.txt" 2>/dev/null)" "级别 0 的 I 级" "日志：级别 0 不补写 I 级"
+
+# (3) 开机判据：up 大于当前 uptime = 重启过，不能当本次
+printf 'up=%s at=1 pid=1 step=done\n' "$((_up59 + 5000))" >"$_v59/c.bad"
+SD_DATA="$_v59" SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; qc_phase_fresh "$SD_DATA/c.bad"' \
+    && ng "判据：uptime 倒退仍当本次开机" || ok "判据：uptime 倒退判为上次开机"
+printf 'up=%s at=1 pid=1 step=done\n' "$((_up59 - 5))" >"$_v59/c.ok"
+SD_DATA="$_v59" SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; qc_phase_fresh "$SD_DATA/c.ok"' \
+    && ok "判据：本次开机认得出" || ng "判据：本次开机被当成上次"
+
+# (4) 覆盖层三态：3 条只挂上 2 条要报 partial，不能报 yes
+rm -rf "$_v59/d"; mkdir -p "$_v59/d"
+printf '/proc\n/dev\n/qc-no-such-target\n' >"$_v59/d/mounts.list"
+eq "$(SD_DATA="$_v59/d" SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; qc_overrides_state')" \
+   "partial" "判活：部分挂载报 partial"
+printf '/proc\n/dev\n' >"$_v59/d/mounts.list"
+eq "$(SD_DATA="$_v59/d" SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; qc_overrides_state')" \
+   "yes" "判活：全部挂上报 yes"
+
+# (5) sd_log_reset 要留下本次开机标记
+rm -rf "$_v59/e"; mkdir -p "$_v59/e"
+SD_DATA="$_v59/e" SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_log_reset' >/dev/null 2>&1
+[ -f "$_v59/e/log.up" ] && ok "日志：reset 写下 log.up 标记" || ng "日志：没有 log.up 标记"
+rm -rf "$_v59"
 
 
 if [ "$FAIL" -gt 0 ]; then

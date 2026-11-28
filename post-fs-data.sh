@@ -12,8 +12,14 @@
 _QC_DATA="${SD_DATA:-/data/adb/quickcharge}"
 qc_phase() {
     mkdir -p "$_QC_DATA" 2>/dev/null
-    printf 'at=%s pid=%s step=%s moddir=%s cwd=%s argv0=%s\n' \
-        "$(date +%s 2>/dev/null)" "$$" "$1" "${MODDIR:-?}" \
+    # up= 用单调时钟记「写这一笔时开机多久」，service.sh 拿它判本次开机。
+    # 不用 at=（墙钟）：NTP 一跳就会把「本次」判成「上次」。
+    _qc_u=""
+    read -r _qc_u _ 2>/dev/null </proc/uptime || _qc_u=""
+    _qc_u=${_qc_u%% *}; _qc_u=${_qc_u%%.*}
+    case "$_qc_u" in ''|*[!0-9]*) _qc_u=0 ;; esac
+    printf 'up=%s at=%s pid=%s step=%s moddir=%s cwd=%s argv0=%s\n' \
+        "$_qc_u" "$(date +%s 2>/dev/null)" "$$" "$1" "${MODDIR:-?}" \
         "$(pwd 2>/dev/null)" "$0" >"$_QC_DATA/phase.pfs" 2>/dev/null
     return 0
 }

@@ -28,8 +28,9 @@ if [ "${SD_PHASE:-}" = "post-fs-data" ]; then
     exit 0
 fi
 
-_boot_ts=$(sd_boot_ts)
-if [ -f "$SD_LOG" ] && [ "$(sd_file_mtime "$SD_LOG")" -lt "$_boot_ts" ]; then
+# 日志是不是上一轮留下的：有 log.up 按单调时钟判，没有就退回 mtime。
+# 不能只看 mtime：墙钟被 NTP 拉一下，mtime 比较会误删本次开机的日志。
+if [ -f "$SD_LOG" ] && ! sd_log_is_current; then
     sd_log_reset
     sd_info boot "清理上一轮日志（post-fs-data 未执行）"
 fi
@@ -293,9 +294,7 @@ sd_session boot "service 阶段启动"
 # `done` 与 `safe-mode` 是 post-fs-data 给出的结论，不算故障：安全模式是它
 # 主动跳过挂载，这里再「补建」一次就把它的决定推翻了。
 _pfs_state=ok
-if [ ! -f "$SD_DATA/phase.pfs" ]; then
-    _pfs_state=missing
-elif [ "$(sd_file_mtime "$SD_DATA/phase.pfs")" -lt "$_boot_ts" ]; then
+if ! qc_phase_fresh "$SD_DATA/phase.pfs"; then
     _pfs_state=missing
 else
     _pfs_step=$(sed -n 's/^.*step=\([A-Za-z-]*\).*$/\1/p' "$SD_DATA/phase.pfs" 2>/dev/null | head -1)
@@ -330,9 +329,16 @@ if [ "$_pfs_state" = stuck ] && [ "$(sd_state_get overrides_off 0)" != 1 ]; then
     [ $((_t1 - _t0)) -gt 20 ] && sd_warn boot "service 阶段重建耗时 $((_t1 - _t0))s，可能撞上开机超时"
 elif [ "$_pfs_state" = safe ]; then
     sd_info boot "安全模式：覆盖层维持上次状态，不重建、不补挂"
-elif ! sd_mounts_alive; then
-    sd_info boot "覆盖层未生效，补充挂载"
-    sd_mount_overrides
+else
+    # 用三态而不是 alive/no：部分挂载（8 个只挂上 3 个）以前算「已生效」，
+    # 补挂就永远不会发生。sd_mount_overrides 是幂等的，重跑只会补缺。
+    case "$(qc_overrides_state)" in
+        yes) ;;
+        partial) sd_warn boot "覆盖层只挂上一部分（${_qc_mnt_hit}/${_qc_mnt_all}，$_qc_mnt_why），补挂"
+                 sd_mount_overrides ;;
+        *)       sd_info boot "覆盖层未生效（$_qc_mnt_why），补充挂载"
+                 sd_mount_overrides ;;
+    esac
 fi
 
 sd_apply_state

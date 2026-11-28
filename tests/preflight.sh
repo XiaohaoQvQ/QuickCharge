@@ -2,23 +2,29 @@
 # 发版前机械检查。3.1.4-c 那次空发布就是因为「同步两仓」靠人记 —— 这里把它变成命令。
 #
 # 用法：
-#   sh tests/preflight.sh                          主仓 = 本脚本上一级，C 仓 = 同级 qc-c-repo
-#   sh tests/preflight.sh <主仓> <C 仓>             换机器 / CI 必须传两个参数
-#   sh tests/preflight.sh --full <主仓> <C 仓>      额外编 x86 跑 c-test，核对用例数（约 1 分钟）
+#   sh tests/preflight.sh                          单仓自检（主仓 = 本脚本上一级）
+#   sh tests/preflight.sh --self                   同上，显式声明
+#   sh tests/preflight.sh <主仓> <C 仓>             两仓跨检（C 仓必须先迁移到同一结构）
+#   sh tests/preflight.sh --full <主仓> [C 仓]      额外编 x86 跑 c-test，核对用例数
 #
-# 主仓目录名可以随便叫，「../qc-c-repo」只是本机默认值；找不到会直接报路径问题，
-# 不会退化成一片 FAIL 让人以为代码坏了。
+# 3.2.0 起 lib/ 按域拆成多个文件，与仍是单文件的 C 仓不再逐字节可比。
+# 跨仓校验只在「对端也分层」时执行；否则跳过并明确提示，不让无关项卡住发版。
 set -u
 FULL=0
+SELF=0
 if [ "${1:-}" = "--full" ]; then FULL=1; shift; fi
+if [ "${1:-}" = "--self" ]; then SELF=1; shift; fi
 A=${1:-$(cd "$(dirname "$0")/.." && pwd)}
-B=${2:-$A/../qc-c-repo}
+B=${2:-}
 fail=0
 ok()   { printf '  ok   %s\n' "$1"; }
 bad()  { printf '  FAIL %s\n' "$1"; fail=$((fail + 1)); }
 same() { if cmp -s "$1" "$2"; then ok "$3"; else bad "$3"; fi; }
 has()  { if grep -aqF -- "$2" "$1" 2>/dev/null; then ok "$3"; else bad "$3"; fi; }
 nhas() { if grep -aqF -- "$2" "$1" 2>/dev/null; then bad "$3"; else ok "$3"; fi; }
+# lib/ 已分层，守卫按目录递归查，不再绑死单个文件
+hasq()  { if grep -raqF -- "$2" "$1" 2>/dev/null; then ok "$3"; else bad "$3"; fi; }
+nhasq() { if grep -raqF -- "$2" "$1" 2>/dev/null; then bad "$3"; else ok "$3"; fi; }
 num()  { wc -l <"$1" 2>/dev/null | tr -d ' '; }
 # 文档里的行/项用「文件里含某段文字的那一行」定位，再取行内数字。
 # 注意不能用 sed 的 s/.*lib/qc.sh.*/ 这种：pattern 里的斜杠就是分隔符。
@@ -30,10 +36,12 @@ nl()    { printf '%s' "$1" | grep -o '[0-9][0-9]*' | tail -1; }
 # 描述, 文档写的值, 实际值
 chknd() { if [ -n "$2" ] && [ "$2" = "$3" ]; then ok "$1 = $3"; else bad "$1：文档写 ${2:-（没写）}，实际 $3"; fi; }
 
-if [ ! -d "$B" ]; then
-    echo "找不到 C 仓：$B"
-    echo "换机器时请显式传路径：sh tests/preflight.sh <主仓> <C 仓>"
-    exit 1
+# 跨仓模式：显式给了 B 且目录存在，且对端已分层（聚合入口里 source core/）
+CROSS=0
+if [ "$SELF" != 1 ] && [ -n "$B" ] && [ -d "$B" ]; then
+    if grep -q 'core/util.sh' "$B/lib/qc.sh" 2>/dev/null; then
+        CROSS=1
+    fi
 fi
 
 # 在 C 仓里跑这份脚本的人，很容易写成「A=C 仓、B=主仓」。那样 [1] 全绿，[2] 却报
@@ -45,6 +53,7 @@ if [ "$(sed -n 's/^channel=//p' "$A/module.prop" 2>/dev/null | head -1)" = c ] &
     echo "（参数顺序反了：按 module.prop 的 channel 换成 主仓=$A / C 仓=$B）"
 fi
 
+if [ "$CROSS" = 1 ]; then
 echo "[1] 两仓源码与测试一致"
 same "$A/src/qcmon.c"      "$B/src/qcmon.c"      "src/qcmon.c 逐字节一致"
 same "$A/tests/c-test.sh"  "$B/tests/c-test.sh"  "tests/c-test.sh 逐字节一致"
@@ -60,7 +69,12 @@ same "$A/webroot/index.html" "$B/webroot/index.html" "webroot/index.html 逐字�
 for f in lib/qc.sh customize.sh post-fs-data.sh action.sh service.sh; do
     same "$A/$f" "$B/$f" "$f 一致"
 done
+else
+echo "[1] 跨仓比对跳过：单仓自检，或 C 仓尚未迁移到分层结构"
+echo "    3.2.0 起 lib/ 按域拆分，C 仓跟进后这里会恢复逐字节硬校验"
+fi
 
+if [ "$CROSS" = 1 ]; then
 echo "[2] C 版二进制带得动本轮修复"
 BIN=$B/bin/qcmon
 if [ -f "$BIN" ]; then
@@ -77,6 +91,11 @@ if [ -f "$BIN" ]; then
 else
     bad "$BIN 不存在"
 fi
+else
+echo "[2] 跳过 C 仓二进制检查（单仓模式；C 仓独立跑自己的 preflight）"
+fi
+# 主仓自带的源码守卫，与 C 仓在不在无关
+has  "$A/src/qcmon.c" "拒绝启动" "qcmon 校验 channel"
 # 两处在说「有温度兜底」的假话。WebUI 那行是 HTML 初值：JS 正常加载会覆盖，
 # 首帧仍会闪，JS 抛错就一直显示；日志里那句「电池偏热」对应的分支也只活在
 # 3.1.3 之前的温度闸里。都在 bin 之外，preflight 原来拦不到。
@@ -94,33 +113,32 @@ nhas "$A/src/qcmon.c" "g_curr_orig" "src/qcmon.c 无 curr.orig 死代码"
 for f in src/qcmon.c lib/qc.sh; do
     nhas "$A/$f" "降流解除反噬" "$f 无反噬复查（只读后没有写回）"
 done
-nhas "$A/lib/qc.sh" "降流解除：cool_down" "lib/qc.sh 不写 cool_down"
-has  "$A/lib/qc.sh" "只记录不写入" "lib/qc.sh 记录文案在"
-nhas "$A/lib/qc.sh" "_sd_cool_prev" "lib/qc.sh 无写回用的档位备份"
+nhasq "$A/lib" "降流解除：cool_down" "lib/qc.sh 不写 cool_down"
+hasq "$A/lib" "只记录不写入" "lib/qc.sh 记录文案在"
+nhasq "$A/lib" "_sd_cool_prev" "lib/qc.sh 无写回用的档位备份"
 nhas "$A/service.sh" '_ws=3' "service.sh 充电时不再压到 3s"
 
 # 3.1.14：日志里得有功率。快照锁在 2 级时，用户默认（1 级）的日志 [chg] 为 0，
 # PLG110 那份「10–20W」的反馈就是这么变成无解的 —— 缺的正好是功率本身。
-has  "$A/lib/qc.sh" "_sd_chg_emit" "lib/qc.sh 快照在 1 级降级为 I"
-nhas "$A/lib/qc.sh" '${_sd_lv:-0}" -ge 2 ] || return 0' "快照门禁不再卡在 2 级"
+hasq "$A/lib" "_sd_chg_emit" "lib/qc.sh 快照在 1 级降级为 I"
+nhasq "$A/lib" '${_sd_lv:-0}" -ge 2 ] || return 0' "快照门禁不再卡在 2 级"
 # 双守护：qcmon 自己校验通道，shell 侧收掉并存的 qcmon，两边都要在
-has  "$A/src/qcmon.c" "拒绝启动" "qcmon 校验 channel"
-has  "$BIN" "不是 c" "bin 带通道闸"
+[ "$CROSS" = 1 ] && has "$BIN" "不是 c" "bin 带通道闸"
 has  "$A/service.sh" "收掉并存的 qcmon" "service.sh 清理残留 qcmon"
 # 一个变量两个主人：service.sh 当开关、sd_scr_tick 当状态，每轮互相踩出两条日志
 has  "$A/service.sh" "_sd_scr_once" "service.sh 的开关独立成 _sd_scr_once"
 nhas "$A/service.sh" '_sd_scr_log=1' "service.sh 不再改 sd_scr_tick 的状态"
 # 混合安装（module.prop 新、脚本旧）只能靠节拍反推，指纹要写进启动日志
-has  "$A/lib/qc.sh" "sd_file_sum" "有代码指纹函数"
+hasq "$A/lib" "sd_file_sum" "有代码指纹函数"
 has  "$A/service.sh" 'sd_info daemon "代码指纹 $(sd_code_ver)"' "启动日志记代码指纹"
 # 只给数量时「fcc 节点=none」追不下去，命中清单与 cool_down 可读性都要记
-has  "$A/lib/qc.sh" "charge nodes 命中" "env 记命中的电流节点"
-has  "$A/lib/qc.sh" "cool_down 节点存在但读不到" "cool_down 读不到不静默"
+hasq "$A/lib" "charge nodes 命中" "env 记命中的电流节点"
+hasq "$A/lib" "cool_down 节点存在但读不到" "cool_down 读不到不静默"
 
 # 3.1.15：覆盖文件不会重启已经起来的进程。3.1.14 的 PLG110 现场就是「装的 3.1.14、
 # 跑的是 3.1.11」——三版修复一条没生效，用户却在评价旧行为。
-has  "$A/lib/qc.sh" "sd_daemon_ver_chk" "有「守护跑的是不是这份代码」的校验"
-has  "$A/lib/qc.sh" "跑的不是磁盘上这份代码" "换人时写明理由"
+hasq "$A/lib" "sd_daemon_ver_chk" "有「守护跑的是不是这份代码」的校验"
+hasq "$A/lib" "跑的不是磁盘上这份代码" "换人时写明理由"
 has  "$A/service.sh" 'daemon.ver' "守护启动时把指纹落盘"
 # 位置也是内容：校验必须在「守护已在运行，跳过」之前，否则那句话会继续挡住换人
 _l_vchk=$(grep -n 'sd_daemon_ver_chk' "$A/service.sh" 2>/dev/null | head -1 | cut -d: -f1)
@@ -131,19 +149,19 @@ else
     bad "版本校验位置不对：$_l_vchk vs 跳过行 $_l_skip"
 fi
 # 平台从 other 认对之后候选表要重算，否则 8 次重试被第一次的缓存让成空转
-has  "$A/lib/qc.sh" "_sd_curr_plat" "候选表记住建表时的平台"
+hasq "$A/lib" "_sd_curr_plat" "候选表记住建表时的平台"
 has  "$A/src/qcmon.c" "g_curr_plat" "C 侧同样重算"
 # 3.1.0 就删掉的函数，3.1.14 还在 sd_dump_env 里被调用：每次 dump 一条
 # 「command not found」到 stderr，久了会把「stderr 有杂音」当成正常
-nhas "$A/lib/qc.sh" "sd_limit_for_type_v" "无已删函数的孤儿调用"
+nhasq "$A/lib" "sd_limit_for_type_v" "无已删函数的孤儿调用"
 # 3.1.13 起 cool_tick 只读，注释里不该再讲「2.5A 闸」「去写 0」
 nhas "$A/src/qcmon.c" "2.5A 闸" "注释不再引用已删的降流闸"
 nhas "$A/src/qcmon.c" "g_tick_n % 20 == 1" "C 侧重探周期与 shell 对齐（每 4 轮）"
 # 3.1.16：覆盖层「内容相同 = 还挂着」这条误判必须彻底消失，否则改写无效会被
 # 伪装成一切正常（一加 15 现场就是这么被藏的）。
-has  "$A/lib/qc.sh" "sd_mounts_root_ok" "挂载存活改按 mountinfo root 判断"
-nhas "$A/lib/qc.sh" "sd_mounts_content_ok" "不再用「内容相同」当挂载证据"
-has  "$A/lib/qc.sh" "改写无差异" "改写产物与原件相同会告警"
+hasq "$A/lib" "sd_mounts_root_ok" "挂载存活改按 mountinfo root 判断"
+nhasq "$A/lib" "sd_mounts_content_ok" "不再用「内容相同」当挂载证据"
+hasq "$A/lib" "改写无差异" "改写产物与原件相同会告警"
 # post-fs-data 失败可观测：脚本逐阶段落痕，service 段读它并强制补建
 has  "$A/post-fs-data.sh" "qc_phase done" "post-fs-data 阶段落痕到 done"
 has  "$A/service.sh" "phase.pfs" "service 读 post-fs-data 痕迹"
@@ -156,7 +174,7 @@ if [ -n "$_l_lock" ] && [ -n "$_l_load" ] && [ "$_l_lock" -gt "$_l_load" ]; then
 else
     bad "清理残留锁写在 state 加载之前，日志里看不到（${_l_lock:-?} vs ${_l_load:-?}）"
 fi
-has  "$A/lib/qc.sh" "平台已认对" "候选表重建留痕"
+hasq "$A/lib" "平台已认对" "候选表重建留痕"
 
 echo "[3] 版本号自洽"
 v_prop=$(sed -n 's/^version=//p' "$A/module.prop" | head -1)
@@ -201,12 +219,15 @@ v_doc=$(grep -o '"version": *"[^"]*"' "$A/README.md" | sed 's/.*"\([^"]*\)"$/\1/
 
 # 文档里的行数已经在三轮里漂移过两次，靠人眼看不住，直接和 wc -l 比。
 echo "[4] 文档数字与代码一致"
-chknd "README lib/qc.sh 行数" \
-    "$(nl "$(line 'lib/qc.sh' "$A/README.md" | grep '核心库' | head -1)")" "$(num "$A/lib/qc.sh")"
+# lib/ 已分层，核对的是全目录总行数（聚合入口 + 各域模块）
+libtotal=$(cat "$A"/lib/qc.sh "$A"/lib/*/*.sh 2>/dev/null | wc -l | tr -d ' ')
+chknd "README lib/ 总行数" \
+    "$(nl "$(line 'lib/' "$A/README.md" | grep '合计' | head -1)")" "$libtotal"
 chknd "README src/qcmon.c 行数" \
     "$(nl "$(line 'src/qcmon.c' "$A/README.md" | grep 'C 版源码' | head -1)")" "$(num "$A/src/qcmon.c")"
 chknd "README action.sh 行数" \
     "$(nl "$(line 'action.sh' "$A/README.md" | grep '控制入口' | head -1)")" "$(num "$A/action.sh")"
+if [ "$CROSS" = 1 ]; then
 chknd "C README src/qcmon.c 行数" \
     "$(nl "$(line 'src/qcmon.c' "$B/README.md" | grep 'C 守护源码' | head -1)")" "$(num "$B/src/qcmon.c")"
 c_cases=$(n1 "$(line 'tests/c-test.sh' "$B/README.md" | grep '项冒烟测试' | head -1)")
@@ -220,6 +241,7 @@ chknd "C README c-test 行数" \
     "$(nl "$(line 'tests/c-test.sh' "$B/README.md" | grep '项冒烟测试' | head -1)")" "$(num "$B/tests/c-test.sh")"
 chknd "C README lib/qc.sh 行数" \
     "$(nl "$(line 'shell 版核心库' "$B/README.md" | head -1)")" "$(num "$B/lib/qc.sh")"
+fi
 # 参数表里的默认值和代码里的 SD_DEFAULTS 对不上，比版本号写错更容易坑人：
 # 用户会以为自己的 30 是被人改过的，调参也从错的那头开始试。
 d_doc=$(grep -F '| `shell_temp` |' "$A/README.md" | grep -o '`[0-9][0-9]*`' | head -1 | tr -d '`')
@@ -234,8 +256,12 @@ if [ "$FULL" = 1 ]; then
     if sh "$A/build-qcmon.sh" x86 "$X86" >/dev/null 2>&1; then
         got=$(sh "$A/tests/c-test.sh" "$X86" 2>/dev/null | sed -n 's/^结果：通过 \([0-9][0-9]*\).*/\1/p')
         rm -f "$X86"
-        want=$(n1 "$(line '共 **' "$B/README.md" | head -1)")
-        chknd "c-test 用例数（C README）" "$want" "$got"
+        if [ "$CROSS" = 1 ]; then
+            want=$(n1 "$(line '共 **' "$B/README.md" | head -1)")
+            chknd "c-test 用例数（C README）" "$want" "$got"
+        else
+            printf '  ok   c-test 实跑通过 %s 项（单仓模式，不核对 C README）\n' "$got"
+        fi
         # 单测总数不写死：实跑五个脚本求和，再和 RELEASE 里那行比。
         # 3.1.6 漏了 zone-rank 写成 91、3.1.8 删熔断后从 97 变 92，
         # 都是人肉维护数字出的错 —— 这里改成算出来的。
@@ -244,7 +270,7 @@ if [ "$FULL" = 1 ]; then
             n=$(sh "$A/tests/$t.sh" 2>/dev/null | sed -n 's/.*通过 \([0-9][0-9]*\)，失败.*/\1/p')
             ut=$((ut + ${n:-0}))
         done
-        for r in "$A/RELEASE.md" "$B/RELEASE.md"; do
+        for r in "$A/RELEASE.md"; do
             got_n=$(n1 "$(line '单元' "$r" | head -1)")
             chknd "${r##*/} 单测总数" "$got_n" "$ut"
         done
