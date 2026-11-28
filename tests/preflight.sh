@@ -147,6 +147,15 @@ has  "$A/lib/qc.sh" "改写无差异" "改写产物与原件相同会告警"
 # post-fs-data 失败可观测：脚本逐阶段落痕，service 段读它并强制补建
 has  "$A/post-fs-data.sh" "qc_phase done" "post-fs-data 阶段落痕到 done"
 has  "$A/service.sh" "phase.pfs" "service 读 post-fs-data 痕迹"
+has  "$A/service.sh" "safe-mode" "service 不把安全模式当失败重建"
+# sd_info 受 _sd_lv 控制，load 之前是 0，I 级落不了盘。清理锁这条必须在 load 之后。
+_l_lock=$(n1 "$(grep -n '清理上一轮残留的守护锁' "$A/post-fs-data.sh" | head -1)")
+_l_load=$(n1 "$(grep -n '^sd_state_load' "$A/post-fs-data.sh" | head -1)")
+if [ -n "$_l_lock" ] && [ -n "$_l_load" ] && [ "$_l_lock" -gt "$_l_load" ]; then
+    ok "清理残留锁在 state 加载之后（第 ${_l_lock} 行 > ${_l_load} 行）"
+else
+    bad "清理残留锁写在 state 加载之前，日志里看不到（${_l_lock:-?} vs ${_l_load:-?}）"
+fi
 has  "$A/lib/qc.sh" "平台已认对" "候选表重建留痕"
 
 echo "[3] 版本号自洽"

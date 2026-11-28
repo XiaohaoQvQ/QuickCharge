@@ -46,14 +46,16 @@ export SD_PHASE=post-fs-data
 qc_phase boot
 sd_log_reset
 rm -f "$SD_RUN/hb" "$SD_RUN/sensor" 2>/dev/null
-if [ -d "$SD_RUN/daemon.lock" ] || [ -f "$SD_RUN/daemon.pid" ]; then
-    sd_stale_clean && echo "QC: 清理上一轮残留的守护锁(旧 pid=${_sd_stale_pid:-?})" >&2
-fi
+
+sd_state_load
+
+# 清理上一轮的残留锁。位置有讲究：sd_info 受 _sd_lv 控制，而 _sd_lv 要等
+# sd_state_load 之后才是 1，load 之前是 0，I 级一条都写不出去 —— 放前面就是
+# 「锁清了、日志里没有」。以前这里还写了两遍（先 echo 到 stderr，再 sd_info），
+# 第一遍就把锁删了，第二遍的条件永远不成立，于是这条在日志里从来没出现过。
 if [ -d "$SD_RUN/daemon.lock" ] || [ -f "$SD_RUN/daemon.pid" ]; then
     sd_stale_clean && sd_info boot "清理上一轮残留的守护锁(旧 pid=${_sd_stale_pid:-?})"
 fi
-
-sd_state_load
 # 3.0.8 删掉了 horae 开关（它只管性能/亮度，与充电无关）。老用户若把它停在 0，
 # 这里恢复系统默认并把状态行清掉，否则入口没了，horae 会一直停着。
 if [ -f "$SD_STATE" ] && grep -q '^horae=' "$SD_STATE" 2>/dev/null; then
@@ -77,6 +79,9 @@ printf '%s\n' "$cnt" 2>/dev/null >"$SD_DATA/boot.count"
 
 if [ "$cnt" -gt 3 ]; then
     : >"$SD_MOUNTS" 2>/dev/null
+    # step=safe-mode 是给 service.sh 看的：它认得这个值，不会当成「没跑完」去
+    # 重建覆盖层（那等于把这里刚做的决定当场推翻）。计数由 service.sh 在
+    # boot_completed 之后清零，所以只要它还能正常起来，下一轮就回到正常流程。
     qc_phase safe-mode
     echo "QC: 连续 $cnt 次开机未完成，已跳过挂载（安全模式）" >&2
     exit 0

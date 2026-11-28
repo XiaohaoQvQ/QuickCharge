@@ -2834,7 +2834,57 @@ printf 'log_level=2\n' >/tmp/qc57/state.conf
 SD_DATA=/tmp/qc57 SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_dump_env' >/dev/null 2>&1
 has "$(cat /tmp/qc57/log.txt 2>/dev/null)" "overrides=" "env 输出覆盖层状态（overrides/mounts/alive）"
 
-# 失败清单放在最后统一列一遍：滚动日志里翻不到的那几条，这里能一次看全
+# ---------------------------------------------------------------- T58 post-fs-data 判活三分支
+# 3.1.16 的卖点是「post-fs-data 没跑完要看得见、要兜住」，但这条路径当时只有
+# preflight 的字符串检查，没有一条用例真把 phase.pfs 摆成各阶段跑一遍。于是
+# safe-mode 被 service 当成 stuck 重建 —— 安全模式刚跳过挂载，又被原样挂回去。
+_v58=$(mktemp -d)
+mkdir -p /vendor/etc 2>/dev/null
+printf '<Thermal>\n\t<Enable>1</Enable>\n</Thermal>\n' >/vendor/etc/sys_thermal_config.xml
+p58() {  # $1=SD_DATA 目录  $2=phase.pfs 内容
+    mkdir -p "$1/run"
+    printf '%s\n' "$2" >"$1/phase.pfs"
+}
+_ts58=$(date +%s)
+
+# done：什么也不该发生
+rm -rf /opt/qc/files
+p58 "$_v58/a" "at=$_ts58 pid=1 step=done moddir=/opt/qc cwd=/ argv0=post-fs-data.sh"
+SD_DATA="$_v58/a" SD_MODDIR=/opt/qc sh /opt/qc/service.sh >/dev/null 2>&1
+_a58=$(cat "$_v58/a/log.txt" 2>/dev/null)
+hasnt "$_a58" "post-fs-data 未完成" "phase=done：不报未完成"
+hasnt "$_a58" "走重建" "phase=done：不触发兜底重建"
+
+# build：告警要写明停在哪一步，并且真的把覆盖层重建出来
+rm -rf /opt/qc/files
+p58 "$_v58/b" "at=$_ts58 pid=1 step=build moddir=/opt/qc cwd=/ argv0=post-fs-data.sh"
+SD_DATA="$_v58/b" SD_MODDIR=/opt/qc sh /opt/qc/service.sh >/dev/null 2>&1
+_b58=$(cat "$_v58/b/log.txt" 2>/dev/null)
+has "$_b58" "post-fs-data 未完成（停在 build）" "phase=build：告警写明停在哪一步"
+has "$_b58" "走重建 + 补挂兜底" "phase=build：走重建兜底"
+[ -n "$(ls -A /opt/qc/files 2>/dev/null)" ] && ok "phase=build：覆盖层确实重建出文件" || ng "phase=build：覆盖层仍为空"
+
+# safe-mode：这是 post-fs-data 的结论，不是故障，不能被「兜底」推翻
+rm -rf /opt/qc/files
+p58 "$_v58/c" "at=$_ts58 pid=1 step=safe-mode moddir=/opt/qc cwd=/ argv0=post-fs-data.sh"
+SD_DATA="$_v58/c" SD_MODDIR=/opt/qc sh /opt/qc/service.sh >/dev/null 2>&1
+_c58=$(cat "$_v58/c/log.txt" 2>/dev/null)
+has "$_c58" "按安全模式跳过挂载" "phase=safe-mode：识别为安全模式"
+hasnt "$_c58" "走重建" "phase=safe-mode：不重建"
+[ -z "$(ls -A /opt/qc/files 2>/dev/null)" ] && ok "phase=safe-mode：覆盖层保持不生成" || ng "phase=safe-mode：覆盖层被重建了"
+
+# 残留锁只清一次、且要进日志（以前第一次 echo 到 stderr 就把锁删了，
+# 第二次 sd_info 的条件永远不成立，日志里看不到这一笔）
+_d58="$_v58/d"
+mkdir -p "$_d58/run/daemon.lock"
+printf '999999\n' >"$_d58/run/daemon.pid"
+printf 'overrides_off=1\n' >"$_d58/state.conf"
+SD_MODDIR=/opt/qc SD_DATA="$_d58" sh /opt/qc/post-fs-data.sh >/dev/null 2>&1
+has "$(cat "$_d58/log.txt" 2>/dev/null)" "清理上一轮残留的守护锁" "残留锁清理进日志"
+pkill -f 'service[.]sh --daemon' 2>/dev/null
+sleep 1
+
+
 if [ "$FAIL" -gt 0 ]; then
     printf '\n===== 失败清单 =====\n%s' "$FAILED"
 fi

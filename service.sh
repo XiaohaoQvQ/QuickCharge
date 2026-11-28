@@ -290,6 +290,8 @@ sd_session boot "service 阶段启动"
 # 顶部 qc_phase）。文件缺失或早于本次开机 = 没跑；停在非 done = 中途失败/被杀。
 # 两种都会让覆盖层是空的，而且 sd_mounts_alive 会把「内容相同」误判成「还挂着」，
 # 光问它得不到答案 —— 所以这里单独定性，后面按它强制补建。
+# `done` 与 `safe-mode` 是 post-fs-data 给出的结论，不算故障：安全模式是它
+# 主动跳过挂载，这里再「补建」一次就把它的决定推翻了。
 _pfs_state=ok
 if [ ! -f "$SD_DATA/phase.pfs" ]; then
     _pfs_state=missing
@@ -299,11 +301,13 @@ else
     _pfs_step=$(sed -n 's/^.*step=\([A-Za-z-]*\).*$/\1/p' "$SD_DATA/phase.pfs" 2>/dev/null | head -1)
     case "$_pfs_step" in
         done) ;;
+        safe-mode) _pfs_state=safe
+                   sd_warn boot "post-fs-data 按安全模式跳过挂载（连续开机未完成），本次不重建" ;;
         *) _pfs_state=stuck
            sd_warn boot "post-fs-data 未完成（停在 ${_pfs_step:-?}）：$(cat "$SD_DATA/phase.pfs" 2>/dev/null)" ;;
     esac
 fi
-[ "$_pfs_state" = ok ] || \
+[ "$_pfs_state" = ok ] || [ "$_pfs_state" = safe ] || \
     sd_warn boot "post-fs-data 本次开机未正常执行（$_pfs_state）：配置改写可能未落地"
 
 sd_dump_env
@@ -313,16 +317,19 @@ sd_wait_boot 60 || { sd_warn boot "boot_completed 未在 60s 内就绪，退出"
 
 printf '0\n' 2>/dev/null >"$SD_DATA/boot.count"
 
-if [ "$_pfs_state" != ok ] && [ "$(sd_state_get overrides_off 0)" != 1 ]; then
+if [ "$_pfs_state" = stuck ] && [ "$(sd_state_get overrides_off 0)" != 1 ]; then
     # post-fs-data 没跑完，覆盖层要么是空的、要么是上一版留下的。重建比补挂可靠，
     # 也不依赖 sd_mounts_alive 的判断（它现在不再拿「内容相同」当证据）。
-    sd_info boot "post-fs-data 未完成，重建覆盖层并补挂"
+    # 注意 sd_build_overrides 指纹相同会短路，日志里跟着一条「配置已是最新」是正常现象。
+    sd_info boot "post-fs-data 未完成，走重建 + 补挂兜底"
     sd_umount_overrides
     _t0=$(date +%s)
     sd_build_overrides
     sd_mount_overrides
     _t1=$(date +%s)
     [ $((_t1 - _t0)) -gt 20 ] && sd_warn boot "service 阶段重建耗时 $((_t1 - _t0))s，可能撞上开机超时"
+elif [ "$_pfs_state" = safe ]; then
+    sd_info boot "安全模式：覆盖层维持上次状态，不重建、不补挂"
 elif ! sd_mounts_alive; then
     sd_info boot "覆盖层未生效，补充挂载"
     sd_mount_overrides
