@@ -260,6 +260,22 @@ sd_dump_env() {
     fi
     _sd_emit I env "state=$(sd_state_dump)"
 
+    # 覆盖层状态：一加 15 那次「完全不生效」只能靠「有没有那句未生效」反推，
+    # 因为 env 里没有任何可对照的数字。这里直接给四个：产物数、挂载条数、
+    # 注入方式、存活判定 —— 一行就能定性，不用推理。
+    local _ovn _ovm _ovnm _ovalive
+    _ovn=$(find "$SD_OVERRIDES" -type f 2>/dev/null | wc -l | tr -d ' ')
+    [ -n "$_ovn" ] 2>/dev/null || _ovn=0
+    _ovm=$(awk -v b="$SD_OVERRIDES/" '
+        { i = 0
+          for (k = 1; k <= NF; k++) if ($k == "-") { i = k; break }
+          if (i > 0 && index($4, b) == 1) n++ }
+        END { print n + 0 }' /proc/self/mountinfo 2>/dev/null)
+    [ -n "$_ovm" ] 2>/dev/null || _ovm=0
+    if sd_nm_active; then _ovnm=nomount; else _ovnm=bind; fi
+    if sd_mounts_alive; then _ovalive=yes; else _ovalive=no; fi
+    _sd_emit I env "overrides=$_ovn mounts=$_ovm nm=$_ovnm alive=$_ovalive"
+
     # 下面三行是「一次定位」的关键：协议、屏幕、FCC 三处判定的原始输入。
     # 没有它们，日志里只能看到结论（公有快充 / scr=0 / 写不进去），看不出为什么。
     local et ert ev ec
@@ -1034,7 +1050,11 @@ sd_plat_resolve() {
     [ -n "$_sd_curr_nodes" ] || return 0
     [ "$_sd_plat" = other ] && return 0
     case "$_sd_curr_plat" in
-        other|"") _sd_curr_nodes=""; _sd_curr_plat="" ;;
+        other|"")
+            _sd_curr_nodes=""; _sd_curr_plat=""
+            # 重建成功不留痕的话，日志里和「压根没重建」长得一模一样，
+            # 现场没法判断这次修复到底跑起来没有。
+            sd_info charge "平台已认对（$_sd_plat ${_sd_plat_why:-}），候选表按新平台重算" ;;
     esac
     return 0
 }
@@ -1044,7 +1064,15 @@ _sd_plat_probe() {
     # 3.1.12 及以前 `[ -n "$_sd_plat" ]` 把 other 也定死，于是 MTK 那 5 个候选
     # 节点永远拿不到 —— 这才是真正的"缓存了坏结果"。试满 8 次还是 other 才认命。
     case "$_sd_plat" in mtk|qcom) return 0 ;; esac
-    [ "${_sd_plat_try:-0}" -ge 8 ] && return 0
+    # 预算按「时间窗」不按「调用次数」：_sd_curr_prepare 一轮可能被调多次
+    # （sd_scr_fcc_node 每轮都调），按次数算 8 次在一个 tick 内就烧完，等于
+    # 没给启动早期留窗口 —— 3.1.15 的 P2 只修了「建表前先 resolve」，这一半没修。
+    local _now
+    _now=$(date +%s 2>/dev/null)
+    case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+    [ -n "${_sd_plat_t0:-}" ] || _sd_plat_t0=$_now
+    [ "$_now" -gt 0 ] && [ $((_now - ${_sd_plat_t0:-0})) -ge 300 ] && return 0
+    [ "${_sd_plat_try:-0}" -ge 400 ] && return 0
     _sd_plat_try=$(( ${_sd_plat_try:-0} + 1 ))
     local bp sm hw hwline
     bp=$(getprop ro.board.platform 2>/dev/null)
@@ -2023,6 +2051,15 @@ sd_transform() {
         empty) [ -f "$tmp" ] || { rm -f "$tmp"; return 1; } ;;
     esac
 
+    # 产物和原件逐字节相同 = 这次什么也没改到（格式不匹配、目标串不存在、
+    # 或这份配置本来就是这个值）。以前照样写进覆盖层，再被挂载存活检查当成
+    # 「内容相同=还挂着」，两处一起把「改写无效」藏成了「一切正常」。
+    if cmp -s "$tmp" "$src"; then
+        rm -f "$tmp"
+        sd_warn override "改写无差异: $src（格式或目标值不匹配）"
+        return 3
+    fi
+
     mv -f "$tmp" "$dst" 2>/dev/null || { rm -f "$tmp"; return 1; }
     return 0
 }
@@ -2101,18 +2138,19 @@ sd_build_overrides() {
             -name 'QEGA_Config.txt' -o \
             -name 'charging_*.txt' \
             \) 2>/dev/null >"$lf"
-        ok=0; skip=0; fail=0
+        ok=0; skip=0; fail=0; same=0
         while IFS= read -r f; do
             rel="${f#/}"
             sd_transform "$f" "$SD_OVERRIDES/$rel"
             case $? in
                 0) ok=$((ok + 1)) ;;
                 2) skip=$((skip + 1)) ;;
+                3) same=$((same + 1)) ;;
                 *) fail=$((fail + 1)) ;;
             esac
         done <"$lf"
-        [ $((ok + skip + fail)) -gt 0 ] &&
-            sd_info override "${base#/}: 改写 $ok · 跳过 $skip · 失败 $fail"
+        [ $((ok + skip + same + fail)) -gt 0 ] &&
+            sd_info override "${base#/}: 改写 $ok · 无差异 $same · 跳过 $skip · 失败 $fail"
     done
     rm -f "$lf" 2>/dev/null
 
@@ -2352,21 +2390,21 @@ sd_mount_overrides() {
     sd_info mount "配置覆盖已挂载，累计 $n/$total 条"
 }
 
-# 挂载可能发生在别的 mount namespace（KSU 的 su 会话常常如此），
-# /proc/mounts 里看不到逐文件 bind。用一个内容比对兜底：
-# 抽样若干条，改写版与系统里的目标文件完全一致，就说明覆盖真实生效。
-sd_mounts_content_ok() {
-    local rel n=0 ok=0 root="${SD_ROOT:-}"
+# 挂载源（mountinfo 的 root 字段）落在覆盖层目录下，才算「覆盖层真的挂上了」。
+# 以前这里比的是「覆盖层文件 vs 系统同名文件内容是否相同」—— 但改写本身没产生
+# 差异时两边本来就相同，于是「没改写成功」被判成「挂载还在」，一路静默到用户
+# 侧；一加 15 那次「完全不生效」就是这么被藏住的。
+sd_mounts_root_ok() {
     [ -d "$SD_OVERRIDES" ] || return 1
-    while IFS= read -r rel; do
-        [ -n "$rel" ] || continue
-        rel="${rel#/}"
-        [ -f "$SD_OVERRIDES/$rel" ] || continue
-        n=$((n + 1))
-        cmp -s "$SD_OVERRIDES/$rel" "$root/$rel" && ok=$((ok + 1))
-        [ "$n" -ge 5 ] && break
-    done <"$SD_MOUNTS"
-    [ "$n" -gt 0 ] && [ "$ok" -eq "$n" ]
+    [ -r /proc/self/mountinfo ] || return 1
+    awk -v b="$SD_OVERRIDES/" '
+        {
+            i = 0
+            for (k = 1; k <= NF; k++) if ($k == "-") { i = k; break }
+            if (i > 0 && index($4, b) == 1) { f = 1; exit }
+        }
+        END { exit (f ? 0 : 1) }
+    ' /proc/self/mountinfo 2>/dev/null
 }
 
 sd_mounts_alive() {
@@ -2380,7 +2418,7 @@ sd_mounts_alive() {
             END { exit (length(hit)>0 ? 0 : 1) }' "$SD_MOUNTS" /proc/mounts 2>/dev/null; then
         return 0
     fi
-    sd_mounts_content_ok
+    sd_mounts_root_ok
 }
 
 # 扫 /proc/self/mountinfo，把挂载源（root 字段）落在本模块目录下的挂载点全卸掉。
@@ -2866,6 +2904,15 @@ _sd_curr_unit() {
 }
 
 _sd_curr_prepare() {
+    # 早退不能挡在 sd_plat_resolve 前面：表建好之后平台才认对的话，MTK 那 5 个
+    # 候选节点就永久缺失。3.1.15 只把 resolve 挪到建表之前，管不到这种情形。
+    # SD_CURR_NODES 是用户显式覆盖，不探测。
+    if [ -z "${SD_CURR_NODES:-}" ]; then
+        case "$_sd_plat" in
+            mtk|qcom) ;;
+            *) sd_plat_resolve ;;
+        esac
+    fi
     [ -n "$_sd_curr_nodes" ] && return 0
     if [ -n "${SD_CURR_NODES:-}" ]; then
         _sd_curr_nodes=$(printf '%s' "$SD_CURR_NODES" | tr ',' ' ')

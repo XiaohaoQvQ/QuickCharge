@@ -2811,16 +2811,28 @@ fi
 # ---------------------------------------------------------------- T56 平台认对后候选表重算
 # _sd_curr_prepare 只填一次，第一次填的时候 plat 若还是 other，MTK 那 5 个候选
 # 就永久缺失 —— 8 次重试看着在，实际被缓存让成了空转。
+# 生产路径就是「连续两次 _sd_curr_prepare」，中间没有任何显式 sd_plat_resolve。
+# 3.1.15 的版本写的是 `sd_plat_resolve; _sd_curr_prepare` —— 那是测试里才有的
+# 序列，测的是实现不是行为，所以它绿着、线上却空转。
 _pl56=$(SD_DATA=/tmp/qc56 SD_MODDIR=/opt/qc sh -c '
 getprop() { case "$1" in *) echo "" ;; esac; }
 . /opt/qc/lib/qc.sh
-sd_plat_resolve; _sd_curr_prepare
+_sd_curr_prepare
 a=$(printf "%s" "$_sd_curr_nodes" | wc -w | tr -d " ")
 getprop() { case "$1" in ro.soc.manufacturer) echo MediaTek ;; ro.board.platform) echo mt6993 ;; ro.hardware) echo mt6993 ;; *) echo "" ;; esac; }
-sd_plat_resolve; _sd_curr_prepare
+_sd_curr_prepare
 b=$(printf "%s" "$_sd_curr_nodes" | wc -w | tr -d " ")
 printf "%s %s" "$a" "$b"' 2>/dev/null)
+eq "${_pl56% *}" "10" "首轮 plat=other 时先按 10 个建表"
 eq "${_pl56#* }" "15" "平台从 other 认成 MTK 后候选表重算（10 → 15）"
+
+# ---------------------------------------------------------------- T57 env 覆盖层状态
+# 一加 15 那次「完全不生效」，只能靠「有没有那句未生效」反推 —— 因为 env 里没有
+# 可对照的数字。这四个字段就是给现场用的。
+rm -rf /tmp/qc57; mkdir -p /tmp/qc57
+printf 'log_level=2\n' >/tmp/qc57/state.conf
+SD_DATA=/tmp/qc57 SD_MODDIR=/opt/qc sh -c '. /opt/qc/lib/qc.sh; sd_state_load; sd_dump_env' >/dev/null 2>&1
+has "$(cat /tmp/qc57/log.txt 2>/dev/null)" "overrides=" "env 输出覆盖层状态（overrides/mounts/alive）"
 
 # 失败清单放在最后统一列一遍：滚动日志里翻不到的那几条，这里能一次看全
 if [ "$FAIL" -gt 0 ]; then

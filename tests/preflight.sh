@@ -139,6 +139,15 @@ nhas "$A/lib/qc.sh" "sd_limit_for_type_v" "无已删函数的孤儿调用"
 # 3.1.13 起 cool_tick 只读，注释里不该再讲「2.5A 闸」「去写 0」
 nhas "$A/src/qcmon.c" "2.5A 闸" "注释不再引用已删的降流闸"
 nhas "$A/src/qcmon.c" "g_tick_n % 20 == 1" "C 侧重探周期与 shell 对齐（每 4 轮）"
+# 3.1.16：覆盖层「内容相同 = 还挂着」这条误判必须彻底消失，否则改写无效会被
+# 伪装成一切正常（一加 15 现场就是这么被藏的）。
+has  "$A/lib/qc.sh" "sd_mounts_root_ok" "挂载存活改按 mountinfo root 判断"
+nhas "$A/lib/qc.sh" "sd_mounts_content_ok" "不再用「内容相同」当挂载证据"
+has  "$A/lib/qc.sh" "改写无差异" "改写产物与原件相同会告警"
+# post-fs-data 失败可观测：脚本逐阶段落痕，service 段读它并强制补建
+has  "$A/post-fs-data.sh" "qc_phase done" "post-fs-data 阶段落痕到 done"
+has  "$A/service.sh" "phase.pfs" "service 读 post-fs-data 痕迹"
+has  "$A/lib/qc.sh" "平台已认对" "候选表重建留痕"
 
 echo "[3] 版本号自洽"
 v_prop=$(sed -n 's/^version=//p' "$A/module.prop" | head -1)

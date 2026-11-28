@@ -910,8 +910,13 @@ static void plat_resolve(void)
     /* mtk/qcom 认出来就定死；other 多半是启动早期 getprop 还没就绪，不缓存，
      * 试满 8 次还是 other 才认命。与 shell 的 sd_plat_resolve 对齐。 */
     static int tries = 0;
+    static time_t t0 = 0;
     if (g_plat[0] && strcmp(g_plat, "other")) return;
-    if (tries >= 8) return;
+    /* 预算按时间窗，不按调用次数：curr_prepare 每 4 轮调一次，8 次大约一分钟
+     * 就烧完，启动早期 getprop 还没就绪就直接认命。与 shell 侧统一给 300 秒。 */
+    if (!t0) t0 = time(NULL);
+    if (time(NULL) - t0 >= 300) return;
+    if (tries >= 400) return;
     tries++;
     char b[128] = "";
     FILE *p = popen("getprop ro.soc.manufacturer 2>/dev/null", "r");
@@ -923,7 +928,9 @@ static void plat_resolve(void)
     if (p) { if (fgets(b, sizeof b, p)) {} pclose(p); }
     if (strstr(b, "mt") || strstr(b, "MT")) snprintf(g_plat, sizeof g_plat, "mtk");
     else if (strstr(b, "sm") || strstr(b, "msm") || strstr(b, "kona") ||
-             strstr(b, "taro") || strstr(b, "sun") || strstr(b, "pineapple"))
+             strstr(b, "taro") || strstr(b, "sun") || strstr(b, "pineapple") ||
+             strstr(b, "canoe") || strstr(b, "kalama") || strstr(b, "crow") ||
+             strstr(b, "alor"))
         snprintf(g_plat, sizeof g_plat, "qcom");
     else snprintf(g_plat, sizeof g_plat, "other");
 }
@@ -935,7 +942,11 @@ static void curr_prepare(void)
     /* 平台从 other 认对之后要重算：表只填一次，第一次填在启动早期会漏掉 MTK
      * 那 5 个节点，之后认对也不补 —— 8 次重试等于空转。与 shell 侧一致。 */
     if (g_curr_n && strcmp(g_curr_plat, g_plat) && strcmp(g_plat, "other")) {
-        if (!g_curr_plat[0] || !strcmp(g_curr_plat, "other")) g_curr_n = 0;
+        if (!g_curr_plat[0] || !strcmp(g_curr_plat, "other")) {
+            g_curr_n = 0;
+            /* 重建不留痕的话，日志里和「压根没重建」长得一样。 */
+            log_msg("I", "charge", "平台已认对（%s），候选表按新平台重算", g_plat);
+        }
     }
     if (g_curr_n) return;
     const char *base[] = {
@@ -1829,9 +1840,9 @@ static int screen_sample(void)
     if (g_fb_blank >= 0) return g_fb_blank;   /* blank 文件里 0 才是亮 */
     {
         static const char *fb_rel[] = {
-            "/sys/graphics/fb0/blank",
             "/sys/class/graphics/fb0/blank",
             "/sys/devices/virtual/graphics/fb0/blank",
+            "/sys/graphics/fb0/blank",       /* 少数 ROM 真的没有 class 这一层 */
             NULL
         };
         char q[MAXPATH];
@@ -2354,7 +2365,7 @@ static void paths_init(void)
             if (star) *star = 0;
         }
     }
-    rp("/sys/graphics/fb0/blank", g_fb, sizeof g_fb);
+    rp("/sys/class/graphics/fb0/blank", g_fb, sizeof g_fb);
     rp("/sys/class/oplus_chg/battery", g_oplus, sizeof g_oplus);
     rp("/proc/shell-temp", g_shellproc, sizeof g_shellproc);
 
@@ -2559,6 +2570,52 @@ static void getprop_v(const char *k, char *out, size_t n)
 /* 开启日志时一次性把「判断依据」写清：机型/内核/协议/屏幕/FCC。
  * 以前这些只在 daemon 启动时零散记一点，用户复现完导日志，
  * 还得回头问机型、节点、判定值，来回好几轮。 */
+/* 目录下递归数普通文件；打不开返回 -1。 */
+static int count_tree(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    int n = 0;
+    struct dirent *de;
+    char q[MAXPATH];
+    while ((de = readdir(d))) {
+        struct stat st;
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        snprintf(q, sizeof q, "%s/%s", dir, de->d_name);
+        if (lstat(q, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            int r = count_tree(q);
+            if (r > 0) n += r;
+        } else if (S_ISREG(st.st_mode)) {
+            n++;
+        }
+    }
+    closedir(d);
+    return n;
+}
+
+/* mountinfo 里 root 字段（第 4 列）以 prefix 开头的挂载条数。 */
+static int count_mounts_under(const char *prefix)
+{
+    FILE *f = fopen("/proc/self/mountinfo", "r");
+    if (!f) return -1;
+    char line[1200];
+    int n = 0;
+    size_t pl = strlen(prefix);
+    while (fgets(line, sizeof line, f)) {
+        int col = 0;
+        char *save = NULL;
+        for (char *t = strtok_r(line, " ", &save); t; t = strtok_r(NULL, " ", &save)) {
+            if (++col == 4) {
+                if (!strncmp(t, prefix, pl)) n++;
+                break;
+            }
+        }
+    }
+    fclose(f);
+    return n;
+}
+
 static void log_env(void)
 {
     char model[64], rom[64], soc[64], kver[64] = "";
@@ -2636,6 +2693,21 @@ static void log_env(void)
         } else {
             log_msg("I", "env", "cool_down=none（本机没有这个节点，不算失败）");
         }
+    }
+
+    /* 覆盖层状态：文件数 / 挂载条数 / 是否存活。一加 15 那次「完全不生效」
+     * 只能靠「有没有那句未生效」反推，因为 env 里没有可对照的数字。 */
+    {
+        char ov[MAXPATH], pre[MAXPATH + 2];
+        int ovn = 0, ovm = 0;
+        if (g_moddir[0]) {
+            snprintf(ov, sizeof ov, "%s/files", g_moddir);
+            ovn = count_tree(ov); if (ovn < 0) ovn = 0;
+            snprintf(pre, sizeof pre, "%s/files/", g_moddir);
+            ovm = count_mounts_under(pre); if (ovm < 0) ovm = 0;
+        }
+        log_msg("I", "env", "overrides=%d mounts=%d alive=%s",
+                ovn, ovm, ovn == 0 ? "-" : (ovm > 0 ? "yes" : "no"));
     }
 }
 
