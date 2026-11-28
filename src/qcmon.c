@@ -2695,19 +2695,33 @@ static void log_env(void)
         }
     }
 
-    /* 覆盖层状态：文件数 / 挂载条数 / 是否存活。一加 15 那次「完全不生效」
-     * 只能靠「有没有那句未生效」反推，因为 env 里没有可对照的数字。 */
+    /* 覆盖层状态：文件数 / 挂载条数 / 注入方式 / 是否存活。一加 15 那次
+     * 「完全不生效」只能靠「有没有那句未生效」反推，因为 env 里没有可对照的数字。
+     * nm= 与 shell 版 sd_dump_env 对齐：元模块激活时没有 bind mount，清单记在
+     * nm.list 里；这时候还按 ovm>0 判存活会打出 alive=no —— 明明注入成功了，
+     * 日志却说没生效，正好是这套字段要避免的那种误导。 */
     {
         char ov[MAXPATH], pre[MAXPATH + 2];
-        int ovn = 0, ovm = 0;
+        int ovn = 0, ovm = 0, nm = nm_or_mm_active(), alive;
         if (g_moddir[0]) {
             snprintf(ov, sizeof ov, "%s/files", g_moddir);
             ovn = count_tree(ov); if (ovn < 0) ovn = 0;
             snprintf(pre, sizeof pre, "%s/files/", g_moddir);
             ovm = count_mounts_under(pre); if (ovm < 0) ovm = 0;
         }
-        log_msg("I", "env", "overrides=%d mounts=%d alive=%s",
-                ovn, ovm, ovn == 0 ? "-" : (ovm > 0 ? "yes" : "no"));
+        if (nm) {
+            /* 与 sd_mounts_alive 的 nm 分支一致：nm.list 非空且 $MODDIR/system 存在 */
+            char nl[MAXPATH], nr[MAXPATH];
+            struct stat st;
+            snprintf(nl, sizeof nl, "%s/nm.list", g_data);
+            snprintf(nr, sizeof nr, "%s/system", g_moddir[0] ? g_moddir : "/nonexistent");
+            alive = count_lines(nl) > 0 && stat(nr, &st) == 0 && S_ISDIR(st.st_mode);
+        } else {
+            alive = ovm > 0;
+        }
+        log_msg("I", "env", "overrides=%d mounts=%d nm=%s alive=%s",
+                ovn, ovm, nm ? "nomount" : "bind",
+                ovn == 0 ? "-" : (alive ? "yes" : "no"));
     }
 }
 
